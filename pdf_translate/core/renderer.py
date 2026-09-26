@@ -39,60 +39,8 @@ _FONT_PATHS = [
 ]
 _FONT_PATH = next((p for p in _FONT_PATHS if os.path.exists(p)), None)
 
-# ── LaMa model (loaded lazily once) ───────────────────────────────────────────
-_LAMA_INPAINTER = None
-_MIT_PATH = os.path.join(
-    os.path.dirname(__file__),
-    "..", "manga_translator_source",
-    "manga-image-translator-main"
-)
-
-async def _get_lama():
-    global _LAMA_INPAINTER
-    import torch
-    device = "cuda" if torch.cuda.is_available() else "cpu"
-    
-    if _LAMA_INPAINTER is not None:
-        if hasattr(_LAMA_INPAINTER, 'model') and _LAMA_INPAINTER.model is not None:
-            _LAMA_INPAINTER.model = _LAMA_INPAINTER.model.to(device)
-        return _LAMA_INPAINTER
-
-    try:
-        sys.path.insert(0, os.path.abspath(_MIT_PATH))
-        from manga_translator.inpainting import get_inpainter
-        
-        if device == "cuda":
-            logger.info("⚡ [Renderer] Running LaMa inpainting on NVIDIA GPU (CUDA).")
-        elif hasattr(torch, "xpu") and torch.xpu.is_available():
-            device = "xpu"
-            logger.info("⚡ [Renderer] Offloading LaMa inpainting to Intel iGPU (XPU).")
-        elif hasattr(torch, "backends") and hasattr(torch.backends, "mps") and torch.backends.mps.is_available():
-            device = "mps"
-            logger.info("⚡ [Renderer] Offloading LaMa inpainting to Apple Silicon (MPS).")
-        else:
-            device = "cpu"
-            logger.info("⚡ [Renderer] Running LaMa inpainting on CPU.")
-
-        inpainter = get_inpainter("lama_large")
-        
-        # Native async load without event loop conflict
-        await inpainter.load(device)
-        
-        _LAMA_INPAINTER = inpainter
-        logger.info(f"[✓] LaMa Large inpainting model loaded natively on {device}.")
-        print(f"[✓] LaMa Large inpainting model ready on {device}.")
-    except Exception as e:
-        logger.warning(f"[!] LaMa load failed natively ({e}), falling back to PIL background-sampling.")
-        _LAMA_INPAINTER = None
-    return _LAMA_INPAINTER
-
 def unload_models():
-    """Moves PyTorch LaMa models from VRAM to CPU RAM (shared memory) for instant reload later."""
-    global _LAMA_INPAINTER
-    if _LAMA_INPAINTER is not None:
-        if hasattr(_LAMA_INPAINTER, 'model') and _LAMA_INPAINTER.model is not None:
-            _LAMA_INPAINTER.model = _LAMA_INPAINTER.model.to('cpu')
-            
+    """Cleans up memory/cache if needed."""
     try:
         import torch
         if torch.cuda.is_available():
@@ -220,7 +168,7 @@ def _fast_telea_inpaint(img_pil: Image.Image, mask_pil: Image.Image) -> Image.Im
     Lightning-fast, texture-preserving inpainting using OpenCV Telea diffusion.
     - Zero heavy neural dependencies
     - <15ms execution time
-    - Flawlessly diffuses screentones, line art, shading, and background textures (e.g. coins)
+    - Flawlessly diffuses screentones, line art, shading, and background textures
     """
     img_np = np.array(img_pil.convert("RGB"))
     mask_np = np.array(mask_pil.convert("L"))
@@ -231,132 +179,59 @@ def _fast_telea_inpaint(img_pil: Image.Image, mask_pil: Image.Image) -> Image.Im
         return img_pil
 
     img_bgr = cv2.cvtColor(img_np, cv2.COLOR_RGB2BGR)
-    inpainted_bgr = cv2.inpaint(img_bgr, mask_bin, inpaintRadius=3, flags=cv2.INPAINT_TELEA)
+    inpainted_bgr = cv2.inpaint(img_bgr, mask_bin, inpaintRadius=4, flags=cv2.INPAINT_TELEA)
     inpainted_rgb = cv2.cvtColor(inpainted_bgr, cv2.COLOR_BGR2RGB)
     return Image.fromarray(inpainted_rgb)
 
 
-async def _lama_inpaint_image(img_pil: Image.Image, mask_pil: Image.Image) -> Image.Image:
-    """Run LaMa inpainting with correct InpainterConfig parameters natively, with instant Telea fallback."""
-    inpainter = await _get_lama()
-    if inpainter is None:
-        return _fast_telea_inpaint(img_pil, mask_pil)
-    try:
-        sys.path.insert(0, os.path.abspath(_MIT_PATH))
-        from manga_translator.config import InpainterConfig
-        config = InpainterConfig()
-        
-        img_np = np.array(img_pil.convert("RGB"))
-        mask_np = np.array(mask_pil.convert("L"))
-
-        # Optimize inpainting resolution to 720 to reduce VRAM load and accelerate processing
-        result = await inpainter.inpaint(img_np, mask_np, config, 720, False)
-
-        if isinstance(result, np.ndarray):
-            return Image.fromarray(result.astype(np.uint8))
-        return img_pil
-    except Exception as e:
-        logger.warning(f"[!] LaMa inpainting error: {e}. Falling back to OpenCV Telea diffusion.")
-        return _fast_telea_inpaint(img_pil, mask_pil)
-
-
-def _fallback_fill(img_pil: Image.Image, mask_pil: Image.Image) -> Image.Image:
-    """Fallback: inpaint masked regions with OpenCV Telea diffusion to preserve background textures."""
-    return _fast_telea_inpaint(img_pil, mask_pil)
-
-
-def _is_pure_solid_bubble(crop_rgb: np.ndarray) -> tuple:
+def _create_stroke_mask(crop_rgb: np.ndarray) -> tuple:
     """
-    Ultra-strict validation: returns (True, bg_color_rgb) ONLY IF the crop
-    is mathematically proven to be a flat, solid white/light or monochrome speech bubble.
-    If there are character drawings, halftones, textures, or gradients, returns (False, None).
-    """
-    if crop_rgb.shape[0] < 8 or crop_rgb.shape[1] < 8:
-        return False, (255, 255, 255)
-        
-    top = crop_rgb[0, :]
-    bottom = crop_rgb[-1, :]
-    left = crop_rgb[:, 0]
-    right = crop_rgb[:, -1]
-    border_pixels = np.concatenate([top, bottom, left, right], axis=0).astype(np.float32)
-    
-    mean_rgb = np.mean(border_pixels, axis=0)
-    std_rgb = np.std(border_pixels, axis=0)
-    max_std = float(np.max(std_rgb))
-    
-    # Condition 1: Perimeter must be exceptionally uniform (standard deviation < 4.0)
-    if max_std > 4.0:
-        return False, (255, 255, 255)
-        
-    lum = 0.299 * mean_rgb[0] + 0.587 * mean_rgb[1] + 0.114 * mean_rgb[2]
-    # Condition 2: Background must be standard bright bubble (> 242) or solid dark bubble (< 15)
-    if not (lum > 242.0 or lum < 15.0):
-        return False, (255, 255, 255)
-        
-    # Condition 3: Check interior non-text background ratio
-    diff = np.max(np.abs(crop_rgb.astype(np.float32) - mean_rgb), axis=2)
-    bg_mask = diff < 15.0
-    bg_ratio = np.count_nonzero(bg_mask) / float(crop_rgb.shape[0] * crop_rgb.shape[1])
-    
-    if bg_ratio < 0.50:
-        return False, (255, 255, 255)
-        
-    bg_color = (int(round(mean_rgb[0])), int(round(mean_rgb[1])), int(round(mean_rgb[2])))
-    return True, bg_color
-
-
-def _create_stroke_mask(crop_rgb: np.ndarray) -> np.ndarray:
-    """
-    Extracts text stroke contours (glyph pixels) instead of a blunt rectangle.
-    Preserves character art, hair strands, and background textures behind text.
+    Extracts precise text stroke contours (glyph pixels) instead of a blunt rectangle.
+    Suppresses manga halftone/screentone noise and completely eliminates ghost character edges.
+    Returns: (mask_np, bg_val)
     """
     h, w = crop_rgb.shape[:2]
     if h < 4 or w < 4:
-        return np.zeros((h, w), dtype=np.uint8)
+        return np.zeros((h, w), dtype=np.uint8), 255.0
         
     gray = cv2.cvtColor(crop_rgb, cv2.COLOR_RGB2GRAY)
     
-    # Sample border pixels to detect whether text is darker or lighter than background
-    top = gray[0, :]
-    bottom = gray[-1, :]
-    left = gray[:, 0]
-    right = gray[:, -1]
-    border_vals = np.concatenate([top, bottom, left, right])
-    bg_level = float(np.median(border_vals))
+    # 1. Edge/Border background estimation using median (robust against bubble line intersection)
+    border = np.concatenate([gray[0, :], gray[-1, :], gray[:, 0], gray[:, -1]])
+    bg_val = float(np.median(border))
     
-    if bg_level >= 120:
-        # Dark text on lighter background
-        thresh = cv2.adaptiveThreshold(
-            gray, 255, cv2.ADAPTIVE_THRESH_GAUSSIAN_C,
-            cv2.THRESH_BINARY_INV, 15, 7
-        )
+    # 2. Suppress halftone screentone dots and mosquito noise
+    blurred = cv2.GaussianBlur(gray, (3, 3), 0)
+    
+    if bg_val >= 160:
+        # Light background (speech bubble or bright scene)
+        # Real text ink is distinctly darker than background
+        thresh_val = min(bg_val - 30, 175)
+        mask = (blurred < thresh_val).astype(np.uint8) * 255
+    elif bg_val <= 90:
+        # Dark background (night scene, black bubble, dark panel)
+        # Real text ink is distinctly lighter than background
+        thresh_val = max(bg_val + 30, 115)
+        mask = (blurred > thresh_val).astype(np.uint8) * 255
     else:
-        # Light text on dark background
-        thresh = cv2.adaptiveThreshold(
-            gray, 255, cv2.ADAPTIVE_THRESH_GAUSSIAN_C,
-            cv2.THRESH_BINARY, 15, 7
-        )
-        
-    # Dilate text strokes slightly (2px) to safely cover character edges & anti-aliasing
-    kernel = cv2.getStructuringElement(cv2.MORPH_ELLIPSE, (3, 3))
-    dilated = cv2.dilate(thresh, kernel, iterations=1)
+        # Midtone background (shading, textured drawing)
+        # Use Otsu on the contrast to cleanly separate glyphs from screentones
+        _, otsu = cv2.threshold(blurred, 0, 255, cv2.THRESH_BINARY_INV + cv2.THRESH_OTSU)
+        mask = otsu
+
+    # 3. Filter out isolated tiny dots (halftone speckles < 4px)
+    clean_kernel = cv2.getStructuringElement(cv2.MORPH_RECT, (2, 2))
+    cleaned_mask = cv2.morphologyEx(mask, cv2.MORPH_OPEN, clean_kernel)
+    
+    # 4. Dilate text strokes with 2 iterations (3x3 ellipse) to safely cover anti-aliased character edges
+    dilate_kernel = cv2.getStructuringElement(cv2.MORPH_ELLIPSE, (3, 3))
+    dilated = cv2.dilate(cleaned_mask, dilate_kernel, iterations=2)
     
     stroke_ratio = np.count_nonzero(dilated) / float(h * w)
-    if 0.01 <= stroke_ratio <= 0.75:
-        return dilated
-
-    # If adaptive threshold was too sparse or too dense, use Otsu thresholding
-    _, otsu = cv2.threshold(
-        gray, 0, 255,
-        (cv2.THRESH_BINARY_INV if bg_level >= 120 else cv2.THRESH_BINARY) + cv2.THRESH_OTSU
-    )
-    otsu_dilated = cv2.dilate(otsu, kernel, iterations=1)
-    otsu_ratio = np.count_nonzero(otsu_dilated) / float(h * w)
-    if 0.01 <= otsu_ratio <= 0.75:
-        return otsu_dilated
+    if 0.005 <= stroke_ratio <= 0.85:
+        return dilated, bg_val
         
-    # Never return a full solid rectangle (which would stamp a flat box over textures)
-    return dilated
+    return mask, bg_val
 
 
 # ── Main Renderer Class ────────────────────────────────────────────────────────
@@ -367,7 +242,7 @@ class PDFLayoutRenderer:
 
     async def render_single_page_to_temp(self, page_data, src_page, translated_text_map, temp_dir, sem):
         """
-        Renders a single page using LaMa / CJK text layout, saving it to a temp JPEG file.
+        Renders a single page using high-fidelity inpainting and CJK text layout, saving it to a temp JPEG file.
         Returns the path to the temp JPEG file.
         """
         page_num = page_data["page_num"]
@@ -382,7 +257,7 @@ class PDFLayoutRenderer:
         # 2. Build precision mask and fast-fill flat bubbles
         img_np = np.array(img)
         mask_np = np.zeros((img.height, img.width), dtype=np.uint8)
-        has_lama_masks = False
+        has_inpaint_masks = False
 
         blocks_to_render = []
         for block in page_data["blocks"]:
@@ -401,17 +276,19 @@ class PDFLayoutRenderer:
                 continue
 
             crop_rgb = img_np[py0:py1, px0:px1]
-            is_flat, flat_bg = _is_pure_solid_bubble(crop_rgb)
+            stroke_mask, bg_val = _create_stroke_mask(crop_rgb)
 
-            if is_flat:
-                # 100% verified solid bubble: fast-fill without neural LaMa
-                cv2.rectangle(img_np, (px0, py0), (px1, py1), flat_bg, -1)
+            # In clean speech bubbles (bright white >= 220 or pure dark <= 25):
+            # Fill only the text strokes with pure background color!
+            # This completely avoids clipping the speech bubble's black outline.
+            is_bubble = (bg_val >= 220.0 or bg_val <= 25.0)
+            if is_bubble:
+                fill_color = (int(bg_val), int(bg_val), int(bg_val))
+                crop_rgb[stroke_mask > 0] = fill_color
             else:
-                # Complex background / text on characters / screentones:
-                # Extract stroke-level mask and route to neural LaMa
-                stroke_mask = _create_stroke_mask(crop_rgb)
+                # Textured background, screentone, illustration: route to Telea diffusion
                 mask_np[py0:py1, px0:px1] = np.maximum(mask_np[py0:py1, px0:px1], stroke_mask)
-                has_lama_masks = True
+                has_inpaint_masks = True
 
             blocks_to_render.append((px0, py0, px1, py1, translated, block))
 
@@ -420,11 +297,11 @@ class PDFLayoutRenderer:
         if not blocks_to_render:
             img.save(temp_path, format="JPEG", quality=80, optimize=True)
         else:
-            if has_lama_masks:
+            if has_inpaint_masks:
                 img_pil = Image.fromarray(img_np)
                 mask_pil = Image.fromarray(mask_np)
                 async with sem:
-                    healed = await _lama_inpaint_image(img_pil, mask_pil)
+                    healed = _fast_telea_inpaint(img_pil, mask_pil)
             else:
                 healed = Image.fromarray(img_np)
 
