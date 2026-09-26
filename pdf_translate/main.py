@@ -230,8 +230,8 @@ async def translation_worker():
             
             renderer = PDFLayoutRenderer(pdf_path, None)
             
-            # Semaphore to restrict GPU inpainting to 3 concurrent tasks to prevent VRAM OOM
-            render_sem = asyncio.Semaphore(3)
+            # Semaphore to restrict GPU inpainting to 1 concurrent task to guarantee 4GB VRAM safety
+            render_sem = asyncio.Semaphore(1)
             render_tasks = {}
             src_doc = fitz.open(pdf_path)
             

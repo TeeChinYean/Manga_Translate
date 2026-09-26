@@ -12,6 +12,7 @@ Pipeline per page:
 
 import os
 import sys
+import cv2
 import numpy as np
 import logging
 import fitz  # PyMuPDF
@@ -250,6 +251,89 @@ def _fallback_fill(img_pil: Image.Image, mask_pil: Image.Image) -> Image.Image:
     return img
 
 
+def _is_pure_solid_bubble(crop_rgb: np.ndarray) -> tuple:
+    """
+    Ultra-strict validation: returns (True, bg_color_rgb) ONLY IF the crop
+    is mathematically proven to be a flat, solid white/light or monochrome speech bubble.
+    If there are character drawings, halftones, textures, or gradients, returns (False, None).
+    """
+    if crop_rgb.shape[0] < 8 or crop_rgb.shape[1] < 8:
+        return False, (255, 255, 255)
+        
+    top = crop_rgb[0, :]
+    bottom = crop_rgb[-1, :]
+    left = crop_rgb[:, 0]
+    right = crop_rgb[:, -1]
+    border_pixels = np.concatenate([top, bottom, left, right], axis=0).astype(np.float32)
+    
+    mean_rgb = np.mean(border_pixels, axis=0)
+    std_rgb = np.std(border_pixels, axis=0)
+    max_std = float(np.max(std_rgb))
+    
+    # Condition 1: Perimeter must be exceptionally uniform (standard deviation < 4.0)
+    if max_std > 4.0:
+        return False, (255, 255, 255)
+        
+    lum = 0.299 * mean_rgb[0] + 0.587 * mean_rgb[1] + 0.114 * mean_rgb[2]
+    # Condition 2: Background must be standard bright bubble (> 242) or solid dark bubble (< 15)
+    if not (lum > 242.0 or lum < 15.0):
+        return False, (255, 255, 255)
+        
+    # Condition 3: Check interior non-text background ratio
+    diff = np.max(np.abs(crop_rgb.astype(np.float32) - mean_rgb), axis=2)
+    bg_mask = diff < 15.0
+    bg_ratio = np.count_nonzero(bg_mask) / float(crop_rgb.shape[0] * crop_rgb.shape[1])
+    
+    if bg_ratio < 0.50:
+        return False, (255, 255, 255)
+        
+    bg_color = (int(round(mean_rgb[0])), int(round(mean_rgb[1])), int(round(mean_rgb[2])))
+    return True, bg_color
+
+
+def _create_stroke_mask(crop_rgb: np.ndarray) -> np.ndarray:
+    """
+    Extracts text stroke contours (glyph pixels) instead of a blunt rectangle.
+    Preserves character art, hair strands, and background textures behind text.
+    """
+    h, w = crop_rgb.shape[:2]
+    if h < 4 or w < 4:
+        return np.full((h, w), 255, dtype=np.uint8)
+        
+    gray = cv2.cvtColor(crop_rgb, cv2.COLOR_RGB2GRAY)
+    
+    # Sample border pixels to detect whether text is darker or lighter than background
+    top = gray[0, :]
+    bottom = gray[-1, :]
+    left = gray[:, 0]
+    right = gray[:, -1]
+    border_vals = np.concatenate([top, bottom, left, right])
+    bg_level = float(np.median(border_vals))
+    
+    if bg_level >= 120:
+        # Dark text on lighter background
+        thresh = cv2.adaptiveThreshold(
+            gray, 255, cv2.ADAPTIVE_THRESH_GAUSSIAN_C,
+            cv2.THRESH_BINARY_INV, 15, 7
+        )
+    else:
+        # Light text on dark background
+        thresh = cv2.adaptiveThreshold(
+            gray, 255, cv2.ADAPTIVE_THRESH_GAUSSIAN_C,
+            cv2.THRESH_BINARY, 15, 7
+        )
+        
+    # Dilate text strokes slightly (2px) to safely cover character edges & anti-aliasing
+    kernel = cv2.getStructuringElement(cv2.MORPH_ELLIPSE, (3, 3))
+    dilated = cv2.dilate(thresh, kernel, iterations=1)
+    
+    stroke_ratio = np.count_nonzero(dilated) / float(h * w)
+    if 0.02 <= stroke_ratio <= 0.85:
+        return dilated
+    else:
+        return np.full((h, w), 255, dtype=np.uint8)
+
+
 # ── Main Renderer Class ────────────────────────────────────────────────────────
 class PDFLayoutRenderer:
     def __init__(self, original_pdf_path, output_pdf_path=None):
@@ -270,9 +354,10 @@ class PDFLayoutRenderer:
         pix = src_page.get_pixmap(matrix=mat, alpha=False)
         img = Image.frombytes("RGB", [pix.width, pix.height], pix.samples)
 
-        # 2. Build mask for blocks that have translations
-        mask = Image.new("L", img.size, 0)
-        mask_draw = ImageDraw.Draw(mask)
+        # 2. Build precision mask and fast-fill flat bubbles
+        img_np = np.array(img)
+        mask_np = np.zeros((img.height, img.width), dtype=np.uint8)
+        has_lama_masks = False
 
         blocks_to_render = []
         for block in page_data["blocks"]:
@@ -282,15 +367,27 @@ class PDFLayoutRenderer:
                 continue
 
             bx0, by0, bx1, by1 = block["bbox"]
-            px0 = int(bx0 * SCALE)
-            py0 = int(by0 * SCALE)
-            px1 = int(bx1 * SCALE)
-            py1 = int(by1 * SCALE)
-            pad = 3
-            mask_draw.rectangle(
-                [px0 - pad, py0 - pad, px1 + pad, py1 + pad],
-                fill=255
-            )
+            px0 = max(0, min(img.width - 1, int(bx0 * SCALE)))
+            py0 = max(0, min(img.height - 1, int(by0 * SCALE)))
+            px1 = max(0, min(img.width, int(bx1 * SCALE)))
+            py1 = max(0, min(img.height, int(by1 * SCALE)))
+            
+            if px1 <= px0 or py1 <= py0:
+                continue
+
+            crop_rgb = img_np[py0:py1, px0:px1]
+            is_flat, flat_bg = _is_pure_solid_bubble(crop_rgb)
+
+            if is_flat:
+                # 100% verified solid bubble: fast-fill without neural LaMa
+                cv2.rectangle(img_np, (px0, py0), (px1, py1), flat_bg, -1)
+            else:
+                # Complex background / text on characters / screentones:
+                # Extract stroke-level mask and route to neural LaMa
+                stroke_mask = _create_stroke_mask(crop_rgb)
+                mask_np[py0:py1, px0:px1] = np.maximum(mask_np[py0:py1, px0:px1], stroke_mask)
+                has_lama_masks = True
+
             blocks_to_render.append((px0, py0, px1, py1, translated, block))
 
         temp_path = os.path.join(temp_dir, f"page_{page_num}.jpg")
@@ -298,8 +395,13 @@ class PDFLayoutRenderer:
         if not blocks_to_render:
             img.save(temp_path, format="JPEG", quality=80, optimize=True)
         else:
-            async with sem:
-                healed = await _lama_inpaint_image(img, mask)
+            if has_lama_masks:
+                img_pil = Image.fromarray(img_np)
+                mask_pil = Image.fromarray(mask_np)
+                async with sem:
+                    healed = await _lama_inpaint_image(img_pil, mask_pil)
+            else:
+                healed = Image.fromarray(img_np)
 
             # Draw CJK text
             draw = ImageDraw.Draw(healed)
@@ -373,7 +475,7 @@ class PDFLayoutRenderer:
         # Create a temp directory for page JPEGs
         temp_dir = tempfile.mkdtemp(prefix="pdf_render_")
         
-        sem = asyncio.Semaphore(3)
+        sem = asyncio.Semaphore(1)
         progress_count = 0
         progress_lock = asyncio.Lock()
         
