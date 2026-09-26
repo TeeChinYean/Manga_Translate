@@ -1,0 +1,80 @@
+[
+  {
+    "src": "system",
+    "tgt": "系统",
+    "lang": "English",
+    "domain": "IT"
+  },
+  {
+    "src": "neural network",
+    "tgt": "神经网络",
+    "lang": "English",
+    "domain": "AI"
+  },
+  {
+    "src": "speculative decoding",
+    "tgt": "投机解码",
+    "lang": "English",
+    "domain": "AI"
+  },
+  {
+    "src": "layout preservation",
+    "tgt": "布局保真",
+    "lang": "English",
+    "domain": "PDF"
+  },
+  {
+    "src": "tensorrt",
+    "tgt": "TensorRT加速引擎",
+    "lang": "English",
+    "domain": "Inference"
+  },
+  {
+    "src": "dompet digital",
+    "tgt": "电子钱包",
+    "lang": "Malay",
+    "domain": "Finance"
+  },
+  {
+    "src": "pembayaran mudah",
+    "tgt": "便捷支付",
+    "lang": "Malay",
+    "domain": "Finance"
+  },
+  {
+    "src": "pengguna aktif",
+    "tgt": "活跃用户",
+    "lang": "Malay",
+    "domain": "Business"
+  },
+  {
+    "src": "kempen pemasaran",
+    "tgt": "营销活动",
+    "lang": "Malay",
+    "domain": "Marketing"
+  },
+  {
+    "src": "人工知能",
+    "tgt": "人工智能",
+    "lang": "Japanese",
+    "domain": "AI"
+  },
+  {
+    "src": "深層学習",
+    "tgt": "深度学习",
+    "lang": "Japanese",
+    "domain": "AI"
+  },
+  {
+    "src": "レイアウト保存",
+    "tgt": "布局保留",
+    "lang": "Japanese",
+    "domain": "PDF"
+  },
+  {
+    "src": "翻訳エンジン",
+    "tgt": "翻译引擎",
+    "lang": "Japanese",
+    "domain": "Translation"
+  }
+]

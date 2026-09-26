@@ -1,0 +1,30 @@
+{
+  "engine_name": "qwen_2.5_1.5b_awq",
+  "base_model": "Qwen/Qwen2.5-1.5B-Instruct-AWQ",
+  "draft_model": "Qwen/Qwen2.5-0.5B-Instruct-AWQ",
+  "max_batch_size": 8,
+  "max_input_len": 2048,
+  "max_output_len": 1024,
+  "scheduling_policy": "static",
+  "quantization": {
+    "quant_algo": "W4A16_AWQ",
+    "group_size": 128
+  },
+  "runtime_optimizations": {
+    "flash_infer_attention": true,
+    "paged_kv_cache": {
+      "enable": true,
+      "block_size": 16,
+      "gpu_memory_fraction": 0.85
+    },
+    "cuda_graphs": {
+      "enable": true,
+      "warmup_steps": 5
+    },
+    "speculative_decoding": {
+      "enable": true,
+      "draft_len": 4,
+      "acceptance_threshold": 0.85
+    }
+  }
+}

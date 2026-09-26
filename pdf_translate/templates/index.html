@@ -1,0 +1,939 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title> PDF 翻译</title>
+    <!-- Google Fonts -->
+    <link
+        href="https://fonts.googleapis.com/css2?family=Inter:wght@300;400;500;600;700&family=Outfit:wght@400;500;600;700;800&family=Fira+Code:wght@400;500&display=swap"
+        rel="stylesheet">
+    <style>
+        :root {
+            --bg-color: #08090d;
+            --card-bg: rgba(18, 20, 29, 0.65);
+            --border-color: rgba(255, 255, 255, 0.08);
+            --text-primary: #f3f4f6;
+            --text-secondary: #9ca3af;
+            --accent-indigo: #6366f1;
+            --accent-emerald: #10b981;
+            --accent-purple: #8b5cf6;
+            --glow-indigo: rgba(99, 102, 241, 0.15);
+            --glow-emerald: rgba(16, 185, 129, 0.15);
+        }
+
+        * {
+            box-sizing: border-box;
+            margin: 0;
+            padding: 0;
+        }
+
+        body {
+            font-family: 'Inter', sans-serif;
+            background-color: var(--bg-color);
+            background-image:
+                radial-gradient(circle at 10% 20%, rgba(99, 102, 241, 0.08) 0%, transparent 40%),
+                radial-gradient(circle at 90% 80%, rgba(139, 92, 246, 0.08) 0%, transparent 40%);
+            color: var(--text-primary);
+            min-height: 100vh;
+            overflow-x: hidden;
+            display: flex;
+            flex-direction: column;
+            align-items: center;
+        }
+
+        /* Container & Grid Layout */
+        .app-container {
+            width: 100%;
+            max-width: 1280px;
+            padding: 40px 24px;
+            display: flex;
+            flex-direction: column;
+            gap: 32px;
+        }
+
+        /* Header Style */
+        header {
+            display: flex;
+            justify-content: space-between;
+            align-items: center;
+            padding-bottom: 20px;
+            border-bottom: 1px solid var(--border-color);
+        }
+
+        .logo-section {
+            display: flex;
+            flex-direction: column;
+            gap: 6px;
+        }
+
+        .logo-title {
+            font-family: 'Outfit', sans-serif;
+            font-size: 2.2rem;
+            font-weight: 800;
+            background: linear-gradient(135deg, #a5b4fc 0%, var(--accent-indigo) 50%, var(--accent-purple) 100%);
+            -webkit-background-clip: text;
+            -webkit-text-fill-color: transparent;
+            letter-spacing: -1px;
+            display: flex;
+            align-items: center;
+            gap: 10px;
+        }
+
+        .logo-title span.badge {
+            font-size: 0.75rem;
+            font-weight: 600;
+            padding: 4px 10px;
+            border-radius: 99px;
+            background: rgba(99, 102, 241, 0.15);
+            border: 1px solid rgba(99, 102, 241, 0.3);
+            color: #c7d2fe;
+            letter-spacing: 0.5px;
+            text-transform: uppercase;
+        }
+
+        .logo-tagline {
+            font-size: 0.95rem;
+            color: var(--text-secondary);
+            font-weight: 300;
+        }
+
+        .status-badge {
+            display: flex;
+            align-items: center;
+            gap: 8px;
+            padding: 8px 16px;
+            border-radius: 12px;
+            background: rgba(16, 185, 129, 0.1);
+            border: 1px solid rgba(16, 185, 129, 0.2);
+            font-size: 0.85rem;
+            font-weight: 500;
+            color: var(--accent-emerald);
+        }
+
+        .pulse-dot {
+            width: 8px;
+            height: 8px;
+            border-radius: 50%;
+            background-color: var(--accent-emerald);
+            animation: pulse 2s infinite;
+        }
+
+        @keyframes pulse {
+            0% {
+                transform: scale(0.9);
+                opacity: 0.4;
+            }
+
+            50% {
+                transform: scale(1.2);
+                opacity: 1;
+                box-shadow: 0 0 10px var(--accent-emerald);
+            }
+
+            100% {
+                transform: scale(0.9);
+                opacity: 0.4;
+            }
+        }
+
+        /* Main Workspace Grid */
+        .workspace-grid {
+            display: grid;
+            grid-template-columns: 420px 1fr;
+            gap: 32px;
+        }
+
+        @media (max-width: 1024px) {
+            .workspace-grid {
+                grid-template-columns: 1fr;
+            }
+        }
+
+        /* Glassmorphic Panel Card */
+        .glass-card {
+            background: var(--card-bg);
+            backdrop-filter: blur(20px);
+            -webkit-backdrop-filter: blur(20px);
+            border: 1px solid var(--border-color);
+            border-radius: 24px;
+            padding: 32px;
+            display: flex;
+            flex-direction: column;
+            gap: 24px;
+            box-shadow: 0 12px 40px rgba(0, 0, 0, 0.3);
+            transition: all 0.3s cubic-bezier(0.4, 0, 0.2, 1);
+        }
+
+        .glass-card:hover {
+            border-color: rgba(99, 102, 241, 0.25);
+            box-shadow: 0 16px 48px rgba(99, 102, 241, 0.05);
+        }
+
+        .card-header {
+            display: flex;
+            flex-direction: column;
+            gap: 6px;
+        }
+
+        .card-title {
+            font-family: 'Outfit', sans-serif;
+            font-size: 1.3rem;
+            font-weight: 700;
+            color: var(--text-primary);
+        }
+
+        .card-desc {
+            font-size: 0.85rem;
+            color: var(--text-secondary);
+            font-weight: 300;
+        }
+
+        /* Interactive Upload Zone */
+        .upload-zone {
+            border: 2px dashed rgba(255, 255, 255, 0.12);
+            border-radius: 16px;
+            padding: 40px 20px;
+            display: flex;
+            flex-direction: column;
+            align-items: center;
+            justify-content: center;
+            gap: 16px;
+            cursor: pointer;
+            background: rgba(255, 255, 255, 0.02);
+            transition: all 0.3s ease;
+            position: relative;
+            overflow: hidden;
+        }
+
+        .upload-zone:hover {
+            border-color: var(--accent-indigo);
+            background: rgba(99, 102, 241, 0.03);
+            box-shadow: 0 0 20px var(--glow-indigo);
+        }
+
+        .upload-icon {
+            font-size: 3rem;
+            background: linear-gradient(135deg, var(--accent-indigo), var(--accent-purple));
+            -webkit-background-clip: text;
+            -webkit-text-fill-color: transparent;
+            transition: transform 0.3s ease;
+        }
+
+        .upload-zone:hover .upload-icon {
+            transform: translateY(-5px);
+        }
+
+        .upload-text {
+            font-size: 0.95rem;
+            font-weight: 500;
+            color: var(--text-primary);
+            text-align: center;
+        }
+
+        .upload-hint {
+            font-size: 0.8rem;
+            color: var(--text-secondary);
+            text-align: center;
+        }
+
+        #fileInput {
+            display: none;
+        }
+
+        /* Language Select Controls */
+        .control-group {
+            display: flex;
+            flex-direction: column;
+            gap: 10px;
+        }
+
+        label {
+            font-size: 0.85rem;
+            font-weight: 600;
+            color: var(--text-primary);
+            text-transform: uppercase;
+            letter-spacing: 1px;
+        }
+
+        select {
+            background: rgba(255, 255, 255, 0.05);
+            border: 1px solid rgba(255, 255, 255, 0.12);
+            border-radius: 12px;
+            padding: 14px 18px;
+            color: var(--text-primary);
+            font-size: 0.95rem;
+            outline: none;
+            cursor: pointer;
+            transition: all 0.2s ease;
+            width: 100%;
+        }
+
+        select:focus {
+            border-color: var(--accent-indigo);
+            box-shadow: 0 0 12px var(--glow-indigo);
+        }
+
+        /* Action Buttons */
+        .btn {
+            background: linear-gradient(135deg, var(--accent-indigo) 0%, var(--accent-purple) 100%);
+            border: none;
+            border-radius: 14px;
+            padding: 16px 28px;
+            color: #ffffff;
+            font-size: 1rem;
+            font-weight: 600;
+            cursor: pointer;
+            transition: all 0.3s ease;
+            box-shadow: 0 4px 15px rgba(99, 102, 241, 0.25);
+            display: flex;
+            align-items: center;
+            justify-content: center;
+            gap: 10px;
+        }
+
+        .btn:hover {
+            transform: translateY(-2px);
+            box-shadow: 0 6px 20px rgba(99, 102, 241, 0.4);
+            filter: brightness(1.1);
+        }
+
+        .btn:active {
+            transform: translateY(0);
+        }
+
+        .btn:disabled {
+            background: rgba(255, 255, 255, 0.1);
+            color: rgba(255, 255, 255, 0.3);
+            box-shadow: none;
+            cursor: not-allowed;
+            transform: none;
+        }
+
+        /* Performance Analytics Panel */
+        .metrics-grid {
+            display: grid;
+            grid-template-columns: repeat(3, 1fr);
+            gap: 20px;
+        }
+
+        @media (max-width: 640px) {
+            .metrics-grid {
+                grid-template-columns: 1fr;
+            }
+        }
+
+        .metric-card {
+            background: rgba(255, 255, 255, 0.02);
+            border: 1px solid rgba(255, 255, 255, 0.06);
+            border-radius: 16px;
+            padding: 20px;
+            display: flex;
+            flex-direction: column;
+            gap: 8px;
+            transition: all 0.3s ease;
+        }
+
+        .metric-card:hover {
+            border-color: rgba(16, 185, 129, 0.2);
+            background: rgba(16, 185, 129, 0.01);
+        }
+
+        .metric-label {
+            font-size: 0.75rem;
+            font-weight: 600;
+            color: var(--text-secondary);
+            text-transform: uppercase;
+            letter-spacing: 0.5px;
+        }
+
+        .metric-value {
+            font-family: 'Outfit', sans-serif;
+            font-size: 1.8rem;
+            font-weight: 800;
+            color: var(--text-primary);
+        }
+
+        .metric-value.speed {
+            color: var(--accent-emerald);
+        }
+
+        .metric-value.rate {
+            color: var(--accent-purple);
+        }
+
+        .metric-value.time {
+            color: var(--accent-indigo);
+        }
+
+        /* SSE Kernel Shell Output */
+        .console-panel {
+            background: #040508;
+            border: 1px solid rgba(255, 255, 255, 0.08);
+            border-radius: 16px;
+            padding: 24px;
+            font-family: 'Fira Code', monospace;
+            font-size: 0.85rem;
+            color: #10b981;
+            /* terminal green */
+            height: 280px;
+            overflow-y: auto;
+            display: flex;
+            flex-direction: column;
+            gap: 8px;
+            box-shadow: inset 0 4px 20px rgba(0, 0, 0, 0.8);
+        }
+
+        .console-line {
+            line-height: 1.5;
+            display: flex;
+            gap: 12px;
+        }
+
+        .console-line .timestamp {
+            color: #4b5563;
+            user-select: none;
+        }
+
+        .console-line.info {
+            color: #34d399;
+        }
+
+        .console-line.warn {
+            color: #f59e0b;
+        }
+
+        .console-line.err {
+            color: #ef4444;
+        }
+
+        .console-line.success {
+            color: #60a5fa;
+            font-weight: 600;
+        }
+
+        /* Output Download & Preview Section */
+        .output-panel {
+            border-top: 1px solid rgba(255, 255, 255, 0.08);
+            padding-top: 24px;
+            display: flex;
+            justify-content: space-between;
+            align-items: center;
+            gap: 20px;
+        }
+
+        .output-info {
+            display: flex;
+            align-items: center;
+            gap: 12px;
+        }
+
+        .file-icon {
+            font-size: 2.2rem;
+            color: #ef4444;
+            /* PDF Red */
+        }
+
+        .file-meta {
+            display: flex;
+            flex-direction: column;
+            gap: 4px;
+        }
+
+        .file-name {
+            font-size: 0.95rem;
+            font-weight: 600;
+            color: var(--text-primary);
+        }
+
+        .file-size {
+            font-size: 0.8rem;
+            color: var(--text-secondary);
+        }
+
+        /* Spinner & Progress bar overlay */
+        .progress-bar-container {
+            width: 100%;
+            height: 6px;
+            background: rgba(255, 255, 255, 0.05);
+            border-radius: 99px;
+            overflow: hidden;
+            display: none;
+        }
+
+        .progress-bar-fill {
+            height: 100%;
+            width: 0%;
+            background: linear-gradient(90deg, var(--accent-indigo), var(--accent-purple));
+            border-radius: 99px;
+            transition: width 0.4s ease;
+        }
+
+        footer {
+            margin-top: 60px;
+            padding: 30px 0;
+            font-size: 0.8rem;
+            color: #4b5563;
+            text-align: center;
+            width: 100%;
+            border-top: 1px solid rgba(255, 255, 255, 0.04);
+        }
+    </style>
+</head>
+
+<body>
+
+    <div class="app-container">
+        <!-- Header -->
+        <header>
+            <div class="logo-section">
+                <h1 class="logo-title">
+                    ⚡ ANTIGRAVITY <span class="badge">PRO</span>
+                </h1>
+                <p class="logo-tagline">PDF 布局翻译| Layout-Preserving PDF Translator</p>
+            </div>
+        </header>
+
+        <!-- Main Workspace -->
+        <div class="workspace-grid">
+            <!-- Left Panel: Control Inputs -->
+            <div class="glass-card">
+                <div class="card-header">
+                    <h2 class="card-title">文档上传与配置</h2>
+                    <p class="card-desc">选择源语言并拖入需要完美保留排版的 PDF 文件</p>
+                </div>
+
+                <!-- Drag-drop area -->
+                <div class="upload-zone" id="dropZone" onclick="document.getElementById('fileInput').click()">
+                    <div class="upload-icon">📥</div>
+                    <div class="upload-text" id="uploadStatusText">点击或拖拽 PDF 文件至此处</div>
+                    <div class="upload-hint">支持漫画</div>
+                    <input type="file" id="fileInput" accept=".pdf">
+                </div>
+
+                <!-- Language config -->
+                <div class="control-group">
+                    <label for="srcLang">文档源语言 (Source Language)</label>
+                    <select id="srcLang">
+                        <option value="English">🌐 英语 (English)</option>
+                        <option value="Japanese" selected>🇯🇵 日语 (日本語)</option>
+                    </select>
+                </div>
+
+                <div class="control-group">
+                    <label>目标语言 (Target Language)</label>
+                    <select id="tgtLang" disabled>
+                        <option value="Simplified Chinese">🇨🇳 简体中文 (Simplified Chinese)</option>
+                    </select>
+                </div>
+
+                <!-- Page Range configuration -->
+                <div class="control-group">
+                    <label for="pageRange">翻译页码范围 (Page Range)</label>
+                    <input type="text" id="pageRange" placeholder="例如: 1-10, 15, 20-30 (留空为全部)"
+                        style="width: 100%; padding: 12px; background: rgba(255, 255, 255, 0.05); border: 1px solid rgba(255, 255, 255, 0.1); border-radius: 8px; color: var(--text-primary); outline: none; transition: border 0.3s; font-size: 0.9rem;">
+                </div>
+
+
+                <!-- Run trigger -->
+                <div style="display: flex; gap: 16px; width: 100%;">
+                    <button class="btn" id="translateBtn" style="flex: 1;" disabled>
+                        🚀 开始超高速排版翻译
+                    </button>
+                    <button class="btn" id="cancelBtn"
+                        style="display: none; background: rgba(239, 68, 68, 0.2); border: 1px solid rgba(239, 68, 68, 0.4); color: #fca5a5; flex: 1;">
+                        🛑 终止翻译
+                    </button>
+                </div>
+
+                <!-- Real-time Stopwatch Timer -->
+                <div id="timerContainer"
+                    style="display: none; justify-content: space-between; align-items: center; font-size: 0.85rem; color: var(--text-secondary); margin-bottom: -10px;">
+                    <span>⏳ 引擎解析翻译已用时:</span>
+                    <span id="elapsedTimerVal"
+                        style="font-family: 'Fira Code', monospace; color: var(--accent-indigo); font-weight: 700; font-size: 0.95rem;">0.0s</span>
+                </div>
+
+                <!-- Small progress bar -->
+                <div class="progress-bar-container" id="progressBar">
+                    <div class="progress-bar-fill" id="progressBarFill"></div>
+                </div>
+            </div>
+
+            <!-- Right Panel: SSE Console and LLM Analytics -->
+            <div class="glass-card">
+                <div class="card-header">
+                    <h2 class="card-title">LLM 推理监控与性能看板</h2>
+                    <p class="card-desc">直观感知 TensorRT-LLM 与投机解码带来的极致加速体验</p>
+                </div>
+
+                <!-- Analytics dashboard widgets -->
+                <div class="metrics-grid">
+                    <div class="metric-card">
+                        <div class="metric-label">翻译吞吐速率</div>
+                        <div class="metric-value speed" id="metricSpeed">--</div>
+                        <div class="metric-label" style="text-transform:none; margin-top:2px;">Tokens / Sec</div>
+                    </div>
+                    <div class="metric-card">
+                        <div class="metric-label">投机草稿接受率</div>
+                        <div class="metric-value rate" id="metricRate">--</div>
+                        <div class="metric-label" style="text-transform:none; margin-top:2px;">Acceptance %</div>
+                    </div>
+                    <div class="metric-card">
+                        <div class="metric-label">首字捕捉延迟</div>
+                        <div class="metric-value time" id="metricTime">--</div>
+                        <div class="metric-label" style="text-transform:none; margin-top:2px;">CUDA Graph Latency</div>
+                    </div>
+                </div>
+
+                <!-- Interactive console shell -->
+                <div class="console-panel" id="consoleOutput">
+                    <div class="console-line info">
+                        <span class="timestamp">[12:49:54]</span>
+                        <span>[!] 系统处于自适应双模就绪状态。</span>
+                    </div>
+                    <div class="console-line info">
+                        <span class="timestamp">[12:49:55]</span>
+                        <span>[!] 基础模型 Qwen2.5-1.5B-Instruct-AWQ (4-bit) 缓存已对齐。</span>
+                    </div>
+                    <div class="console-line info">
+                        <span class="timestamp">[12:49:55]</span>
+                        <span>[!] 投机草稿模型 Qwen2.5-0.5B-Instruct-AWQ 缓存已对齐。</span>
+                    </div>
+                    <div class="console-line success">
+                        <span class="timestamp">[12:49:56]</span>
+                        <span>[✓] CUDA Graphs 静态核函数热身捕获已就绪。等待用户上传文件...</span>
+                    </div>
+                </div>
+
+                <!-- Document download drawer -->
+                <div class="output-panel" id="outputPanel" style="display: none; flex-direction: column;">
+                    <div class="output-info" style="width: 100%; justify-content: space-between;">
+                        <div style="display: flex; align-items: center; gap: 12px;">
+                            <div class="file-icon">📄</div>
+                            <div class="file-meta">
+                                <div class="file-name" id="outFileName">translated_document.pdf</div>
+                                <div class="file-size">布局保真简体中文版 PDF</div>
+                            </div>
+                        </div>
+                    </div>
+
+                    <div class="result-actions"
+                        style="margin-top: 20px; display: flex; flex-direction: column; gap: 10px; width: 100%;">
+                        <div style="display: flex; gap: 10px; width: 100%;">
+                            <button class="btn" id="downloadBtn" style="flex: 1; padding:12px 24px; font-size:0.9rem;">
+                                📥 下载 PDF
+                            </button>
+                            <button class="btn" id="downloadZipBtn"
+                                style="flex: 1; padding:12px 24px; font-size:0.9rem; background: rgba(99, 102, 241, 0.15); border: 1px solid rgba(99, 102, 241, 0.3); color: #c7d2fe; display: none;">
+                                📦 下载 ZIP
+                            </button>
+                        </div>
+                        <button class="btn" id="downloadDocBtn"
+                            style="width: 100%; padding:12px 24px; font-size:0.9rem; background: rgba(16, 185, 129, 0.15); border: 1px solid rgba(16, 185, 129, 0.3); color: #6ee7b7; display: none;">
+                            📝 下载 Word 校对台本 (.doc)
+                        </button>
+                        <button class="btn" id="downloadJsonBtn"
+                            style="width: 100%; padding:12px 24px; font-size:0.9rem; background: rgba(245, 158, 11, 0.15); border: 1px solid rgba(245, 158, 11, 0.3); color: #fcd34d; display: none;">
+                            📊 下载提取数据与翻译映射 (JSON)
+                        </button>
+                    </div>
+                </div>
+            </div>
+        </div>
+
+        <footer>
+            TNL6323 NLP Course Project | Super-Speed PDF Layout Fidelity Translation Engine powered by Antigravity
+        </footer>
+    </div>
+
+    <!-- Front-End JavaScript SSE Logic -->
+    <script>
+        const fileInput = document.getElementById('fileInput');
+        const dropZone = document.getElementById('dropZone');
+        const translateBtn = document.getElementById('translateBtn');
+        const uploadStatusText = document.getElementById('uploadStatusText');
+        const consoleOutput = document.getElementById('consoleOutput');
+        const outFileName = document.getElementById('outFileName');
+        const outputPanel = document.getElementById('outputPanel');
+        const downloadBtn = document.getElementById('downloadBtn');
+        const downloadZipBtn = document.getElementById('downloadZipBtn');
+        const cancelBtn = document.getElementById('cancelBtn');
+        const srcLangSelect = document.getElementById('srcLang');
+        const progressBar = document.getElementById('progressBar');
+        const progressBarFill = document.getElementById('progressBarFill');
+
+        // Metrics widgets
+        const metricSpeed = document.getElementById('metricSpeed');
+        const metricRate = document.getElementById('metricRate');
+        const metricTime = document.getElementById('metricTime');
+
+        let selectedFile = null;
+        let activeTaskId = null;
+        let eventSource = null;
+        let startTime = null;
+        let timerInterval = null;
+
+        // Logging helper
+        function logToConsole(text, type = 'info') {
+            const time = new Date().toLocaleTimeString();
+            const line = document.createElement('div');
+            line.className = `console-line ${type}`;
+
+            const timeSpan = document.createElement('span');
+            timeSpan.className = 'timestamp';
+            timeSpan.textContent = `[${time}]`;
+
+            const textSpan = document.createElement('span');
+            textSpan.textContent = text;
+
+            line.appendChild(timeSpan);
+            line.appendChild(textSpan);
+            consoleOutput.appendChild(line);
+            consoleOutput.scrollTop = consoleOutput.scrollHeight;
+        }
+
+        // Drag & Drop Handlers
+        dropZone.addEventListener('dragover', (e) => {
+            e.preventDefault();
+            dropZone.style.borderColor = '#6366f1';
+        });
+
+        dropZone.addEventListener('dragleave', () => {
+            dropZone.style.borderColor = 'rgba(255, 255, 255, 0.12)';
+        });
+
+        dropZone.addEventListener('drop', (e) => {
+            e.preventDefault();
+            dropZone.style.borderColor = 'rgba(255, 255, 255, 0.12)';
+
+            if (e.dataTransfer.files.length > 0) {
+                handleFileSelect(e.dataTransfer.files[0]);
+            }
+        });
+
+        fileInput.addEventListener('change', (e) => {
+            if (fileInput.files.length > 0) {
+                handleFileSelect(fileInput.files[0]);
+            }
+        });
+
+        function handleFileSelect(file) {
+            if (file.type !== 'application/pdf') {
+                logToConsole('[-] 错误: 仅支持 PDF 格式的文件！', 'err');
+                return;
+            }
+            selectedFile = file;
+            uploadStatusText.textContent = `已选择: ${file.name}`;
+            translateBtn.disabled = false;
+            logToConsole(`[+] 成功载入源 PDF: ${file.name} (${(file.size / 1024 / 1024).toFixed(2)} MB)`, 'success');
+        }
+
+        // Action Trigger
+        translateBtn.addEventListener('click', async () => {
+            if (!selectedFile) return;
+
+            // Reset UI states
+            translateBtn.disabled = true;
+            translateBtn.style.display = 'none';
+            cancelBtn.style.display = 'block';
+            cancelBtn.disabled = false;
+            outputPanel.style.display = 'none';
+            progressBar.style.display = 'block';
+            progressBarFill.style.width = '0%';
+
+            // Timer setup
+            document.getElementById('timerContainer').style.display = 'flex';
+            document.getElementById('elapsedTimerVal').style.color = 'var(--accent-indigo)';
+            document.getElementById('elapsedTimerVal').textContent = '0.0s';
+            startTime = Date.now();
+            if (timerInterval) clearInterval(timerInterval);
+            timerInterval = setInterval(() => {
+                const elapsed = (Date.now() - startTime) / 1000;
+                document.getElementById('elapsedTimerVal').textContent = `${elapsed.toFixed(1)}s`;
+            }, 100);
+
+            metricSpeed.textContent = '--';
+            metricRate.textContent = '--';
+            metricTime.textContent = '--';
+
+            logToConsole(`[+] 启动排版翻译流水线。正在分发任务...`);
+
+            // Assemble Form
+            const formData = new FormData();
+            formData.append('file', selectedFile);
+            formData.append('source_lang', srcLangSelect.value);
+            formData.append('target_lang', 'Simplified Chinese');
+            formData.append('page_range', document.getElementById('pageRange').value);
+            formData.append('force_retranslate', 'true');
+
+            try {
+                const response = await fetch('/api/v1/translate/upload', {
+                    method: 'POST',
+                    body: formData
+                });
+                const data = await response.json();
+
+                if (data.task_id) {
+                    activeTaskId = data.task_id;
+                    logToConsole(`[+] 任务已成功加入异步高并发调度队列。Task ID: ${activeTaskId}`);
+                    // Start listening to SSE updates
+                    listenToTaskStatus(activeTaskId);
+                } else {
+                    logToConsole(`[-] 队列响应失败: ${data.message || '未知错误'}`, 'err');
+                    translateBtn.style.display = 'block';
+                    translateBtn.disabled = false;
+                    cancelBtn.style.display = 'none';
+                    progressBar.style.display = 'none';
+                    clearInterval(timerInterval);
+                }
+            } catch (err) {
+                logToConsole(`[-] API 请求发生异常: ${err}`, 'err');
+                translateBtn.style.display = 'block';
+                translateBtn.disabled = false;
+                cancelBtn.style.display = 'none';
+                progressBar.style.display = 'none';
+                clearInterval(timerInterval);
+            }
+        });
+
+        // Cancel Button Action Trigger
+        cancelBtn.addEventListener('click', async () => {
+            if (!activeTaskId) return;
+            logToConsole(`[!] 正在向服务器发送终止请求...`);
+            cancelBtn.disabled = true;
+            try {
+                const response = await fetch(`/api/v1/translate/cancel/${activeTaskId}`, {
+                    method: 'DELETE'
+                });
+                const data = await response.json();
+                if (data.status === 'cancelled') {
+                    logToConsole(`[✓] 任务已成功从服务器中终止清理。`, 'success');
+                } else {
+                    logToConsole(`[-] 终止任务失败: ${data.message || '未知错误'}`, 'err');
+                }
+            } catch (err) {
+                logToConsole(`[-] 发送终止请求时发生异常: ${err}`, 'err');
+            } finally {
+                cancelBtn.disabled = false;
+                cancelBtn.style.display = 'none';
+                translateBtn.style.display = 'block';
+                translateBtn.disabled = false;
+                progressBar.style.display = 'none';
+                clearInterval(timerInterval);
+                if (eventSource) eventSource.close();
+            }
+        });
+
+        // SSE Real-Time Updates Listening
+        function listenToTaskStatus(taskId) {
+            if (eventSource) {
+                eventSource.close();
+            }
+
+            eventSource = new EventSource(`/api/v1/translate/status/${taskId}`);
+
+            eventSource.addEventListener('progress', (e) => {
+                const data = JSON.parse(e.data);
+                const percent = data.percent || 0;
+                const stage = data.stage || '处理中';
+
+                progressBarFill.style.width = `${percent}%`;
+                logToConsole(`[${percent}%] 流水线状态: ${stage}`);
+
+                // Update performance metric indicators dynamically when in inference step
+                if (data.metrics) {
+                    if (data.metrics.tokens_per_sec) {
+                        metricSpeed.textContent = `${parseFloat(data.metrics.tokens_per_sec).toFixed(1)}`;
+                    }
+                    if (data.metrics.acceptance_rate) {
+                        metricRate.textContent = `${parseFloat(data.metrics.acceptance_rate).toFixed(1)}%`;
+                    }
+                    if (data.metrics.latency_ms) {
+                        metricTime.textContent = `${parseInt(data.metrics.latency_ms)}ms`;
+                    }
+                }
+            });
+
+            eventSource.addEventListener('error', (e) => {
+                try {
+                    const data = JSON.parse(e.data);
+                    const errorMsg = data.error || data.message || "未知错误";
+                    logToConsole(`[!] 提示: ${errorMsg}`, 'warn');
+                    if (errorMsg && (errorMsg.includes("错误") || errorMsg.includes("失败") || errorMsg.includes("崩溃") || errorMsg.includes("cancel") || errorMsg.includes("取消") || errorMsg !== "未知错误")) {
+                        clearInterval(timerInterval);
+                        document.getElementById('elapsedTimerVal').style.color = '#ef4444';
+                        translateBtn.style.display = 'block';
+                        translateBtn.disabled = false;
+                        cancelBtn.style.display = 'none';
+                        progressBar.style.display = 'none';
+                        eventSource.close();
+                    }
+                } catch {
+                    logToConsole(`[-] SSE 发生连接抖动，自愈重试中...`, 'warn');
+                }
+            });
+
+            eventSource.addEventListener('complete', (e) => {
+                const data = JSON.parse(e.data);
+                const downloadUrl = data.download_url;
+                const downloadZipUrl = data.download_zip_url;
+                const downloadDocUrl = data.download_doc_url;
+
+                clearInterval(timerInterval);
+                const finalTime = ((Date.now() - startTime) / 1000).toFixed(1);
+                document.getElementById('elapsedTimerVal').textContent = `${finalTime}s`;
+                document.getElementById('elapsedTimerVal').style.color = 'var(--accent-emerald)';
+
+                progressBarFill.style.width = '100%';
+                logToConsole(`[✓] 恭喜！布局保真 PDF 翻译重构成功！全部流程总耗时 ${finalTime} 秒`, 'success');
+
+                // Show download interface
+                outFileName.textContent = `translated_${selectedFile.name}`;
+                outputPanel.style.display = 'flex';
+
+                // Attach downloader triggers
+                downloadBtn.onclick = () => {
+                    window.location.href = downloadUrl;
+                };
+                if (downloadZipUrl) {
+                    downloadZipBtn.style.display = 'block';
+                    downloadZipBtn.onclick = () => {
+                        window.location.href = downloadZipUrl;
+                    };
+                } else {
+                    downloadZipBtn.style.display = 'none';
+                }
+
+                const downloadDocBtn = document.getElementById('downloadDocBtn');
+                if (downloadDocUrl && downloadDocBtn) {
+                    downloadDocBtn.style.display = 'block';
+                    downloadDocBtn.onclick = () => {
+                        window.location.href = downloadDocUrl;
+                    };
+                } else if (downloadDocBtn) {
+                    downloadDocBtn.style.display = 'none';
+                }
+
+                const downloadJsonBtn = document.getElementById('downloadJsonBtn');
+                if (data.download_json_url && downloadJsonBtn) {
+                    downloadJsonBtn.style.display = 'block';
+                    downloadJsonBtn.onclick = () => {
+                        window.location.href = data.download_json_url;
+                    };
+                } else if (downloadJsonBtn) {
+                    downloadJsonBtn.style.display = 'none';
+                }
+
+                // Close SSE channel and reset buttons
+                eventSource.close();
+                translateBtn.style.display = 'block';
+                translateBtn.disabled = false;
+                cancelBtn.style.display = 'none';
+            });
+        }
+    </script>
+</body>
+
+</html>

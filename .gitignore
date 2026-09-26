@@ -1,0 +1,43 @@
+# Python & Environments
+__pycache__/
+*.py[cod]
+*$py.class
+*.so
+.Python
+env/
+venv/
+.venv/
+
+# Caches and Temporary storage
+pdf_translate/data/cache/
+pdf_translate/data/uploads/*
+!pdf_translate/data/uploads/.gitkeep
+pdf_translate/data/chroma/
+pdf_translate/data/models/
+pdf_translate/static/*
+!pdf_translate/static/.gitkeep
+
+# Model weights & Checkpoints (large binary blobs)
+pdf_translate/manga-ocr-base/
+*.bin
+*.ckpt
+*.pt
+*.pth
+*.onnx
+*.gguf
+*.safetensors
+
+# IDE & OS
+.idea/
+.vscode/
+*.swp
+*.swo
+*~
+Thumbs.db
+[Dd]esktop.ini
+$RECYCLE.BIN/
+.DS_Store
+
+# C# build artifacts
+[Bb]in/
+[Oo]bj/
