@@ -125,29 +125,24 @@ def _get_manga_ocr():
     return _MANGA_OCR_INSTANCE
 
 def unload_models():
-    """Moves PyTorch OCR models from VRAM to CPU RAM (shared memory) for instant reload later."""
+    """Completely unloads and releases PyTorch OCR models from VRAM and CPU RAM to free memory for downstream stages."""
     global _OCR_READER_JA, _OCR_READER_EN, _MANGA_OCR_INSTANCE
     import torch
+    import gc
     
     with _OCR_LOCK:
         if _OCR_READER_JA is not None:
-            if hasattr(_OCR_READER_JA, 'detector') and _OCR_READER_JA.detector is not None:
-                _OCR_READER_JA.detector = _OCR_READER_JA.detector.to('cpu')
-            if hasattr(_OCR_READER_JA, 'recognizer') and _OCR_READER_JA.recognizer is not None:
-                _OCR_READER_JA.recognizer = _OCR_READER_JA.recognizer.to('cpu')
-        
+            del _OCR_READER_JA
+            _OCR_READER_JA = None
         if _OCR_READER_EN is not None:
-            if hasattr(_OCR_READER_EN, 'detector') and _OCR_READER_EN.detector is not None:
-                _OCR_READER_EN.detector = _OCR_READER_EN.detector.to('cpu')
-            if hasattr(_OCR_READER_EN, 'recognizer') and _OCR_READER_EN.recognizer is not None:
-                _OCR_READER_EN.recognizer = _OCR_READER_EN.recognizer.to('cpu')
+            del _OCR_READER_EN
+            _OCR_READER_EN = None
                 
     with _MANGA_OCR_LOCK:
         if _MANGA_OCR_INSTANCE is not None:
-            if hasattr(_MANGA_OCR_INSTANCE, 'model') and _MANGA_OCR_INSTANCE.model is not None:
-                _MANGA_OCR_INSTANCE.model = _MANGA_OCR_INSTANCE.model.to('cpu')
+            del _MANGA_OCR_INSTANCE
+            _MANGA_OCR_INSTANCE = None
                 
-    import gc
     if torch.cuda.is_available():
         torch.cuda.empty_cache()
     gc.collect()
@@ -254,10 +249,12 @@ def _merge_overlapping_boxes(raw_boxes, iou_thresh=0.20, containment_thresh=0.55
                 containment = inter_area / float(max(1, min_area))
                 
                 # Check for adjacent vertical columns in the same manga bubble:
-                # Horizontal gap <= 25px, vertical overlap >= 50% of the shorter column
+                # Both columns must be vertical dialogue columns (h > w * 1.1)
+                # with horizontal gap <= 15px and vertical overlap >= 60% of the shorter column
+                is_both_vertical = (h1 > w1 * 1.1) and (h2 > w2 * 1.1)
                 horizontal_dist = max(0, max(x0_1, x0_2) - min(x1_1, x1_2))
                 vertical_overlap = ih / float(max(1, min(h1, h2)))
-                is_adjacent_column = (horizontal_dist <= 25 and vertical_overlap >= 0.50)
+                is_adjacent_column = is_both_vertical and (horizontal_dist <= 15 and vertical_overlap >= 0.60)
                 
                 if iou >= iou_thresh or containment >= containment_thresh or is_adjacent_column:
                     # Merge b2 into b1
@@ -427,15 +424,15 @@ class PDFLayoutExtractor:
         # It natively ignores manga screentones and halftones.
         reader = _get_ocr_reader(source_lang)
         with _OCR_LOCK:
-            # High-sensitivity CRAFT settings: captures faint text, whispers, and vertical dialogue
+            # Calibrated CRAFT settings: avoids clothing lace/buttons/hair while capturing all bubbles & vertical dialogue
             ocr_results = reader.readtext(
                 img_np,
                 paragraph=True,
                 x_ths=0.15,
                 y_ths=0.15,
-                text_threshold=0.45,
-                low_text=0.3,
-                link_threshold=0.3
+                text_threshold=0.60,
+                low_text=0.35,
+                link_threshold=0.35
             )
 
         # Collect raw bounding boxes from CRAFT

@@ -205,13 +205,13 @@ def _create_stroke_mask(crop_rgb: np.ndarray) -> tuple:
     
     if bg_val >= 160:
         # Light background (speech bubble or bright scene)
-        # Real text ink is distinctly darker than background
-        thresh_val = min(bg_val - 30, 175)
+        # Real text ink is distinctly darker than background; clamp to 95 to prevent grabbing skin/clothing/lace
+        thresh_val = min(bg_val - 45, 95)
         mask = (blurred < thresh_val).astype(np.uint8) * 255
     elif bg_val <= 90:
         # Dark background (night scene, black bubble, dark panel)
         # Real text ink is distinctly lighter than background
-        thresh_val = max(bg_val + 30, 115)
+        thresh_val = max(bg_val + 45, 160)
         mask = (blurred > thresh_val).astype(np.uint8) * 255
     else:
         # Midtone background (shading, textured drawing)
@@ -228,6 +228,16 @@ def _create_stroke_mask(crop_rgb: np.ndarray) -> tuple:
     dilated = cv2.dilate(cleaned_mask, dilate_kernel, iterations=2)
     
     stroke_ratio = np.count_nonzero(dilated) / float(h * w)
+    
+    # Protection against grabbing artwork/lace/hair:
+    # Text in bubbles rarely exceeds 25-30% of box area.
+    # If stroke_ratio > 0.30, strictly clamp to deep black ink (< 60)
+    if stroke_ratio > 0.30:
+        strict_mask = (blurred < 60).astype(np.uint8) * 255
+        strict_cleaned = cv2.morphologyEx(strict_mask, cv2.MORPH_OPEN, clean_kernel)
+        dilated = cv2.dilate(strict_cleaned, dilate_kernel, iterations=1)
+        stroke_ratio = np.count_nonzero(dilated) / float(h * w)
+
     if 0.005 <= stroke_ratio <= 0.85:
         return dilated, bg_val
         
@@ -278,21 +288,11 @@ class PDFLayoutRenderer:
             crop_rgb = img_np[py0:py1, px0:px1]
             stroke_mask, bg_val = _create_stroke_mask(crop_rgb)
 
-            # In clean speech bubbles (border consistency >= 70% and light >= 180 or dark <= 35):
-            # Fill only the text strokes with pure background color!
-            # This completely avoids clipping the speech bubble's black outline and works on off-white/aged paper scans.
-            gray_crop = cv2.cvtColor(crop_rgb, cv2.COLOR_RGB2GRAY)
-            border = np.concatenate([gray_crop[0, :], gray_crop[-1, :], gray_crop[:, 0], gray_crop[:, -1]])
-            border_match = np.count_nonzero(np.abs(border.astype(np.float32) - bg_val) < 25) / float(len(border))
-            
-            is_bubble = (border_match >= 0.70) and (bg_val >= 180.0 or bg_val <= 35.0)
-            if is_bubble:
-                fill_color = (int(bg_val), int(bg_val), int(bg_val))
-                crop_rgb[stroke_mask > 0] = fill_color
-            else:
-                # Textured background, screentone, illustration: route to Telea diffusion
-                mask_np[py0:py1, px0:px1] = np.maximum(mask_np[py0:py1, px0:px1], stroke_mask)
-                has_inpaint_masks = True
+            # Always route stroke masks to OpenCV Telea diffusion.
+            # Never overwrite with flat solid fill_color (which caused white blocking on characters/clothes).
+            # Telea smoothly diffuses surrounding pixels: pure white in bubbles, and skin/screentone tones if touching artwork.
+            mask_np[py0:py1, px0:px1] = np.maximum(mask_np[py0:py1, px0:px1], stroke_mask)
+            has_inpaint_masks = True
 
             blocks_to_render.append((px0, py0, px1, py1, translated, block))
 

@@ -679,10 +679,12 @@ class HighPerformanceTranslationEngine:
                         "response_format": {"type": "json_object"}
                     }
                     
+                    batch_llm_success = False
                     for attempt in range(1, 3):
                         try:
                             data = _call_turbovec_llm(payload, timeout=18.0)
                             if data and "choices" in data and len(data["choices"]) > 0:
+                                batch_llm_success = True
                                 reply = data["choices"][0]["message"]["content"].strip()
                                 parsed = json.loads(reply)
                                 for k, v in parsed.items():
@@ -701,33 +703,34 @@ class HighPerformanceTranslationEngine:
                             logger.warning(f"[Qwen Batch Translation] Attempt {attempt} failed: {ex}")
                             time.sleep(0.5)
                             
-                    # Single-sentence fallback for any missing indices
-                    for idx in chunk_indices:
-                        if not results[idx]:
-                            raw_text = blocks[idx].get("cleaned_text", "").strip()
-                            if not raw_text:
-                                continue
-                            single_prompt = f"原文：{raw_text}\n请直接给出最完美的本地化中文译文："
-                            single_payload = {
-                                "model": TURBOVEC_MODEL,
-                                "messages": [
-                                    {"role": "system", "content": system_prompt},
-                                    {"role": "user", "content": single_prompt}
-                                ],
-                                "temperature": 0.2,
-                                "max_tokens": 120,
-                            }
-                            try:
-                                sdata = _call_turbovec_llm(single_payload, timeout=8.0)
-                                if sdata and "choices" in sdata and len(sdata["choices"]) > 0:
-                                    sc = sdata["choices"][0]["message"]["content"].strip()
-                                    if any('\u4e00' <= c <= '\u9fff' for c in sc):
-                                        results[idx] = _clean_output(sc)
-                                        blocks[idx]["translation_engine"] = "Turbovec Qwen 3.5 4B (Single Fallback)"
-                            except Exception as sex:
-                                logger.warning(f"[Qwen Single Fallback Failed] '{raw_text[:30]}': {sex}")
+                    # Single-sentence LLM fallback only if LLM is online and responsive
+                    if batch_llm_success:
+                        for idx in chunk_indices:
+                            if not results[idx]:
+                                raw_text = blocks[idx].get("cleaned_text", "").strip()
+                                if not raw_text:
+                                    continue
+                                single_prompt = f"原文：{raw_text}\n请直接给出最完美的本地化中文译文："
+                                single_payload = {
+                                    "model": TURBOVEC_MODEL,
+                                    "messages": [
+                                        {"role": "system", "content": system_prompt},
+                                        {"role": "user", "content": single_prompt}
+                                    ],
+                                    "temperature": 0.2,
+                                    "max_tokens": 120,
+                                }
+                                try:
+                                    sdata = _call_turbovec_llm(single_payload, timeout=8.0)
+                                    if sdata and "choices" in sdata and len(sdata["choices"]) > 0:
+                                        sc = sdata["choices"][0]["message"]["content"].strip()
+                                        if any('\u4e00' <= c <= '\u9fff' for c in sc):
+                                            results[idx] = _clean_output(sc)
+                                            blocks[idx]["translation_engine"] = "Turbovec Qwen 3.5 4B (Single Fallback)"
+                                except Exception as sex:
+                                    logger.warning(f"[Qwen Single Fallback Failed] '{raw_text[:30]}': {sex}")
 
-                        # Ultimate safety fallback: Google Translate API (guarantees NO text is ever left untranslated)
+                    # Ultimate safety fallback: Google Translate API (guarantees NO text is ever left untranslated)
                         if not results[idx]:
                             raw_text = blocks[idx].get("cleaned_text", "").strip()
                             if raw_text:

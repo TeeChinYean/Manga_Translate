@@ -220,7 +220,7 @@ async def _run_pipeline_async(pdf_path, page_range_str, source_lang, target_lang
 
         layout_data = []
         current_chunk = []
-        PAGES_PER_BATCH = 4
+        PAGES_PER_BATCH = 1
         
         translation_queue = asyncio.Queue()
         rendering_queue = asyncio.Queue()
@@ -240,45 +240,11 @@ async def _run_pipeline_async(pdf_path, page_range_str, source_lang, target_lang
                     print(f"\n[Pipeline] 🚨 后台翻译线程异常: {e}")
                 finally:
                     translation_queue.task_done()
-                    
-        worker_task = asyncio.create_task(translation_worker())
-        
-        # ── Stage 1: Process streaming pages (OCR extraction) ──
-        async for chunk_page in extractor.extract_layout_stream(page_range_list=selected_pages, source_lang=source_lang):
-            if task_id in cancelled_tasks:
-                await translation_queue.put(None)
-                raise Exception("Task cancelled by user.")
-                
-            layout_data.append(chunk_page)
-            current_chunk.append(chunk_page)
-            
-            async with progress_lock:
-                extracted_count += 1
-                update_progress()
-                
-            if len(current_chunk) >= PAGES_PER_BATCH:
-                await translation_queue.put(current_chunk)
-                current_chunk = []
-                
-        if current_chunk:
-            await translation_queue.put(current_chunk)
-            
-        # OCR 阶段完成！立即释放 OCR，为 LaMa 腾出显存
-        print(f"\n[Pipeline] 🧹 OCR 提取完毕，立即释放 OCR 显存...")
-        from core.extractor import unload_models as unload_ocr
-        await asyncio.to_thread(unload_ocr)
-        import torch
-        if torch.cuda.is_available():
-            torch.cuda.empty_cache()
-            
-        _safe_callback(60, "OCR结束，启动并行重绘流水线...", "processing")
-        print(f"[Pipeline] 📝 开始并行重绘 (当前已有 translated_text_map 条目数: {len(translated_text_map)})")
-        
-        # 启动 rendering_worker 消费 rendering_queue
+
         async def rendering_worker():
             import shutil
             nonlocal rendered_count
-            print(f"\n[Pipeline] 🚀 rendering_worker 后台线程已启动！")
+            print(f"\n[Pipeline] 🚀 rendering_worker 全异步后台线程已启动！")
             while True:
                 page = await rendering_queue.get()
                 if page is None:
@@ -315,22 +281,49 @@ async def _run_pipeline_async(pdf_path, page_range_str, source_lang, target_lang
                 finally:
                     rendering_queue.task_done()
 
+        # 启动后台翻译与重绘双工作线程 (真正三级异步流水线: 提取 -> 翻译 -> 重绘 全部重叠并发)
+        worker_task = asyncio.create_task(translation_worker())
         render_worker_task = asyncio.create_task(rendering_worker())
+        
+        # ── Stage 1: Process streaming pages (OCR extraction) ──
+        async for chunk_page in extractor.extract_layout_stream(page_range_list=selected_pages, source_lang=source_lang):
+            if task_id in cancelled_tasks:
+                await translation_queue.put(None)
+                raise Exception("Task cancelled by user.")
+                
+            layout_data.append(chunk_page)
+            current_chunk.append(chunk_page)
             
-        # 等待后台翻译队列全部完成
-        await translation_queue.put(None)
-        await worker_task
+            async with progress_lock:
+                extracted_count += 1
+                update_progress()
+                
+            if len(current_chunk) >= PAGES_PER_BATCH:
+                await translation_queue.put(current_chunk)
+                current_chunk = []
+                
+        if current_chunk:
+            await translation_queue.put(current_chunk)
             
-        # 翻译阶段完成
-        print(f"\n[Pipeline] 🧹 翻译阶段完成，准备画面重绘...")
+        # OCR 阶段完成！立即完全卸载 OCR 模型，释放 RAM / VRAM
+        print(f"\n[Pipeline] 🧹 OCR 提取完毕，立即释放 OCR 模型内存与显存...")
+        from core.extractor import unload_models as unload_ocr
+        await asyncio.to_thread(unload_ocr)
+        import torch
         if torch.cuda.is_available():
             torch.cuda.empty_cache()
-
+            
+        # 标记翻译队列输入结束并等待翻译队列完成
+        await translation_queue.put(None)
+        await worker_task
+        print(f"\n[Pipeline] 🧹 翻译阶段已全部完成，等待剩余页面重绘完成...")
+        
         # 等待后台重绘队列全部完成
         await render_worker_task
+        print(f"[Pipeline] 🎨 所有页面重绘全部完成！")
 
         if layout_data:
-            print(f"\n[Pipeline] 🧹 释放 LaMa 重绘模型显存...")
+            print(f"\n[Pipeline] 🧹 释放重绘资源...")
             from core.renderer import unload_models as unload_renderer
             await asyncio.to_thread(unload_renderer)
             
