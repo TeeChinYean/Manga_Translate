@@ -18,29 +18,6 @@ def cancel_task(task_id):
     cancelled_tasks.add(task_id)
 
 
-async def _wait_ollama_unload(model: str, max_wait: float = 10.0):
-    """
-    在调用 keep_alive=0 后，轮询 /api/ps 确认模型已从显存中卸载，
-    再继续下一步，防止 Qwen 和 LaMa 同时占用显存导致 OOM 崩溃。
-    """
-    import httpx
-    deadline = time.time() + max_wait
-    while time.time() < deadline:
-        try:
-            r = await asyncio.to_thread(
-                httpx.get, "http://localhost:11434/api/ps", timeout=3.0
-            )
-            if r.status_code == 200:
-                running_models = [m["name"] for m in r.json().get("models", [])]
-                if not any(model in m for m in running_models):
-                    print(f"[Pipeline] ✅ Ollama 确认卸载完成: {model}")
-                    return
-        except Exception:
-            pass
-        await asyncio.sleep(0.6)
-    print(f"[Pipeline] ⚠️  等待 {model} 卸载超时，继续执行（显存可能紧张）")
-
-
 def _text_cache_key(text: str) -> str:
     """将原文生成短哈希作为缓存 key"""
     return hashlib.sha256(text.encode("utf-8")).hexdigest()[:20]
@@ -344,19 +321,10 @@ async def _run_pipeline_async(pdf_path, page_range_str, source_lang, target_lang
         await translation_queue.put(None)
         await worker_task
             
-        # 翻译阶段完成！立即释放大模型显存
-        print(f"\n[Pipeline] 🧹 翻译完毕，立即释放大模型显存...")
-        try:
-            import httpx
-            await asyncio.to_thread(
-                httpx.post, "http://localhost:11434/api/generate",
-                json={"model": "qwen2.5:3b", "keep_alive": 0}, timeout=5.0
-            )
-        except Exception:
-            pass
+        # 翻译阶段完成
+        print(f"\n[Pipeline] 🧹 翻译阶段完成，准备画面重绘...")
         if torch.cuda.is_available():
             torch.cuda.empty_cache()
-        await _wait_ollama_unload("qwen2.5:3b", max_wait=10.0)
 
         # 等待后台重绘队列全部完成
         await render_worker_task
@@ -409,12 +377,6 @@ async def _run_pipeline_async(pdf_path, page_range_str, source_lang, target_lang
             import torch
             if torch.cuda.is_available():
                 torch.cuda.empty_cache()
-        except Exception:
-            pass
-            
-        try:
-            import httpx
-            httpx.post("http://localhost:11434/api/generate", json={"model": "qwen2.5:3b", "keep_alive": 0}, timeout=5.0)
         except Exception:
             pass
 

@@ -13,7 +13,7 @@ class LLMTextPreprocessor:
     1. Correct OCR typos/broken words.
     2. Classify blocks as Sound Effects (SFX) or dialogue.
     """
-    def __init__(self, api_base="http://localhost:11434/v1", model_name="qwen2.5:1.5b"):
+    def __init__(self, api_base="http://localhost:18088/v1", model_name="docker.io/ai/qwen3.5:4b-q4_K_M"):
         self.api_base = api_base.rstrip("/")
         self.model_name = model_name
         self.client = httpx.Client(timeout=90.0)

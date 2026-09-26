@@ -19,6 +19,35 @@ import os
 
 logger = logging.getLogger(__name__)
 
+# ── Turbovec LLM Configuration (Replaces Ollama) ──────────────────────────────
+TURBOVEC_API_URL = os.getenv("TURBOVEC_API_URL", "http://localhost:18088/v1/chat/completions")
+LLAMA_SERVER_DIRECT_URL = os.getenv("LLAMA_SERVER_URL", "http://127.0.0.1:18089/v1/chat/completions")
+TURBOVEC_MODEL = os.getenv("TURBOVEC_MODEL", "docker.io/ai/qwen3.5:4b-q4_K_M")
+
+def _call_turbovec_llm(payload: dict, timeout: float = 15.0):
+    """
+    Calls Turbovec OpenAI-compatible API endpoint (port 18088 gateway or 18089 direct llama-server).
+    Automatically injects target model name and provides seamless fallback.
+    """
+    if "model" not in payload or not payload["model"]:
+        payload["model"] = TURBOVEC_MODEL
+        
+    endpoints = [TURBOVEC_API_URL, LLAMA_SERVER_DIRECT_URL]
+    last_err = None
+    for url in endpoints:
+        try:
+            r = httpx.post(url, json=payload, timeout=timeout)
+            if r.status_code == 200:
+                return r.json()
+            else:
+                logger.warning(f"[Turbovec LLM] HTTP {r.status_code} from {url}: {r.text[:100]}")
+        except Exception as e:
+            last_err = e
+            continue
+            
+    logger.warning(f"[Turbovec LLM] All endpoints failed: {last_err}")
+    return None
+
 # ── Proper noun pre-fixes loaded from JSON ─────────────────────────────────────
 _PROPER_NOUNS = {}
 try:
@@ -261,22 +290,21 @@ def _polish_batch_dialogues_json(polish_tasks: list) -> dict:
     )
     
     payload = {
-        "model": "qwen2.5:3b",
+        "model": TURBOVEC_MODEL,
         "messages": [
             {"role": "system", "content": system_prompt},
             {"role": "user", "content": prompt}
         ],
         "temperature": 0.3,
         "max_tokens": 3072,
-        "format": "json"
+        "response_format": {"type": "json_object"}
     }
     
     result_dict = {}
     try:
-        import httpx
-        r = httpx.post("http://localhost:11434/v1/chat/completions", json=payload, timeout=15.0)
-        if r.status_code == 200:
-            content = r.json()["choices"][0]["message"]["content"].strip()
+        data = _call_turbovec_llm(payload, timeout=15.0)
+        if data and "choices" in data and len(data["choices"]) > 0:
+            content = data["choices"][0]["message"]["content"].strip()
             try:
                 parsed = json.loads(content)
                 for k, v in parsed.items():
@@ -311,22 +339,19 @@ def _extract_proper_nouns_from_batch(blocks: list, results: list):
     prompt = "以下是一批漫画翻译对话。请提取其中明显的【特有专有名词】（如角色名、地名、特有招式等），特别是全大写的英文/罗马音单词或特殊称谓。如果没有发现专有名词，请返回空字典。严格输出纯 JSON，格式如: {\"KAFNA\": \"卡夫娜\", \"TEPEL\": \"泰佩尔\"}。\n\n" + "\n".join(pairs)
     
     payload = {
-        "model": "qwen2.5:3b",
+        "model": TURBOVEC_MODEL,
         "messages": [
             {"role": "system", "content": "你是一个专有名词提取器。只返回JSON，禁止任何其他文字。"},
             {"role": "user", "content": prompt}
         ],
         "temperature": 0.1,
         "max_tokens": 512,
-        "format": "json"
+        "response_format": {"type": "json_object"}
     }
     try:
-        import httpx
-        import json
-        import os
-        r = httpx.post("http://localhost:11434/v1/chat/completions", json=payload, timeout=8.0)
-        if r.status_code == 200:
-            content = r.json()["choices"][0]["message"]["content"].strip()
+        data = _call_turbovec_llm(payload, timeout=8.0)
+        if data and "choices" in data and len(data["choices"]) > 0:
+            content = data["choices"][0]["message"]["content"].strip()
             try:
                 parsed = json.loads(content)
                 new_discovered = False
@@ -443,7 +468,7 @@ class HighPerformanceTranslationEngine:
                     prompt = f"原文：{raw_text}\n请直接给出最完美的本地化中文译文："
                     
                     payload = {
-                        "model": "qwen2.5:3b",
+                        "model": TURBOVEC_MODEL,
                         "messages": [
                             {"role": "system", "content": system_prompt},
                             {"role": "user", "content": "原文：お兄ちゃん\n请直接给出最完美的本地化中文译文："},
@@ -461,13 +486,9 @@ class HighPerformanceTranslationEngine:
                     }
                     for attempt in range(1, 4):
                         try:
-                            import httpx
-                            r = httpx.post(
-                                "http://localhost:11434/v1/chat/completions",
-                                json=payload, timeout=12.0,
-                            )
-                            if r.status_code == 200:
-                                content_reply = r.json()["choices"][0]["message"]["content"].strip()
+                            data = _call_turbovec_llm(payload, timeout=12.0)
+                            if data and "choices" in data and len(data["choices"]) > 0:
+                                content_reply = data["choices"][0]["message"]["content"].strip()
                                 refusal_keywords = ["对不起", "无法处理", "敏感", "安全政策", "AI助手", "无法提供", "违规", "作为一个人工智能"]
                                 is_refusal = any(kw in content_reply for kw in refusal_keywords)
                                 if any('\u4e00' <= c <= '\u9fff' for c in content_reply) and not is_refusal:
