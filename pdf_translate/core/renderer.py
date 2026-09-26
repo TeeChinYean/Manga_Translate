@@ -278,10 +278,14 @@ class PDFLayoutRenderer:
             crop_rgb = img_np[py0:py1, px0:px1]
             stroke_mask, bg_val = _create_stroke_mask(crop_rgb)
 
-            # In clean speech bubbles (bright white >= 220 or pure dark <= 25):
+            # In clean speech bubbles (border consistency >= 70% and light >= 180 or dark <= 35):
             # Fill only the text strokes with pure background color!
-            # This completely avoids clipping the speech bubble's black outline.
-            is_bubble = (bg_val >= 220.0 or bg_val <= 25.0)
+            # This completely avoids clipping the speech bubble's black outline and works on off-white/aged paper scans.
+            gray_crop = cv2.cvtColor(crop_rgb, cv2.COLOR_RGB2GRAY)
+            border = np.concatenate([gray_crop[0, :], gray_crop[-1, :], gray_crop[:, 0], gray_crop[:, -1]])
+            border_match = np.count_nonzero(np.abs(border.astype(np.float32) - bg_val) < 25) / float(len(border))
+            
+            is_bubble = (border_match >= 0.70) and (bg_val >= 180.0 or bg_val <= 35.0)
             if is_bubble:
                 fill_color = (int(bg_val), int(bg_val), int(bg_val))
                 crop_rgb[stroke_mask > 0] = fill_color

@@ -498,7 +498,16 @@ class PDFLayoutExtractor:
                             )
                         
                         with _MANGA_OCR_LOCK:
-                            raw_text = mocr(crop_img)
+                            import torch
+                            with torch.inference_mode():
+                                try:
+                                    x = mocr._preprocess(crop_img)
+                                    tokens = mocr.model.generate(x[None].to(mocr.model.device), max_new_tokens=64, max_length=None)[0].cpu()
+                                    raw_text = mocr.tokenizer.decode(tokens, skip_special_tokens=True)
+                                    from manga_ocr.ocr import post_process
+                                    raw_text = post_process(raw_text)
+                                except Exception:
+                                    raw_text = mocr(crop_img)
                             
                         if raw_text:
                             raw_text = raw_text.strip()
