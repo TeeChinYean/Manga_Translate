@@ -265,11 +265,15 @@ async def translation_worker():
                 render_part = int(45.0 * rendered_count / max(1, total_selected_pages))
                 percent = 5 + ex_part + trans_part + render_part
                 
+                model_str = ""
+                if total_metrics.get("model_usage"):
+                    model_str = " | 模型: " + ", ".join(f"{k}:{v}" for k, v in total_metrics["model_usage"].items())
+
                 status_db[task_id]["percent"] = percent
                 status_db[task_id]["stage"] = (
                     f"流水线全速并发中: 已提取 {extracted_count}/{total_selected_pages} 页, "
                     f"已翻译 {translated_count}/{total_selected_pages} 页, "
-                    f"已重绘 {rendered_count}/{total_selected_pages} 页"
+                    f"已重绘 {rendered_count}/{total_selected_pages} 页" + model_str
                 )
             
             async def render_page_background(page_data, p_num, s_page):
@@ -348,6 +352,12 @@ async def translation_worker():
                         total_metrics["tokens_generated"] += metrics["tokens_generated"]
                         batch_count += 1
                         
+                        if "model_breakdown" in metrics:
+                            if "model_usage" not in total_metrics:
+                                total_metrics["model_usage"] = {}
+                            for k, v in metrics["model_breakdown"].items():
+                                total_metrics["model_usage"][k] = total_metrics["model_usage"].get(k, 0) + v
+
                         for temp_block in combined_blocks:
                             u_id = temp_block["id"]
                             p_num, orig_block, orig_block_id = block_refs[u_id]
@@ -355,6 +365,8 @@ async def translation_worker():
                             orig_block["is_sfx"] = temp_block.get("is_sfx", False)
                             orig_block["google_trans"] = temp_block.get("google_trans", "")
                             orig_block["cleaned_text"] = temp_block.get("cleaned_text", "")
+                            orig_block["ocr_engine"] = temp_block.get("ocr_engine", orig_block.get("ocr_engine", "MangaOCR (ViT)"))
+                            orig_block["translation_engine"] = temp_block.get("translation_engine", "Turbovec Qwen 3.5 4B")
                             
                             # Key by ORIGINAL block id (what the renderer reads), not unique_counter
                             translated_text_map[(p_num, orig_block_id)] = orig_block["translated_text"]
@@ -448,8 +460,15 @@ async def translation_worker():
                     b_raw = blk.get("cleaned_text", blk.get("text", ""))
                     # Key is (page_num, block_id) tuple — must match how translated_text_map is built
                     b_trans = translated_text_map.get((p_num, b_id), "")
+                    ocr_eng = blk.get("ocr_engine", "MangaOCR (ViT)")
+                    trans_eng = blk.get("translation_engine", "Turbovec Qwen 3.5 4B")
                     if b_raw or b_trans:
-                        p_blocks.append({"raw": b_raw, "translated": b_trans})
+                        p_blocks.append({
+                            "raw": b_raw,
+                            "translated": b_trans,
+                            "ocr_engine": ocr_eng,
+                            "translation_engine": trans_eng
+                        })
                 if p_blocks:
                     doc_pages_data.append({"page_num": p_num, "blocks": p_blocks})
             

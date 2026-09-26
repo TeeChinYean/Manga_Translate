@@ -41,3 +41,7 @@ $RECYCLE.BIN/
 # C# build artifacts
 [Bb]in/
 [Oo]bj/
+
+# Test sample PDFs
+test_ori_clip.pdf
+test_manga_sample.pdf

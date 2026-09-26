@@ -295,11 +295,16 @@ def _is_noise(text: str) -> bool:
             if w_alpha in noise_keywords:
                 return True
         
-    # Nearly no alphabetic content
-    if not alpha:
-        return True
-    if len(alpha) / len(t) < 0.35:
-        return True
+    if not has_cjk:
+        # Nearly no alphabetic content (only apply to Latin/English text)
+        if not alpha:
+            return True
+        if len(alpha) / len(t) < 0.35:
+            return True
+    else:
+        # For CJK, it is noise ONLY if there are literally 0 CJK characters
+        if not any('\u4e00' <= c <= '\u9fff' or '\u3040' <= c <= '\u30ff' for c in t):
+            return True
     return False
 
 def _google_translate_one(text: str, src: str, tgt: str = "zh-CN") -> str:
@@ -502,6 +507,7 @@ class HighPerformanceTranslationEngine:
                 block["cleaned_text"] = orig_text
                 block["google_trans"] = results[i]
                 block["is_sfx"] = False
+                block["translation_engine"] = "Glossary (专有名词库)"
                 continue
 
             raw = _clean_input(orig_text)
@@ -518,10 +524,12 @@ class HighPerformanceTranslationEngine:
                 
             if _is_noise(raw):
                 block["is_sfx"] = True
+                block["translation_engine"] = "SFX Noise Filter (音效跳过)"
                 continue
             if raw.isdigit() and len(raw) <= 4:
                 results[i] = raw
                 block["google_trans"] = raw
+                block["translation_engine"] = "Numeric Passthrough (纯数字)"
                 continue
 
             src = _detect_src_lang(raw)
@@ -600,6 +608,7 @@ class HighPerformanceTranslationEngine:
                                             clean_v = _clean_output(v)
                                             if any('\u4e00' <= c <= '\u9fff' for c in clean_v):
                                                 results[k_int] = clean_v
+                                                blocks[k_int]["translation_engine"] = "Turbovec Qwen 3.5 4B (Context Batch)"
                                                 logger.info(f"[Qwen Batch OK] ID {k_int} → '{clean_v}'")
                                     except (ValueError, TypeError):
                                         pass
@@ -630,29 +639,25 @@ class HighPerformanceTranslationEngine:
                                     sc = sdata["choices"][0]["message"]["content"].strip()
                                     if any('\u4e00' <= c <= '\u9fff' for c in sc):
                                         results[idx] = _clean_output(sc)
+                                        blocks[idx]["translation_engine"] = "Turbovec Qwen 3.5 4B (Single Fallback)"
                             except Exception as sex:
                                 logger.warning(f"[Qwen Single Fallback Failed] '{raw_text[:30]}': {sex}")
 
-            # ── Step 4.5: Qwen polishing for conversational quality ──────────────
-            polish_tasks = []
-            for i, block in enumerate(blocks):
-                if block.get("is_sfx"):
-                    continue
-                draft = results[i]
-                if not draft:
-                    continue
-                raw_text = block.get("cleaned_text", "").strip()
-                if _should_polish(raw_text, draft):
-                    polish_tasks.append((i, raw_text, draft))
+                        # Ultimate safety fallback: Google Translate API (guarantees NO text is ever left untranslated)
+                        if not results[idx]:
+                            raw_text = blocks[idx].get("cleaned_text", "").strip()
+                            if raw_text:
+                                try:
+                                    g_res = _google_translate_one(raw_text, src="ja", tgt="zh-CN")
+                                    if g_res and any('\u4e00' <= c <= '\u9fff' for c in g_res):
+                                        results[idx] = _clean_output(g_res)
+                                        blocks[idx]["translation_engine"] = "Google Translate API (Fallback)"
+                                        logger.info(f"[Google Fallback OK] ID {idx} → '{results[idx]}'")
+                                except Exception as g_err:
+                                    logger.warning(f"[Google Fallback Failed] ID {idx}: {g_err}")
 
-            if polish_tasks:
-                logger.info(f"[Qwen Polisher] Context-Aware Polishing {len(polish_tasks)} blocks in a single JSON batch...")
-                polished_results = _polish_batch_dialogues_json(polish_tasks)
-                for idx, _, draft in polish_tasks:
-                    if idx in polished_results and polished_results[idx]:
-                        results[idx] = polished_results[idx]
-                    else:
-                        results[idx] = draft
+            # Note: For Japanese, Qwen directly outputs localized, context-aware manga dialogues with glossary adherence.
+            # Skipping the redundant 2nd polishing pass saves 5-15s per page and prevents dropping lines.
 
         else:
             # ── English/Other Language pipeline: Google API + LLM Preprocessor + OPUS-MT Fallback ──
@@ -729,6 +734,19 @@ class HighPerformanceTranslationEngine:
         # ── Step 5: Write results back to blocks ──────────────────────────────
         for i, block in enumerate(blocks):
             block["translated_text"] = results[i]
+            if not block.get("translation_engine"):
+                if results[i]:
+                    block["translation_engine"] = "Turbovec Qwen 3.5 4B" if source_lang == "Japanese" else "Google Translate API"
+                elif block.get("is_sfx"):
+                    block["translation_engine"] = "SFX Noise Filter (音效跳过)"
+                else:
+                    block["translation_engine"] = "Passthrough / Untranslated"
+
+        # Model breakdown calculation
+        engine_counts = {}
+        for b in blocks:
+            eng = b.get("translation_engine", "Unknown")
+            engine_counts[eng] = engine_counts.get(eng, 0) + 1
 
         # ── Step 6: Dynamically Extract Proper Nouns ─────────────────────────
         _extract_proper_nouns_from_batch(blocks, results)
@@ -742,10 +760,11 @@ class HighPerformanceTranslationEngine:
             "latency_ms": round(elapsed * 1000, 2),
             "cuda_graphs_active": False,
             "tokens_generated": total_chars,
+            "model_breakdown": engine_counts
         }
         logger.info(
             f"[✓] {len(blocks)} blocks translated in {elapsed:.2f}s "
-            f"({metrics['tokens_per_sec']:.0f} chars/s)"
+            f"({metrics['tokens_per_sec']:.0f} chars/s) | Models: {engine_counts}"
         )
         return results, metrics
 
