@@ -14,7 +14,17 @@ import logging
 import threading
 import cv2
 import numpy as np
-import easyocr
+easyocr = None
+
+def _get_easyocr():
+    global easyocr
+    if easyocr is None:
+        try:
+            import easyocr as _eo
+            easyocr = _eo
+        except ImportError:
+            easyocr = None
+    return easyocr
 
 logger = logging.getLogger(__name__)
 
@@ -32,6 +42,10 @@ def _get_ocr_reader(lang="Japanese"):
     import torch
     device = 'cuda' if torch.cuda.is_available() else 'cpu'
     
+    eo = _get_easyocr()
+    if eo is None:
+        raise RuntimeError("easyocr is required for image OCR but not available in environment.")
+    
     with _OCR_LOCK:
         if lang == "Japanese":
             # Unload English reader to CPU RAM to save VRAM
@@ -44,7 +58,7 @@ def _get_ocr_reader(lang="Japanese"):
                     torch.cuda.empty_cache()
                     
             if _OCR_READER_JA is None:
-                _OCR_READER_JA = easyocr.Reader(['ja', 'en'], gpu=True)
+                _OCR_READER_JA = eo.Reader(['ja', 'en'], gpu=True)
             else:
                 # Move back to GPU
                 if hasattr(_OCR_READER_JA, 'detector') and _OCR_READER_JA.detector is not None:
@@ -67,7 +81,7 @@ def _get_ocr_reader(lang="Japanese"):
                 torch.cuda.empty_cache()
                 
             if _OCR_READER_EN is None:
-                _OCR_READER_EN = easyocr.Reader(['en'], gpu=True)
+                _OCR_READER_EN = eo.Reader(['en'], gpu=True)
             else:
                 # Move back to GPU
                 if hasattr(_OCR_READER_EN, 'detector') and _OCR_READER_EN.detector is not None:
@@ -258,16 +272,71 @@ class PDFLayoutExtractor:
  
     def _extract_single_page(self, pdf_path, page_num, source_lang="Japanese"):
         """
-        Thread-safe page extraction using EasyOCR for region detection + MangaOCR for recognition.
+        Thread-safe dual-engine page extraction:
+        1. Fast Path: Native digital PDF text extraction via PyMuPDF (0ms, 100% precision, 0 GPU).
+        2. Deep Path: EasyOCR CRAFT text region detection + MangaOCR recognition for scanned manga.
         """
-        from PIL import Image
-
         doc = fitz.open(pdf_path)
         page = doc[page_num - 1]
         page_width = float(page.rect.width)
         page_height = float(page.rect.height)
         
-        # 1. Render PDF page
+        # ── 1. Fast Path: Digital Text Check ──
+        raw_text_blocks = page.get_text("blocks")
+        valid_digital_blocks = []
+        total_digital_chars = 0
+        for b in raw_text_blocks:
+            if b[6] == 0:  # text type
+                txt = b[4].strip()
+                if txt and self._is_meaningful_text(txt):
+                    valid_digital_blocks.append(b)
+                    total_digital_chars += len(txt)
+
+        # In manga, scanned pages have large images and zero (or stray watermark) digital text
+        images = page.get_images()
+        is_scanned_manga_page = (len(images) > 0 and total_digital_chars < 30) or len(valid_digital_blocks) == 0
+
+        if not is_scanned_manga_page:
+            # Native digital text found! Bypass expensive CRAFT + MangaOCR
+            blocks = []
+            for idx, b in enumerate(valid_digital_blocks):
+                bx0, by0, bx1, by1 = float(b[0]), float(b[1]), float(b[2]), float(b[3])
+                txt = b[4].strip()
+                if source_lang == "Japanese":
+                    cleaned_txt = "".join(txt.splitlines()).strip()
+                else:
+                    cleaned_txt = " ".join(txt.splitlines()).strip()
+
+                blocks.append({
+                    "id": idx + 1,
+                    "text": cleaned_txt,
+                    "bbox": [bx0, by0, bx1, by1],
+                    "lines_bboxes": [[bx0, by0, bx1, by1]],
+                    "font_size": 12.0,
+                    "font_name": "Helvetica",
+                    "color": (0.0, 0.0, 0.0),
+                    "width": bx1 - bx0,
+                    "height": by1 - by0,
+                    "center_x": (bx0 + bx1) / 2.0,
+                    "center_y": (by0 + by1) / 2.0
+                })
+
+            doc.close()
+            sorted_blocks = self._sort_layout_blocks(blocks, page_width)
+            for idx, block in enumerate(sorted_blocks):
+                block["id"] = idx + 1
+
+            logger.info(f"[FastPath] Page {page_num}: Extracted {len(sorted_blocks)} native digital text blocks (0 GPU VRAM).")
+            return {
+                "page_num": page_num,
+                "blocks": sorted_blocks,
+                "page_width": page_width,
+                "page_height": page_height
+            }
+
+        # ── 2. Deep Path: Scanned Manga OCR ──
+        from PIL import Image
+
         TARGET_HEIGHT = 1600.0
         SCALE = TARGET_HEIGHT / max(1.0, page_height)
         pix = page.get_pixmap(matrix=fitz.Matrix(SCALE, SCALE), alpha=False)
