@@ -164,12 +164,14 @@ async def translation_worker():
             # Treat STATIC_DIR as cache: keep only the latest run's files
             try:
                 for f in os.listdir(STATIC_DIR):
+                    if f.startswith(".git"):
+                        continue
                     file_path = os.path.join(STATIC_DIR, f)
                     if os.path.isfile(file_path) or os.path.islink(file_path):
                         os.unlink(file_path)
                     elif os.path.isdir(file_path):
                         shutil.rmtree(file_path)
-                logger.info("🗑️ Cleared previous files in static directory (cache mode).")
+                logger.info("Cleared previous files in static directory (cache mode).")
             except Exception as e:
                 logger.warning(f"Failed to clear old static files: {e}")
             
