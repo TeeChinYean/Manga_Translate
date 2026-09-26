@@ -8,6 +8,9 @@ original RGB text color extraction, and strict noise filter.
 
 import os
 import re
+import warnings
+warnings.filterwarnings("ignore", category=UserWarning)
+warnings.filterwarnings("ignore", category=FutureWarning)
 import fitz  # PyMuPDF
 import concurrent.futures
 import logging
@@ -40,7 +43,8 @@ _OCR_READER_EN = None
 def _get_ocr_reader(lang="Japanese"):
     global _OCR_READER_JA, _OCR_READER_EN, _MANGA_OCR_INSTANCE
     import torch
-    device = 'cuda' if torch.cuda.is_available() else 'cpu'
+    use_gpu = torch.cuda.is_available()
+    device = 'cuda' if use_gpu else 'cpu'
     
     eo = _get_easyocr()
     if eo is None:
@@ -58,7 +62,7 @@ def _get_ocr_reader(lang="Japanese"):
                     torch.cuda.empty_cache()
                     
             if _OCR_READER_JA is None:
-                _OCR_READER_JA = eo.Reader(['ja', 'en'], gpu=True)
+                _OCR_READER_JA = eo.Reader(['ja', 'en'], gpu=use_gpu)
             else:
                 # Move back to GPU
                 if hasattr(_OCR_READER_JA, 'detector') and _OCR_READER_JA.detector is not None:
@@ -81,7 +85,7 @@ def _get_ocr_reader(lang="Japanese"):
                 torch.cuda.empty_cache()
                 
             if _OCR_READER_EN is None:
-                _OCR_READER_EN = eo.Reader(['en'], gpu=True)
+                _OCR_READER_EN = eo.Reader(['en'], gpu=use_gpu)
             else:
                 # Move back to GPU
                 if hasattr(_OCR_READER_EN, 'detector') and _OCR_READER_EN.detector is not None:
