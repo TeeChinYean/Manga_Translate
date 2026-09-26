@@ -6,6 +6,18 @@ Technology Stack: FastAPI, Asyncio Queue, Server-Sent Events (SSE) Stream, PyMuP
 Features: Decoupled from RAG terminology, simplified direct pipeline.
 """
 
+import sys
+if hasattr(sys.stdout, 'reconfigure'):
+    try:
+        sys.stdout.reconfigure(encoding='utf-8', errors='replace')
+    except Exception:
+        pass
+if hasattr(sys.stderr, 'reconfigure'):
+    try:
+        sys.stderr.reconfigure(encoding='utf-8', errors='replace')
+    except Exception:
+        pass
+
 import os
 import uuid
 import json

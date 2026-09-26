@@ -7,6 +7,18 @@ Fallback: Helsinki-NLP/opus-mt-en-zh local offline model (when Google fails)
 Final:    Qwen local LLM (when both above fail, strictly constrained prompt)
 """
 
+import sys
+if hasattr(sys.stdout, 'reconfigure'):
+    try:
+        sys.stdout.reconfigure(encoding='utf-8', errors='replace')
+    except Exception:
+        pass
+if hasattr(sys.stderr, 'reconfigure'):
+    try:
+        sys.stderr.reconfigure(encoding='utf-8', errors='replace')
+    except Exception:
+        pass
+
 import re
 import time
 import logging
@@ -462,8 +474,8 @@ class HighPerformanceTranslationEngine:
         self.device = "cpu"
         self.model_name = "Google Translate API + OPUS-MT Fallback"
         self._executor = ThreadPoolExecutor(max_workers=30)
-        logger.info("⚡ [Engine v7] Google API (primary) + OPUS-MT (fallback) ready.")
-        print("⚡ [Google API] Translation engine initialized — 30 concurrent workers, no model download needed.")
+        logger.info("[Engine v7] Google API (primary) + OPUS-MT (fallback) ready.")
+        logger.info("[Google API] Translation engine initialized - 30 concurrent workers, no model download needed.")
 
     def translate_batch(self, blocks, source_lang="English", target_lang="Simplified Chinese"):
         if not blocks:
