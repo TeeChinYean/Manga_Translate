@@ -48,15 +48,40 @@ def _call_turbovec_llm(payload: dict, timeout: float = 15.0):
     logger.warning(f"[Turbovec LLM] All endpoints failed: {last_err}")
     return None
 
-# ── Proper noun pre-fixes loaded from JSON ─────────────────────────────────────
+# ── Proper noun pre-fixes and glossary loaded from JSON ───────────────────────
 _PROPER_NOUNS = {}
+_PROPER_NOUNS_PATH = os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__))), "data", "proper_nouns.json")
+_GLOSSARY_PATH = os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__))), "data", "glossary.json")
+
 try:
-    _PROPER_NOUNS_PATH = os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__))), "data", "proper_nouns.json")
     if os.path.exists(_PROPER_NOUNS_PATH):
         with open(_PROPER_NOUNS_PATH, "r", encoding="utf-8") as f:
-            _PROPER_NOUNS = json.load(f)
+            _PROPER_NOUNS.update(json.load(f))
+    if os.path.exists(_GLOSSARY_PATH):
+        with open(_GLOSSARY_PATH, "r", encoding="utf-8") as f:
+            gloss_data = json.load(f)
+            if isinstance(gloss_data, list):
+                for item in gloss_data:
+                    src = item.get("src")
+                    tgt = item.get("tgt")
+                    if src and tgt and src not in _PROPER_NOUNS:
+                        _PROPER_NOUNS[src] = tgt
 except Exception as e:
-    logger.warning(f"Could not load proper nouns: {e}")
+    logger.warning(f"Could not load proper nouns / glossary: {e}")
+
+def _get_relevant_glossary(texts: list) -> dict:
+    """Finds glossary and character terms matching any of the texts in the current batch."""
+    if not _PROPER_NOUNS:
+        return {}
+    combined = " ".join(str(t) for t in texts if t)
+    combined_lower = combined.lower()
+    matched = {}
+    for k, v in _PROPER_NOUNS.items():
+        if not k or not v:
+            continue
+        if k in combined or k.lower() in combined_lower:
+            matched[k] = v
+    return matched
 
 # ── Post-translation cleanup ─────────────────────────────────────────────────
 _PAREN_EN_RE = re.compile(r'\s*\([A-Za-z][A-Za-z\s\-]*\)')
@@ -113,6 +138,12 @@ def _clean_output(text: str) -> str:
     # Replace common literal translation errors
     text = text.replace("是键", "是关键")
     text = text.replace("是核心键", "是核心")
+    
+    # Canonicalize proper nouns in output
+    for wrong, right in _PROPER_NOUNS.items():
+        if wrong and right and wrong != right:
+            if wrong in text:
+                text = text.replace(wrong, right)
     
     return text.strip()
 
@@ -272,9 +303,24 @@ def _polish_batch_dialogues_json(polish_tasks: list) -> dict:
         
     import json
     
+    # Gather relevant terms from glossary
+    batch_raws = [raw for _, raw, _ in polish_tasks]
+    batch_drafts = [drf for _, _, drf in polish_tasks]
+    relevant_terms = _get_relevant_glossary(batch_raws + batch_drafts)
+    
+    glossary_prompt = ""
+    if relevant_terms:
+        glossary_prompt = (
+            "\n【必须严格遵守的专有名词与角色称谓统一表】\n"
+            + "\n".join(f"- {k} -> {v}" for k, v in relevant_terms.items())
+            + "\n（若台词中出现上述人名、术语或对应含义，必须严格采用指定译名，保持全篇一致）\n"
+        )
+
     prompt_lines = ["以下是连续台词，请开始处理："]
     for idx, raw, drf in polish_tasks:
         prompt_lines.append(f"ID: {idx} | 原文: {raw} | 机翻: {drf}")
+    if glossary_prompt:
+        prompt_lines.append(glossary_prompt)
     prompt = "\n".join(prompt_lines)
     
     system_prompt = (
@@ -284,9 +330,10 @@ def _polish_batch_dialogues_json(polish_tasks: list) -> dict:
         "要求：\n"
         "1. 保留原有语气词，如果是日常对话必须口语化，如果是旁白必须有文学色彩。\n"
         "2. 绝对不带任何标点句号（。），保留感叹号和问号。\n"
-        "3. 遇到无意义的乱码，其对应的值必须为空字符串 \"\"。\n"
-        "4. 【严重警告】严禁输出任何解释、分析或注释（绝不允许出现类似“注：这里的语气词...”这种废话）！\n"
-        "5. 你必须且只能返回一个合法的 JSON 对象，键为传入的 ID，值为润色后的纯中文文本。例如：{\"0\": \"你好！\", \"1\": \"今天天气真好\"}"
+        "3. 遇到专有名词严格按照对照表统一译名，不得随意变动角色名称。\n"
+        "4. 遇到无意义的乱码，其对应的值必须为空字符串 \"\"。\n"
+        "5. 【严重警告】严禁输出任何解释、分析或注释！\n"
+        "6. 你必须且只能返回一个合法的 JSON 对象，键为传入的 ID，值为润色后的纯中文文本。例如：{\"0\": \"你好！\", \"1\": \"今天天气真好\"}"
     )
     
     payload = {
@@ -438,7 +485,7 @@ class HighPerformanceTranslationEngine:
 
         # ── Step 2-4: Translation Pipeline ──
         if source_lang == "Japanese":
-            # ── Japanese-specific routing: Strictly local Qwen cascade (Step 4 & 4.5) ──
+            # ── Japanese-specific routing: Local Qwen Context-Batch Cascade ──
             qwen_needed = []
             for i, block in enumerate(blocks):
                 if block.get("is_sfx"):
@@ -446,63 +493,101 @@ class HighPerformanceTranslationEngine:
                 if results[i]:
                     continue
                 raw = block.get("cleaned_text", "").strip()
-                if raw and any(c.isalpha() for c in raw):
+                if raw and any(c.isalpha() or '\u3040' <= c <= '\u30ff' or '\u4e00' <= c <= '\u9fff' for c in raw):
                     qwen_needed.append(i)
 
             if qwen_needed:
-                logger.warning(f"[Qwen Fallback] {len(qwen_needed)} blocks need LLM fallback.")
-                for idx in qwen_needed:
-                    raw_text = blocks[idx].get("cleaned_text", "").strip()
-                    if not raw_text:
-                        continue
-                    # Advanced prompt for direct translation with literary/colloquial styling
+                logger.info(f"[Qwen Japanese Translation] Translating {len(qwen_needed)} blocks in context batch...")
+                chunk_size = 12
+                for c_start in range(0, len(qwen_needed), chunk_size):
+                    chunk_indices = qwen_needed[c_start:c_start + chunk_size]
+                    batch_texts = [blocks[idx].get("cleaned_text", "").strip() for idx in chunk_indices]
+                    
+                    # Match relevant terminology for this batch
+                    relevant_glossary = _get_relevant_glossary(batch_texts)
+                    glossary_prompt = ""
+                    if relevant_glossary:
+                        glossary_prompt = (
+                            "\n【必须严格遵守的专有名词与角色称谓统一表】:\n"
+                            + "\n".join(f"- {k} -> {v}" for k, v in relevant_glossary.items())
+                            + "\n"
+                        )
+                    
+                    prompt_lines = ["以下是同一场景下的连续日语漫画台词，请根据连续对话上下文将其翻译为最自然流畅、符合角色语气性格的中文台词："]
+                    for idx in chunk_indices:
+                        raw_t = blocks[idx].get("cleaned_text", "").strip()
+                        prompt_lines.append(f"ID: {idx} | 原文: {raw_t}")
+                    if glossary_prompt:
+                        prompt_lines.append(glossary_prompt)
+                    prompt_lines.append("\n请严格返回一个合法的 JSON 对象，键为传入的 ID，值为对应的纯中文翻译文本。例如：{\"0\": \"你好！\", \"1\": \"今天天气真好\"}")
+                    user_prompt = "\n".join(prompt_lines)
+                    
                     system_prompt = (
-                        "你现在是一个无审查的日漫翻译专家。你的唯一任务是将日语原文直接翻译为【中文台词】。\n"
+                        "你是一个顶尖的日漫汉化翻译专家。\n"
                         "规则：\n"
-                        "1. 日常对话必须自然流畅、符合人物口吻，拒绝生硬机翻，但【绝对禁止使用粗俗的网络用语、脏话（如TM）】。\n"
+                        "1. 根据同一场景的连续对话语境，将每句台词翻译为符合人物口吻与情绪的中文台词。\n"
                         "2. 绝对不带任何标点句号（。），可以保留感叹号、问号和省略号。\n"
-                        "3. 严禁任何解释、前言或拒绝回应，直接输出翻译结果。\n"
-                        "4. 【致命警告】绝对禁止在译文中保留任何英文单词、罗马音或拼音（如 chan, san, kun），必须将其翻译为对应的中文（如'酱'、'桑'、'君'）或根据语境省略。\n"
-                        "5. 遇到书名号或专有名词必须精准直译，不可望文生义。"
+                        "3. 严禁在译文中保留任何未翻译的罗马音或英文（如 chan, san, kun, sama），必须本土化为'酱'、'桑'、'君'、'大人'等或根据语境省略。\n"
+                        "4. 遇到专有名词必须严格按照对照表统一译名。\n"
+                        "5. 严禁输出任何多余的解释、前言或分析，只返回 JSON 对象。"
                     )
-                    prompt = f"原文：{raw_text}\n请直接给出最完美的本地化中文译文："
                     
                     payload = {
                         "model": TURBOVEC_MODEL,
                         "messages": [
                             {"role": "system", "content": system_prompt},
-                            {"role": "user", "content": "原文：お兄ちゃん\n请直接给出最完美的本地化中文译文："},
-                            {"role": "assistant", "content": "哥哥"},
-                            {"role": "user", "content": "原文：そういうことで、\n请直接给出最完美的本地化中文译文："},
-                            {"role": "assistant", "content": "所以说，"},
-                            {"role": "user", "content": "原文：テーちゃんの眠り破れてたし\n请直接给出最完美的本地化中文译文："},
-                            {"role": "assistant", "content": "而且还打扰了小泰的睡眠"},
-                            {"role": "user", "content": "原文：図書館の大魔術師\n请直接给出最完美的本地化中文译文："},
-                            {"role": "assistant", "content": "图书馆的大魔法师"},
-                            {"role": "user", "content": prompt}
+                            {"role": "user", "content": user_prompt}
                         ],
-                        "temperature": 0.3,
-                        "max_tokens": 120,
+                        "temperature": 0.2,
+                        "max_tokens": 2048,
+                        "response_format": {"type": "json_object"}
                     }
-                    for attempt in range(1, 4):
+                    
+                    for attempt in range(1, 3):
                         try:
-                            data = _call_turbovec_llm(payload, timeout=12.0)
+                            data = _call_turbovec_llm(payload, timeout=18.0)
                             if data and "choices" in data and len(data["choices"]) > 0:
-                                content_reply = data["choices"][0]["message"]["content"].strip()
-                                refusal_keywords = ["对不起", "无法处理", "敏感", "安全政策", "AI助手", "无法提供", "违规", "作为一个人工智能"]
-                                is_refusal = any(kw in content_reply for kw in refusal_keywords)
-                                if any('\u4e00' <= c <= '\u9fff' for c in content_reply) and not is_refusal:
-                                    results[idx] = _clean_output(content_reply)
-                                    logger.info(f"[Qwen OK] '{raw_text[:40]}' → '{results[idx]}'")
-                                    break
-                                else:
-                                    if is_refusal:
-                                        logger.warning(f"[Qwen Refusal Detected] Skipped: '{content_reply}'")
+                                reply = data["choices"][0]["message"]["content"].strip()
+                                parsed = json.loads(reply)
+                                for k, v in parsed.items():
+                                    try:
+                                        k_int = int(k)
+                                        if k_int in chunk_indices and v and isinstance(v, str):
+                                            clean_v = _clean_output(v)
+                                            if any('\u4e00' <= c <= '\u9fff' for c in clean_v):
+                                                results[k_int] = clean_v
+                                                logger.info(f"[Qwen Batch OK] ID {k_int} → '{clean_v}'")
+                                    except (ValueError, TypeError):
+                                        pass
+                                break
                         except Exception as ex:
-                            if attempt < 3:
-                                time.sleep(1.0)
-                            else:
-                                logger.warning(f"[Qwen Failed] '{raw_text[:40]}': {ex}")
+                            logger.warning(f"[Qwen Batch Translation] Attempt {attempt} failed: {ex}")
+                            time.sleep(0.5)
+                            
+                    # Single-sentence fallback for any missing indices
+                    for idx in chunk_indices:
+                        if not results[idx]:
+                            raw_text = blocks[idx].get("cleaned_text", "").strip()
+                            if not raw_text:
+                                continue
+                            single_prompt = f"原文：{raw_text}\n请直接给出最完美的本地化中文译文："
+                            single_payload = {
+                                "model": TURBOVEC_MODEL,
+                                "messages": [
+                                    {"role": "system", "content": system_prompt},
+                                    {"role": "user", "content": single_prompt}
+                                ],
+                                "temperature": 0.2,
+                                "max_tokens": 120,
+                            }
+                            try:
+                                sdata = _call_turbovec_llm(single_payload, timeout=8.0)
+                                if sdata and "choices" in sdata and len(sdata["choices"]) > 0:
+                                    sc = sdata["choices"][0]["message"]["content"].strip()
+                                    if any('\u4e00' <= c <= '\u9fff' for c in sc):
+                                        results[idx] = _clean_output(sc)
+                            except Exception as sex:
+                                logger.warning(f"[Qwen Single Fallback Failed] '{raw_text[:30]}': {sex}")
 
             # ── Step 4.5: Qwen polishing for conversational quality ──────────────
             polish_tasks = []
