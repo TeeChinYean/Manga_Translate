@@ -1,12 +1,20 @@
 @echo off
 chcp 65001 >nul
-title PDF 漫画翻译系统 · 极速启动器
+title PDF 漫画翻译系统 [Port 8000]
 
 echo ========================================================
-echo    ⚡ PDF 翻译与排版保真引擎 · Web 服务启动器
+echo    PDF 漫画翻译与排版保真引擎 (Port 8000)
 echo ========================================================
 echo.
 
-powershell.exe -NoProfile -ExecutionPolicy Bypass -File "%~dp0start_web_app.ps1"
+cd /d "%~dp0pdf_translate"
+
+echo 正在启动服务 (http://127.0.0.1:8000)...
+echo 提示: 浏览器将在 2 秒后自动打开。
+echo.
+
+start "" "http://127.0.0.1:8000"
+
+python main.py
 
 pause

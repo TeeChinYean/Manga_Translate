@@ -24,19 +24,45 @@ TURBOVEC_API_URL = os.getenv("TURBOVEC_API_URL", "http://localhost:18088/v1/chat
 LLAMA_SERVER_DIRECT_URL = os.getenv("LLAMA_SERVER_URL", "http://127.0.0.1:18089/v1/chat/completions")
 TURBOVEC_MODEL = os.getenv("TURBOVEC_MODEL", "docker.io/ai/qwen3.5:4b-q4_K_M")
 
+_LLAMA_KEY = None
+
+def _get_llama_api_key():
+    global _LLAMA_KEY
+    if _LLAMA_KEY is None:
+        key_env = os.getenv("LLAMA_API_KEY")
+        if key_env:
+            _LLAMA_KEY = key_env.strip()
+        else:
+            default_key_path = os.path.join(
+                os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__)))),
+                "qwen_turbovec_rag", "app", "storage", "llama_api_key.txt"
+            )
+            if os.path.exists(default_key_path):
+                try:
+                    with open(default_key_path, "r", encoding="utf-8") as f:
+                        _LLAMA_KEY = f.read().strip()
+                except Exception:
+                    pass
+    return _LLAMA_KEY
+
 def _call_turbovec_llm(payload: dict, timeout: float = 15.0):
     """
     Calls Turbovec OpenAI-compatible API endpoint (port 18088 gateway or 18089 direct llama-server).
-    Automatically injects target model name and provides seamless fallback.
+    Automatically injects target model name, auth header, and provides seamless fallback.
     """
     if "model" not in payload or not payload["model"]:
         payload["model"] = TURBOVEC_MODEL
+        
+    headers = {}
+    key = _get_llama_api_key()
+    if key:
+        headers["Authorization"] = f"Bearer {key}"
         
     endpoints = [TURBOVEC_API_URL, LLAMA_SERVER_DIRECT_URL]
     last_err = None
     for url in endpoints:
         try:
-            r = httpx.post(url, json=payload, timeout=timeout)
+            r = httpx.post(url, json=payload, headers=headers, timeout=timeout)
             if r.status_code == 200:
                 return r.json()
             else:
