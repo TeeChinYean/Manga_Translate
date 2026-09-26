@@ -126,6 +126,43 @@ def parse_page_range(range_str: str, max_pages: int) -> set:
     return pages if pages else set(range(1, max_pages + 1))
 
 
+async def preload_all_models():
+    """
+    Preloads all OCR models and warms up the Turbovec LLM in memory during server startup.
+    This guarantees zero cold-start delay when the user uploads their first manga PDF.
+    """
+    logger.info("⚡ [Preloader] Pre-warming models: MangaOCR, EasyOCR, and Turbovec LLM...")
+    
+    # 1. Preload & verify Turbovec LLM
+    from core.engine import ensure_turbovec_llm_ready
+    loop = asyncio.get_running_loop()
+    await loop.run_in_executor(None, ensure_turbovec_llm_ready, True, 25)
+    
+    # 2. Preload EasyOCR and MangaOCR
+    def _warm_ocr():
+        try:
+            from core.extractor import _get_ocr_reader, _get_manga_ocr
+            import numpy as np
+            from PIL import Image
+            
+            # Warm EasyOCR detector
+            reader = _get_ocr_reader("Japanese")
+            dummy_img = np.full((128, 128, 3), 255, dtype=np.uint8)
+            reader.readtext(dummy_img, paragraph=True)
+            
+            # Warm MangaOCR ViT model
+            mocr = _get_manga_ocr()
+            if mocr is not None:
+                dummy_pil = Image.fromarray(dummy_img)
+                mocr(dummy_pil)
+            logger.info("✔ [Preloader] OCR models (EasyOCR + MangaOCR) 100% preloaded!")
+        except Exception as ex:
+            logger.warning(f"⚠️ [Preloader] OCR preloading warning: {ex}")
+            
+    await loop.run_in_executor(None, _warm_ocr)
+    logger.info("✔ [Preloader] All pipeline models preloaded and warm in memory!")
+
+
 @app.on_event("startup")
 async def startup_event():
     global translation_engine
@@ -137,6 +174,9 @@ async def startup_event():
     # Start the non-blocking background queue task listener
     asyncio.create_task(translation_worker())
     logger.info("[✓] Background Translation Queue Guardian started successfully!")
+
+    # Preload and pre-warm all OCR models & Turbovec LLM in the background
+    asyncio.create_task(preload_all_models())
 
 # ----------------------------------------------------
 # Asynchronous Background Queue Worker Pipeline
@@ -683,5 +723,19 @@ async def download_translated_file(filename: str):
 
 
 if __name__ == "__main__":
+    # Ensure port 8000 is clean and free from previous dead processes
+    import subprocess
+    try:
+        res = subprocess.run(['netstat', '-ano'], capture_output=True, text=True)
+        my_pid = os.getpid()
+        for line in res.stdout.splitlines():
+            if ':8000' in line and 'LISTENING' in line:
+                pid = line.strip().split()[-1]
+                if pid.isdigit() and int(pid) != my_pid:
+                    os.system(f'taskkill /F /PID {pid} >nul 2>&1')
+                    time.sleep(0.5)
+    except Exception:
+        pass
+
     import uvicorn
     uvicorn.run(app, host="127.0.0.1", port=8000)

@@ -14,19 +14,29 @@ for /f "tokens=5" %%p in ('netstat -aon ^| findstr ":8000" ^| findstr "LISTENING
     taskkill /f /pid %%p >nul 2>&1
 )
 
-:: 2. Auto-detect Turbovec Qwen 3.5 LLM engine (Port 18089 / 18088)
+:: 2. Auto-detect & start Turbovec Qwen 3.5 LLM engine (Port 18089 / 18088)
+echo Checking LLM inference engine status (Port 18089 / 18088)...
 netstat -aon | findstr ":18089" | findstr "LISTENING" >nul 2>&1
-if errorlevel 1 (
-    echo Checking Turbovec gateway...
-    netstat -aon | findstr ":18088" | findstr "LISTENING" >nul 2>&1
-    if errorlevel 1 (
-        echo Starting local Qwen 3.5 LLM engine
-        if exist "%~dp0..\qwen_turbovec_rag\app\llm_launcher.py" (
-            start /min "Turbovec LLM Engine" /d "%~dp0..\qwen_turbovec_rag" python app\llm_launcher.py --model 1
-            ping 127.0.0.1 -n 4 >nul
-        )
+if not errorlevel 1 goto llm_ready
+
+netstat -aon | findstr ":18088" | findstr "LISTENING" >nul 2>&1
+if not errorlevel 1 goto llm_ready
+
+echo Starting local Qwen 3.5 LLM engine in background...
+if exist "%~dp0..\qwen_turbovec_rag\app\llm_launcher.py" (
+    start /min "Turbovec LLM Engine" /d "%~dp0..\qwen_turbovec_rag" python app\llm_launcher.py --model 1
+    echo Waiting for LLM engine to load model into memory...
+    for /l %%i in (1,1,25) do (
+        ping 127.0.0.1 -n 2 >nul
+        netstat -aon | findstr ":18089" | findstr "LISTENING" >nul 2>&1
+        if not errorlevel 1 goto llm_ready
+        netstat -aon | findstr ":18088" | findstr "LISTENING" >nul 2>&1
+        if not errorlevel 1 goto llm_ready
     )
 )
+
+:llm_ready
+echo [OK] LLM inference engine ready!
 
 :: 3. Launch browser
 echo.

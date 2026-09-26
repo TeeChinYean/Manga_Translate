@@ -1,4 +1,4 @@
-﻿# ==============================================================================
+# ==============================================================================
 # PDF 漫画翻译系统启动脚本 (PowerShell)
 # ==============================================================================
 
@@ -22,10 +22,23 @@ if ($llm18088) {
 } elseif ($llm18089) {
     Write-Host "✔ 本地 llama-server 推理服务已连接 (http://127.0.0.1:18089)" -ForegroundColor Green
 } else {
-    Write-Host "⚠️ 未检测到 Turbovec 本地大模型服务 (Port 18088/18089)。" -ForegroundColor DarkYellow
-    Write-Host "   提示: 如需使用 Qwen 3.5 4B 日漫汉化与对话润色功能，请先前往:" -ForegroundColor Gray
-    Write-Host "   c:\Users\Work\Desktop\project\qwen_turbovec_rag 运行 start_full_system.bat" -ForegroundColor Cyan
-    Write-Host "   (若仅测试页面排版或数字 PDF 提取，当前仍可正常使用)" -ForegroundColor Gray
+    Write-Host "⚠️ 未检测到运行中的大模型服务，正在后台自动启动 Qwen 3.5 4B..." -ForegroundColor Cyan
+    $ragDir = Join-Path $ScriptDir "..\qwen_turbovec_rag"
+    $launcherPy = Join-Path $ragDir "app\llm_launcher.py"
+    if (Test-Path $launcherPy) {
+        Start-Process -FilePath "python" -ArgumentList "app\llm_launcher.py --model 1" -WorkingDirectory $ragDir -WindowStyle Minimized
+        Write-Host "   正在等待大模型加载模型权重并绑定端口 (Port 18089)..." -ForegroundColor Yellow
+        for ($i = 0; $i -lt 25; $i++) {
+            Start-Sleep -Seconds 1
+            $check = Test-NetConnection -ComputerName 127.0.0.1 -Port 18089 -WarningAction SilentlyContinue -InformationLevel Quiet
+            if ($check) {
+                Write-Host "✔ Qwen 3.5 4B 大模型服务已成功就绪！" -ForegroundColor Green
+                break
+            }
+        }
+    } else {
+        Write-Host "   提示: 如需启用本地大模型，请确保 qwen_turbovec_rag 目录存在。" -ForegroundColor DarkYellow
+    }
 }
 
 Write-Host ""

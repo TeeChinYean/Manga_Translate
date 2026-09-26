@@ -62,10 +62,87 @@ def _get_llama_api_key():
                         pass
     return _LLAMA_KEY
 
+def ensure_turbovec_llm_ready(auto_launch: bool = True, max_wait_seconds: int = 25) -> bool:
+    """
+    Checks if Turbovec LLM (port 18089 direct or 18088 gateway) is active and pre-warmed.
+    If not running and auto_launch=True, starts llm_launcher.py in the background and waits until healthy.
+    """
+    # 1. Quick probe
+    for probe_url in ["http://127.0.0.1:18089/health", "http://127.0.0.1:18088/health"]:
+        try:
+            r = httpx.get(probe_url, timeout=1.5)
+            if r.status_code == 200:
+                logger.info(f"⚡ [Turbovec LLM] Engine already running and healthy ({probe_url}).")
+                return True
+        except Exception:
+            pass
+
+    if not auto_launch:
+        return False
+
+    # 2. Find llm_launcher.py in qwen_turbovec_rag
+    candidate_dirs = [
+        os.path.join(os.path.dirname(os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))), "qwen_turbovec_rag"),
+        os.path.join(os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__)))), "..", "qwen_turbovec_rag"),
+        r"c:\Users\Work\Desktop\project\qwen_turbovec_rag"
+    ]
+    rag_dir = None
+    for d in candidate_dirs:
+        norm_d = os.path.normpath(d)
+        if os.path.exists(os.path.join(norm_d, "app", "llm_launcher.py")):
+            rag_dir = norm_d
+            break
+
+    if not rag_dir:
+        logger.warning("⚡ [Turbovec LLM] qwen_turbovec_rag not found; cannot auto-launch LLM.")
+        return False
+
+    logger.info(f"⚡ [Turbovec LLM] Starting local Qwen 3.5 4B model via {rag_dir}...")
+    import subprocess
+    cmd = [sys.executable, os.path.join("app", "llm_launcher.py"), "--model", "1"]
+    try:
+        CREATE_NEW_PROCESS_GROUP = 0x00000200
+        DETACHED_PROCESS = 0x00000008
+        subprocess.Popen(
+            cmd,
+            cwd=rag_dir,
+            creationflags=DETACHED_PROCESS | CREATE_NEW_PROCESS_GROUP,
+            close_fds=True
+        )
+    except Exception as e:
+        logger.warning(f"⚡ [Turbovec LLM] Failed spawning llm_launcher.py: {e}")
+        return False
+
+    # 3. Wait until port 18089 responds to /health
+    start_t = time.time()
+    while time.time() - start_t < max_wait_seconds:
+        time.sleep(1.0)
+        try:
+            r = httpx.get("http://127.0.0.1:18089/health", timeout=1.5)
+            if r.status_code == 200:
+                elapsed = time.time() - start_t
+                logger.info(f"✔ [Turbovec LLM] Engine booted and responsive in {elapsed:.1f}s!")
+                # Send warm-up inference request
+                try:
+                    _call_turbovec_llm({
+                        "model": TURBOVEC_MODEL,
+                        "messages": [{"role": "user", "content": "1"}],
+                        "max_tokens": 2
+                    }, timeout=5.0)
+                    logger.info("✔ [Turbovec LLM] Pre-warm inference successful!")
+                except Exception:
+                    pass
+                return True
+        except Exception:
+            continue
+
+    logger.warning(f"⚠️ [Turbovec LLM] Engine did not become healthy within {max_wait_seconds}s.")
+    return False
+
 def _call_turbovec_llm(payload: dict, timeout: float = 15.0):
     """
     Calls Turbovec OpenAI-compatible API endpoint (direct llama-server 18089 or Turbovec gateway 18088).
-    Automatically injects target model name, auth header, and provides seamless fallback.
+    Automatically injects target model name, auth header, and provides connection resilience and retries.
     """
     if "model" not in payload or not payload["model"]:
         payload["model"] = TURBOVEC_MODEL
@@ -77,16 +154,23 @@ def _call_turbovec_llm(payload: dict, timeout: float = 15.0):
         
     # Prioritize 18089 direct llama-server for speed, fallback to 18088 gateway
     endpoints = [LLAMA_SERVER_DIRECT_URL, TURBOVEC_API_URL]
-    last_err = None
-    for url in endpoints:
-        try:
-            r = httpx.post(url, json=payload, headers=headers, timeout=timeout)
-            if r.status_code == 200:
-                return r.json()
-            else:
-                logger.warning(f"[Turbovec LLM] HTTP {r.status_code} from {url}: {r.text[:100]}")
-        except Exception as e:
-            last_err = e
+    
+    for attempt in range(1, 4):
+        last_err = None
+        for url in endpoints:
+            try:
+                r = httpx.post(url, json=payload, headers=headers, timeout=timeout)
+                if r.status_code == 200:
+                    return r.json()
+                else:
+                    logger.warning(f"[Turbovec LLM] HTTP {r.status_code} from {url}: {r.text[:100]}")
+            except Exception as e:
+                last_err = e
+                continue
+                
+        # If connection refused and attempt 1, try auto-launching or waiting
+        if attempt < 3:
+            time.sleep(1.0)
             continue
             
     logger.warning(f"[Turbovec LLM] All endpoints failed: {last_err}")
