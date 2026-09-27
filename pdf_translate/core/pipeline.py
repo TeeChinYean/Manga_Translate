@@ -218,74 +218,29 @@ async def _run_pipeline_async(pdf_path, page_range_str, source_lang, target_lang
                         
             await asyncio.sleep(0.01)
 
+        # ── 阶段 1：先提取与翻译同时进行 (Stage 1: Streaming Extraction + Concurrent Translation) ──
+        # 提取(EasyOCR on CPU + MangaOCR) 与 翻译(LLM) 边提取边翻译；重绘暂不启动，全部算力与内存优先供给提取与翻译
         layout_data = []
         current_chunk = []
         PAGES_PER_BATCH = 1
         
         translation_queue = asyncio.Queue()
-        rendering_queue = asyncio.Queue()
         
         async def translation_worker():
             while True:
                 chunk = await translation_queue.get()
                 if chunk is None:
-                    await rendering_queue.put(None)
                     translation_queue.task_done()
                     break
                 try:
                     await process_page_chunk_translate(chunk)
-                    for page in chunk:
-                        await rendering_queue.put(page)
                 except Exception as e:
                     print(f"\n[Pipeline] 🚨 后台翻译线程异常: {e}")
                 finally:
                     translation_queue.task_done()
 
-        async def rendering_worker():
-            import shutil
-            nonlocal rendered_count
-            print(f"\n[Pipeline] 🚀 rendering_worker 全异步后台线程已启动！")
-            while True:
-                page = await rendering_queue.get()
-                if page is None:
-                    print(f"\n[Pipeline] 🛑 rendering_worker 收到结束信号。")
-                    rendering_queue.task_done()
-                    break
-                try:
-                    p_num = page["page_num"]
-                    print(f"[Pipeline] 🧵 rendering_worker 拿到第 {p_num} 页，准备处理...")
-                    cache_path = os.path.join(cache_base_dir, f"page_{p_num}.jpg")
-                    
-                    if os.path.exists(cache_path):
-                        print(f"[Pipeline] ⏩ 发现现有渲染缓存 (第 {p_num} 页)，直接复用。")
-                        temp_dest = os.path.join(temp_dir, f"rendered_page_{p_num}.jpg")
-                        await asyncio.to_thread(shutil.copy, cache_path, temp_dest)
-                        render_tasks[p_num] = temp_dest
-                        async with progress_lock:
-                            rendered_count += 1
-                            update_progress()
-                    else:
-                        src_page = doc[p_num - 1]
-                        print(f"[Pipeline] 🎨 正在后台并行重绘 (第 {p_num} 页)...")
-                        dest_path = await render_page_background(page, p_num, src_page)
-                        if dest_path and os.path.exists(dest_path):
-                            await asyncio.to_thread(shutil.copy, dest_path, cache_path)
-                        render_tasks[p_num] = dest_path
-                        async with progress_lock:
-                            rendered_count += 1
-                            update_progress()
-                except Exception as e:
-                    import traceback
-                    traceback.print_exc()
-                    print(f"\n[Pipeline] 🚨 后台重绘线程异常: {e}")
-                finally:
-                    rendering_queue.task_done()
-
-        # 启动后台翻译与重绘双工作线程 (真正三级异步流水线: 提取 -> 翻译 -> 重绘 全部重叠并发)
         worker_task = asyncio.create_task(translation_worker())
-        render_worker_task = asyncio.create_task(rendering_worker())
         
-        # ── Stage 1: Process streaming pages (OCR extraction) ──
         async for chunk_page in extractor.extract_layout_stream(page_range_list=selected_pages, source_lang=source_lang):
             if task_id in cancelled_tasks:
                 await translation_queue.put(None)
@@ -305,22 +260,48 @@ async def _run_pipeline_async(pdf_path, page_range_str, source_lang, target_lang
         if current_chunk:
             await translation_queue.put(current_chunk)
             
-        # OCR 阶段完成！立即完全卸载 OCR 模型，释放 RAM / VRAM
-        print(f"\n[Pipeline] 🧹 OCR 提取完毕，立即释放 OCR 模型内存与显存...")
+        # ── 阶段 2：OCR 完成即刻彻底卸载释放 (Stage 2: Unload OCR models immediately) ──
+        print(f"\n[Pipeline] 🧹 所有页面 OCR 提取完毕，立即彻底释放 EasyOCR 与 MangaOCR (RAM 与显存)...")
         from core.extractor import unload_models as unload_ocr
         await asyncio.to_thread(unload_ocr)
         import torch
         if torch.cuda.is_available():
             torch.cuda.empty_cache()
             
-        # 标记翻译队列输入结束并等待翻译队列完成
+        # 等待后台翻译队列全部完成收尾
         await translation_queue.put(None)
         await worker_task
-        print(f"\n[Pipeline] 🧹 翻译阶段已全部完成，等待剩余页面重绘完成...")
+        print(f"\n[Pipeline] 🧹 翻译阶段已全部完成，已准备好所有页面的翻译文本映射！")
+
+        # ── 阶段 3：全面启动 OpenCV Telea 极速重绘与排版 (Stage 3: OpenCV Telea Inpainting & Layout) ──
+        _safe_callback(75, "OCR完成且模型已彻底卸载，全面启动 OpenCV Telea 极速重绘与排版...", "processing")
+        print(f"[Pipeline] 🎨 开始使用 OpenCV Telea 极速重绘 (共 {len(layout_data)} 页)...")
         
-        # 等待后台重绘队列全部完成
-        await render_worker_task
-        print(f"[Pipeline] 🎨 所有页面重绘全部完成！")
+        render_sem = asyncio.Semaphore(4)
+        
+        async def render_single_page_job(page):
+            import shutil
+            nonlocal rendered_count
+            p_num = page["page_num"]
+            cache_path = os.path.join(cache_base_dir, f"page_{p_num}.jpg")
+            
+            if os.path.exists(cache_path):
+                temp_dest = os.path.join(temp_dir, f"rendered_page_{p_num}.jpg")
+                await asyncio.to_thread(shutil.copy, cache_path, temp_dest)
+                render_tasks[p_num] = temp_dest
+            else:
+                src_page = doc[p_num - 1]
+                dest_path = await render_page_background(page, p_num, src_page)
+                if dest_path and os.path.exists(dest_path):
+                    await asyncio.to_thread(shutil.copy, dest_path, cache_path)
+                render_tasks[p_num] = dest_path
+                
+            async with progress_lock:
+                rendered_count += 1
+                update_progress()
+
+        await asyncio.gather(*[render_single_page_job(page) for page in layout_data])
+        print(f"[Pipeline] 🎨 所有页面 OpenCV Telea 重绘与排版全部完成！")
 
         if layout_data:
             print(f"\n[Pipeline] 🧹 释放重绘资源...")

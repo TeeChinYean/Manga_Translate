@@ -41,63 +41,28 @@ _OCR_READER_JA = None
 _OCR_READER_EN = None
 
 def _get_ocr_reader(lang="Japanese"):
-    global _OCR_READER_JA, _OCR_READER_EN, _MANGA_OCR_INSTANCE
-    import torch
-    use_gpu = torch.cuda.is_available()
-    device = 'cuda' if use_gpu else 'cpu'
-    
+    global _OCR_READER_JA, _OCR_READER_EN
     eo = _get_easyocr()
     if eo is None:
         raise RuntimeError("easyocr is required for image OCR but not available in environment.")
     
     with _OCR_LOCK:
         if lang == "Japanese":
-            # Unload English reader to CPU RAM to save VRAM
-            if _OCR_READER_EN is not None:
-                if hasattr(_OCR_READER_EN, 'detector') and _OCR_READER_EN.detector is not None:
-                    _OCR_READER_EN.detector = _OCR_READER_EN.detector.to('cpu')
-                if hasattr(_OCR_READER_EN, 'recognizer') and _OCR_READER_EN.recognizer is not None:
-                    _OCR_READER_EN.recognizer = _OCR_READER_EN.recognizer.to('cpu')
-                if torch.cuda.is_available():
-                    torch.cuda.empty_cache()
-                    
             if _OCR_READER_JA is None:
-                _OCR_READER_JA = eo.Reader(['ja', 'en'], gpu=use_gpu)
-            else:
-                # Move back to GPU
-                if hasattr(_OCR_READER_JA, 'detector') and _OCR_READER_JA.detector is not None:
-                    _OCR_READER_JA.detector = _OCR_READER_JA.detector.to(device)
-                if hasattr(_OCR_READER_JA, 'recognizer') and _OCR_READER_JA.recognizer is not None:
-                    _OCR_READER_JA.recognizer = _OCR_READER_JA.recognizer.to(device)
+                # EasyOCR strictly runs on CPU for bounding box detection (CRAFT)
+                # This leaves all GPU VRAM completely free for MangaOCR and LLM
+                _OCR_READER_JA = eo.Reader(['ja', 'en'], gpu=False)
             return _OCR_READER_JA
         else:
-            # Unload Japanese reader and MangaOCR to CPU RAM
-            if _OCR_READER_JA is not None:
-                if hasattr(_OCR_READER_JA, 'detector') and _OCR_READER_JA.detector is not None:
-                    _OCR_READER_JA.detector = _OCR_READER_JA.detector.to('cpu')
-                if hasattr(_OCR_READER_JA, 'recognizer') and _OCR_READER_JA.recognizer is not None:
-                    _OCR_READER_JA.recognizer = _OCR_READER_JA.recognizer.to('cpu')
-            with _MANGA_OCR_LOCK:
-                if _MANGA_OCR_INSTANCE is not None:
-                    if hasattr(_MANGA_OCR_INSTANCE, 'model') and _MANGA_OCR_INSTANCE.model is not None:
-                        _MANGA_OCR_INSTANCE.model = _MANGA_OCR_INSTANCE.model.to('cpu')
-            if torch.cuda.is_available():
-                torch.cuda.empty_cache()
-                
             if _OCR_READER_EN is None:
-                _OCR_READER_EN = eo.Reader(['en'], gpu=use_gpu)
-            else:
-                # Move back to GPU
-                if hasattr(_OCR_READER_EN, 'detector') and _OCR_READER_EN.detector is not None:
-                    _OCR_READER_EN.detector = _OCR_READER_EN.detector.to(device)
-                if hasattr(_OCR_READER_EN, 'recognizer') and _OCR_READER_EN.recognizer is not None:
-                    _OCR_READER_EN.recognizer = _OCR_READER_EN.recognizer.to(device)
+                _OCR_READER_EN = eo.Reader(['en'], gpu=False)
             return _OCR_READER_EN
 
 def _get_manga_ocr():
     global _MANGA_OCR_INSTANCE
     import torch
-    device = 'cuda' if torch.cuda.is_available() else 'cpu'
+    use_gpu = torch.cuda.is_available()
+    device = 'cuda' if use_gpu else 'cpu'
     
     if _MANGA_OCR_INSTANCE is None:
         with _MANGA_OCR_LOCK:
@@ -106,18 +71,17 @@ def _get_manga_ocr():
                     import os
                     from manga_ocr import MangaOcr
                     
-                    # Target the local model directory we create via the download script
                     local_model_path = os.path.join(os.path.dirname(os.path.abspath(__file__)), "..", "manga-ocr-base")
                     
                     if os.path.exists(local_model_path):
-                        _MANGA_OCR_INSTANCE = MangaOcr(pretrained_model_name_or_path=local_model_path)
+                        _MANGA_OCR_INSTANCE = MangaOcr(pretrained_model_name_or_path=local_model_path, force_cpu=not use_gpu)
                     else:
-                        # Fallback to online download if local directory doesn't exist
-                        _MANGA_OCR_INSTANCE = MangaOcr(pretrained_model_name_or_path='kha-white/manga-ocr-base')
+                        _MANGA_OCR_INSTANCE = MangaOcr(pretrained_model_name_or_path='kha-white/manga-ocr-base', force_cpu=not use_gpu)
+                    logger.info(f"[MangaOCR] Loaded MangaOCR model on device: {device.upper()}")
                 except ImportError:
                     _MANGA_OCR_INSTANCE = None
     else:
-        # Move back to GPU
+        # Move back to target device if needed
         with _MANGA_OCR_LOCK:
             if _MANGA_OCR_INSTANCE is not None:
                 if hasattr(_MANGA_OCR_INSTANCE, 'model') and _MANGA_OCR_INSTANCE.model is not None:
