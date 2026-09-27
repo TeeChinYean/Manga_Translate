@@ -331,124 +331,151 @@ async def translation_worker():
                     f"已重绘 {rendered_count}/{total_selected_pages} 页" + model_str
                 )
             
-            async def render_page_background(page_data, p_num, s_page):
-                nonlocal rendered_count
-                path = await renderer.render_single_page_to_temp(
-                    page_data=page_data,
-                    src_page=s_page,
-                    translated_text_map=translated_text_map,
-                    temp_dir=temp_dir,
-                    sem=render_sem
-                )
-                async with progress_lock:
-                    rendered_count += 1
-                    update_progress()
-                return path
-
+            temp_paths = {}
             batch_count = 0
-            async for chunk_page in extractor.extract_layout_stream(page_range_list=selected_pages, source_lang=source_lang):
-                chunk = [chunk_page]
-                layout_data.append(chunk_page)
-                
-                async with progress_lock:
-                    extracted_count += 1
-                    update_progress()
-                # Check for cancellation
-                if task_id in cancelled_tasks:
-                    logger.info(f"Task {task_id} cancellation detected. Aborting pipeline.")
-                    raise Exception("Task cancelled by user.")
-                
-                pages_to_translate = []
-                for page in chunk:
-                    page_num = page["page_num"]
-                    cache_path = os.path.join(cache_base_dir, f"page_{page_num}.jpg")
-                    
-                    if os.path.exists(cache_path):
-                        # Page is cached!
-                        logger.info(f"Page {page_num} found in cache. Restoring from cache.")
-                        temp_dest = os.path.join(temp_dir, f"rendered_page_{page_num}.jpg")
-                        await asyncio.to_thread(shutil.copy, cache_path, temp_dest)
+
+            # ── 3-Stage Asynchronous Overlapped Pipeline ──
+            # Stage 1: Extractor Producer (DirectML GPU + CPU)
+            # Stage 2: Translator Worker (GPU Qwen 3.5 4B via asyncio.to_thread)
+            # Stage 3: Renderer Worker (Hybrid Telea / LaMa Inpainting via worker threads)
+            extraction_queue = asyncio.Queue(maxsize=3)
+            translation_queue_internal = asyncio.Queue(maxsize=3)
+
+            async def extractor_producer():
+                try:
+                    async for chunk_page in extractor.extract_layout_stream(page_range_list=selected_pages, source_lang=source_lang):
+                        if task_id in cancelled_tasks:
+                            break
+                        layout_data.append(chunk_page)
+                        async with progress_lock:
+                            extracted_count += 1
+                            update_progress()
+                        await extraction_queue.put(chunk_page)
+                except Exception as ex:
+                    logger.error(f"[Pipeline Extractor] Error: {ex}", exc_info=True)
+                finally:
+                    await extraction_queue.put(None)
+
+            async def translator_worker():
+                nonlocal batch_count
+                try:
+                    while True:
+                        if task_id in cancelled_tasks:
+                            break
+                        page = await extraction_queue.get()
+                        if page is None:
+                            await translation_queue_internal.put(None)
+                            break
+                            
+                        page_num = page["page_num"]
+                        cache_path = os.path.join(cache_base_dir, f"page_{page_num}.jpg")
                         
+                        if os.path.exists(cache_path):
+                            # Cached page: restore and skip translation
+                            logger.info(f"Page {page_num} found in cache. Skipping translation.")
+                            temp_dest = os.path.join(temp_dir, f"rendered_page_{page_num}.jpg")
+                            await asyncio.to_thread(shutil.copy, cache_path, temp_dest)
+                            temp_paths[page_num] = temp_dest
+                            
+                            async with progress_lock:
+                                translated_count += 1
+                                rendered_count += 1
+                                update_progress()
+                            continue
+                            
+                        blocks = page.get("blocks", [])
+                        if blocks:
+                            combined_blocks = []
+                            block_refs = {}
+                            for u_id, block in enumerate(blocks):
+                                orig_block_id = block["id"]
+                                block_copy = dict(block)
+                                block_copy["id"] = u_id
+                                block_copy["page_num"] = page_num
+                                combined_blocks.append(block_copy)
+                                block_refs[u_id] = (block, orig_block_id)
+                                
+                            # Offload synchronous translation to thread pool so event loop is never frozen
+                            translations, metrics = await asyncio.to_thread(
+                                translation_engine.translate_batch,
+                                combined_blocks,
+                                source_lang=source_lang,
+                                target_lang=target_lang
+                            )
+                            
+                            total_metrics["tokens_per_sec"] += metrics.get("tokens_per_sec", 0.0)
+                            total_metrics["acceptance_rate"] += metrics.get("acceptance_rate", 0.0)
+                            total_metrics["latency_ms"] += metrics.get("latency_ms", 0.0)
+                            total_metrics["tokens_generated"] += metrics.get("tokens_generated", 0)
+                            batch_count += 1
+                            
+                            if "model_breakdown" in metrics:
+                                if "model_usage" not in total_metrics:
+                                    total_metrics["model_usage"] = {}
+                                for k, v in metrics["model_breakdown"].items():
+                                    total_metrics["model_usage"][k] = total_metrics["model_usage"].get(k, 0) + v
+                                    
+                            for temp_block in combined_blocks:
+                                u_id = temp_block["id"]
+                                orig_block, orig_block_id = block_refs[u_id]
+                                orig_block["translated_text"] = temp_block.get("translated_text", "")
+                                orig_block["is_sfx"] = temp_block.get("is_sfx", False)
+                                orig_block["google_trans"] = temp_block.get("google_trans", "")
+                                orig_block["cleaned_text"] = temp_block.get("cleaned_text", "")
+                                orig_block["ocr_engine"] = temp_block.get("ocr_engine", orig_block.get("ocr_engine", "PaddleOCR (PP-OCRv4)"))
+                                orig_block["translation_engine"] = temp_block.get("translation_engine", "Turbovec Qwen 3.5 4B")
+                                
+                                translated_text_map[(page_num, orig_block_id)] = orig_block["translated_text"]
+                                
                         async with progress_lock:
                             translated_count += 1
-                            rendered_count += 1
                             update_progress()
-                        
-                        fut = asyncio.Future()
-                        fut.set_result(temp_dest)
-                        render_tasks[page_num] = fut
-                    else:
-                        pages_to_translate.append(page)
-                
-                # If there are pages that need translation in this chunk:
-                if pages_to_translate:
-                    combined_blocks = []
-                    # Maps unique_counter -> (page_num, original_block, original_block_id)
-                    block_refs = {}
-                    unique_counter = 0
-                    
-                    for page in pages_to_translate:
-                        p_num = page["page_num"]
-                        for block in page["blocks"]:
-                            orig_block_id = block["id"]  # Save real ID BEFORE overwriting
-                            block_copy = dict(block)
-                            block_copy["id"] = unique_counter
-                            block_copy["page_num"] = p_num
-                            combined_blocks.append(block_copy)
-                            block_refs[unique_counter] = (p_num, block, orig_block_id)
-                            unique_counter += 1
                             
-                    if combined_blocks:
-                        translations, metrics = translation_engine.translate_batch(combined_blocks, source_lang=source_lang)
-                        
-                        total_metrics["tokens_per_sec"] += metrics["tokens_per_sec"]
-                        total_metrics["acceptance_rate"] += metrics["acceptance_rate"]
-                        total_metrics["latency_ms"] += metrics["latency_ms"]
-                        total_metrics["tokens_generated"] += metrics["tokens_generated"]
-                        batch_count += 1
-                        
-                        if "model_breakdown" in metrics:
-                            if "model_usage" not in total_metrics:
-                                total_metrics["model_usage"] = {}
-                            for k, v in metrics["model_breakdown"].items():
-                                total_metrics["model_usage"][k] = total_metrics["model_usage"].get(k, 0) + v
+                        await translation_queue_internal.put(page)
+                except Exception as ex:
+                    logger.error(f"[Pipeline Translator] Error: {ex}", exc_info=True)
+                finally:
+                    await translation_queue_internal.put(None)
 
-                        for temp_block in combined_blocks:
-                            u_id = temp_block["id"]
-                            p_num, orig_block, orig_block_id = block_refs[u_id]
-                            orig_block["translated_text"] = temp_block.get("translated_text", "")
-                            orig_block["is_sfx"] = temp_block.get("is_sfx", False)
-                            orig_block["google_trans"] = temp_block.get("google_trans", "")
-                            orig_block["cleaned_text"] = temp_block.get("cleaned_text", "")
-                            orig_block["ocr_engine"] = temp_block.get("ocr_engine", orig_block.get("ocr_engine", "MangaOCR (ViT)"))
-                            orig_block["translation_engine"] = temp_block.get("translation_engine", "Turbovec Qwen 3.5 4B")
+            async def renderer_worker():
+                nonlocal rendered_count
+                try:
+                    while True:
+                        if task_id in cancelled_tasks:
+                            break
+                        page = await translation_queue_internal.get()
+                        if page is None:
+                            break
                             
-                            # Key by ORIGINAL block id (what the renderer reads), not unique_counter
-                            translated_text_map[(p_num, orig_block_id)] = orig_block["translated_text"]
-                            
-                    # Start background rendering for translated pages
-                    for page in pages_to_translate:
                         p_num = page["page_num"]
                         src_page = src_doc[p_num - 1]
-                        
-                        async with progress_lock:
-                            translated_count += 1
-                            update_progress()
-                            
                         cache_path = os.path.join(cache_base_dir, f"page_{p_num}.jpg")
                         
-                        # Use default args to capture loop variables by value (avoid closure bug)
-                        async def render_and_cache(_page_data=page, _p_num=p_num, _s_page=src_page, _c_path=cache_path):
-                            dest_path = await render_page_background(_page_data, _p_num, _s_page)
-                            if dest_path and os.path.exists(dest_path):
-                                await asyncio.to_thread(shutil.copy, dest_path, _c_path)
-                            return dest_path
+                        dest_path = await renderer.render_single_page_to_temp(
+                            page_data=page,
+                            src_page=src_page,
+                            translated_text_map=translated_text_map,
+                            temp_dir=temp_dir,
+                            sem=render_sem
+                        )
+                        
+                        if dest_path and os.path.exists(dest_path):
+                            await asyncio.to_thread(shutil.copy, dest_path, cache_path)
+                            temp_paths[p_num] = dest_path
                             
-                        render_tasks[p_num] = asyncio.create_task(render_and_cache())
-                
-                # Yield control briefly to start async tasks
-                await asyncio.sleep(0.01)
-                
+                        async with progress_lock:
+                            rendered_count += 1
+                            update_progress()
+                except Exception as ex:
+                    logger.error(f"[Pipeline Renderer] Error: {ex}", exc_info=True)
+
+            # Execute Extractor, Translator, and Renderer concurrently
+            await asyncio.gather(
+                extractor_producer(),
+                translator_worker(),
+                renderer_worker()
+            )
+
             # Retain original sequential reading order for DOC and JSON generation
             layout_data.sort(key=lambda x: x["page_num"])
                 
@@ -456,11 +483,6 @@ async def translation_worker():
                 total_metrics["tokens_per_sec"] /= batch_count
                 total_metrics["acceptance_rate"] /= batch_count
                 total_metrics["latency_ms"] /= batch_count
-                
-            # Wait for all scheduled rendering tasks to complete
-            temp_paths = {}
-            for page_num, task in render_tasks.items():
-                temp_paths[page_num] = await task
 
             # Step 3: CJK Double Check & Sentinel Checks
             if task_id in cancelled_tasks:

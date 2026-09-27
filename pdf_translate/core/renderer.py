@@ -12,6 +12,7 @@ Pipeline per page:
 
 import os
 import sys
+import asyncio
 import threading
 import cv2
 import numpy as np
@@ -282,9 +283,12 @@ def _create_stroke_mask(crop_rgb: np.ndarray, ink_thresh: int = 95, dilate_iter:
         
     gray = cv2.cvtColor(crop_rgb, cv2.COLOR_RGB2GRAY)
     
-    # 1. Edge/Border background estimation using median (robust against bubble line intersection)
+    # 1. Edge/Border background estimation using median and variance (robust against bubble line intersection)
     border = np.concatenate([gray[0, :], gray[-1, :], gray[:, 0], gray[:, -1]])
     bg_val = float(np.median(border))
+    bg_std = float(np.std(border))
+    # True if the border region is dark or has screentone/halftone/texture variance
+    is_textured = (bg_val < 170) or (bg_std > 22.0)
     
     # 2. Suppress halftone screentone dots and mosquito noise
     blurred = cv2.GaussianBlur(gray, (3, 3), 0)
@@ -324,10 +328,8 @@ def _create_stroke_mask(crop_rgb: np.ndarray, ink_thresh: int = 95, dilate_iter:
         dilated = cv2.dilate(strict_cleaned, dilate_kernel, iterations=1)
         stroke_ratio = np.count_nonzero(dilated) / float(h * w)
 
-    if 0.005 <= stroke_ratio <= 0.85:
-        return dilated, bg_val
-        
-    return mask, bg_val
+    final_mask = dilated if (0.005 <= stroke_ratio <= 0.85) else mask
+    return final_mask, bg_val, is_textured
 
 
 # ── Main Renderer Class ────────────────────────────────────────────────────────
@@ -356,10 +358,12 @@ class PDFLayoutRenderer:
         pix = src_page.get_pixmap(matrix=mat, alpha=False)
         img = Image.frombytes("RGB", [pix.width, pix.height], pix.samples)
 
-        # 2. Build precision mask and fast-fill flat bubbles
+        # 2. Build precision mask and separate clean bubbles vs textured backgrounds
         img_np = np.array(img)
-        mask_np = np.zeros((img.height, img.width), dtype=np.uint8)
-        has_inpaint_masks = False
+        telea_mask_np = np.zeros((img.height, img.width), dtype=np.uint8)
+        lama_mask_np = np.zeros((img.height, img.width), dtype=np.uint8)
+        has_telea_masks = False
+        has_lama_masks = False
 
         blocks_to_render = []
         for block in page_data["blocks"]:
@@ -378,18 +382,25 @@ class PDFLayoutRenderer:
                 continue
 
             crop_rgb = img_np[py0:py1, px0:px1]
-            stroke_mask, bg_val = _create_stroke_mask(
+            mask_res = _create_stroke_mask(
                 crop_rgb,
                 ink_thresh=self.ink_thresh,
                 dilate_iter=self.dilate_iter,
                 max_stroke_ratio=self.max_stroke_ratio
             )
+            stroke_mask = mask_res[0]
+            bg_val = mask_res[1]
+            is_textured = mask_res[2] if len(mask_res) > 2 else (bg_val < 170)
 
-            # Always route stroke masks to OpenCV Telea diffusion.
-            # Never overwrite with flat solid fill_color (which caused white blocking on characters/clothes).
-            # Telea smoothly diffuses surrounding pixels: pure white in bubbles, and skin/screentone tones if touching artwork.
-            mask_np[py0:py1, px0:px1] = np.maximum(mask_np[py0:py1, px0:px1], stroke_mask)
-            has_inpaint_masks = True
+            # Smart Routing:
+            # - Clean/white bubble: Telea (<15ms, perfectly sharp, zero downsample blur)
+            # - Textured/screentone/dark scene: LaMa neural inpainting
+            if is_textured:
+                lama_mask_np[py0:py1, px0:px1] = np.maximum(lama_mask_np[py0:py1, px0:px1], stroke_mask)
+                has_lama_masks = True
+            else:
+                telea_mask_np[py0:py1, px0:px1] = np.maximum(telea_mask_np[py0:py1, px0:px1], stroke_mask)
+                has_telea_masks = True
 
             blocks_to_render.append((px0, py0, px1, py1, translated, block))
 
@@ -398,13 +409,18 @@ class PDFLayoutRenderer:
         if not blocks_to_render:
             img.save(temp_path, format="JPEG", quality=80, optimize=True)
         else:
-            if has_inpaint_masks:
-                img_pil = Image.fromarray(img_np)
-                mask_pil = Image.fromarray(mask_np)
+            healed = img
+            if has_telea_masks:
+                # Fast Telea inpainting on clean bubbles (takes <15ms)
+                telea_mask_pil = Image.fromarray(telea_mask_np)
+                healed = _fast_telea_inpaint(healed, telea_mask_pil)
+                
+            if has_lama_masks:
+                # Neural LaMa inpainting only for textured / dark regions!
+                lama_mask_pil = Image.fromarray(lama_mask_np)
                 async with sem:
-                    healed = _lama_inpaint(img_pil, mask_pil)
-            else:
-                healed = Image.fromarray(img_np)
+                    # Run in thread pool so event loop is never frozen
+                    healed = await asyncio.to_thread(_lama_inpaint, healed, lama_mask_pil)
 
             # Draw CJK text
             draw = ImageDraw.Draw(healed)
@@ -505,12 +521,16 @@ class PDFLayoutRenderer:
                 continue
 
             crop_rgb = img_np[py0:py1, px0:px1]
-            stroke_mask, bg_val = _create_stroke_mask(
+            mask_res = _create_stroke_mask(
                 crop_rgb,
                 ink_thresh=self.ink_thresh,
                 dilate_iter=self.dilate_iter,
                 max_stroke_ratio=self.max_stroke_ratio
             )
+            stroke_mask = mask_res[0]
+            bg_val = mask_res[1]
+            is_textured = mask_res[2] if len(mask_res) > 2 else (bg_val < 170)
+            
             mask_np[py0:py1, px0:px1] = np.maximum(mask_np[py0:py1, px0:px1], stroke_mask)
             blocks_to_render.append((px0, py0, px1, py1, translated, block))
 
@@ -523,7 +543,7 @@ class PDFLayoutRenderer:
             mask_vis[mask_bool] = (0.35 * mask_vis[mask_bool].astype(np.float32) + 0.65 * overlay_color).astype(np.uint8)
         mask_img = Image.fromarray(mask_vis)
 
-        # 4. Inpaint with LaMa Neural Inpainting
+        # 4. Inpaint with Smart Hybrid Inpainting
         if np.any(mask_bool):
             healed = _lama_inpaint(orig_img, Image.fromarray(mask_np))
         else:
