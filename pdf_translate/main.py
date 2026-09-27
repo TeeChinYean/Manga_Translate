@@ -289,10 +289,10 @@ async def translation_worker():
             # Create a temp dir for rendered page JPEGs
             temp_dir = tempfile.mkdtemp(prefix="pdf_render_")
             
-            ink_thresh = int(task_metadata.get("ink_thresh", 95))
-            dilate_iter = int(task_metadata.get("dilate_iter", 2))
-            max_stroke_ratio = float(task_metadata.get("max_stroke_ratio", 0.30))
-            font_scale = float(task_metadata.get("font_scale", 1.0))
+            ink_thresh = int(task.get("ink_thresh", 95))
+            dilate_iter = int(task.get("dilate_iter", 2))
+            max_stroke_ratio = float(task.get("max_stroke_ratio", 0.35))
+            font_scale = float(task.get("font_scale", 1.0))
 
             renderer = PDFLayoutRenderer(
                 pdf_path,
