@@ -467,6 +467,19 @@
             width: 0%;
             background: linear-gradient(90deg, var(--accent-indigo), var(--accent-purple));
             border-radius: 99px;
+            transition: width 0.4s ease;
+        }
+
+        footer {
+            margin-top: 60px;
+            padding: 30px 0;
+            font-size: 0.8rem;
+            color: #4b5563;
+            text-align: center;
+            width: 100%;
+            border-top: 1px solid rgba(255, 255, 255, 0.04);
+        }
+
         /* ===================================================
            TUNING SIDEBAR & LIVE PREVIEW STYLES
            =================================================== */
@@ -647,6 +660,20 @@
             max-height: 100%;
             object-fit: contain;
             display: block;
+        }
+
+        /* Suppress broken image placeholder when src is empty */
+        .preview-image:not([src]),
+        .preview-image[src=""],
+        .compare-img-after:not([src]),
+        .compare-img-after[src=""],
+        .compare-img-before:not([src]),
+        .compare-img-before[src=""],
+        img:not([src]),
+        img[src=""] {
+            opacity: 0 !important;
+            visibility: hidden !important;
+            display: none !important;
         }
 
         /* Split Compare Slider Container */
@@ -1166,6 +1193,159 @@
         </footer>
     </div>
 
+    <!-- Backdrop Overlay -->
+    <div class="sidebar-backdrop" id="sidebarBackdrop"></div>
+
+    <!-- Tuning Sidebar Drawer -->
+    <aside class="tuning-sidebar" id="tuningSidebar" aria-label="重绘效果实时调节面板">
+        <!-- Sidebar Header -->
+        <div class="sidebar-header">
+            <div class="sidebar-header-title">
+                <h3>⚙️ 实时重绘调优看板</h3>
+                <p>实时预览消字掩膜与排版效果，拖动滑块即可所见即所得微调</p>
+            </div>
+            <div style="display: flex; gap: 8px; align-items: center;">
+                <button class="preset-btn" id="resetParamsBtn" title="恢复为默认参数">🔄 恢复默认</button>
+                <button class="sidebar-close-btn" id="closeSidebarBtn" title="关闭面板 (Esc)">✕</button>
+            </div>
+        </div>
+
+        <!-- Sidebar Scrollable Body -->
+        <div class="sidebar-body">
+            <!-- 1. Visual Preview Section -->
+            <div class="preview-section">
+                <!-- Tab Mode Switcher -->
+                <div class="preview-tabs">
+                    <button class="preview-tab-btn active" id="tabBtnResult" data-mode="result">🌟 重绘结果</button>
+                    <button class="preview-tab-btn" id="tabBtnMask" data-mode="mask">🎭 消除掩膜</button>
+                    <button class="preview-tab-btn" id="tabBtnOriginal" data-mode="original">📄 原始画面</button>
+                    <button class="preview-tab-btn" id="tabBtnCompare" data-mode="compare">🌓 分屏对比</button>
+                </div>
+
+                <!-- Preview Display Stage -->
+                <div class="preview-stage" id="previewStage">
+                    <!-- Standard Image View -->
+                    <img id="previewMainImg" class="preview-image" src="" alt="预览效果" style="display: none;">
+
+                    <!-- Interactive Split Compare View -->
+                    <div class="compare-container" id="compareContainer" style="display: none;">
+                        <img id="compareImgResult" class="compare-img-after" src="" alt="重绘后" style="display: none;">
+                        <div class="compare-img-before-wrapper" id="compareBeforeWrapper">
+                            <img id="compareImgOriginal" class="compare-img-before" src="" alt="原始画面" style="display: none;">
+                        </div>
+                        <div class="compare-handle" id="compareHandle">↔</div>
+                    </div>
+
+                    <!-- Placeholder before file selected -->
+                    <div class="preview-placeholder" id="previewPlaceholder">
+                        <div style="font-size: 2.2rem;">🖼️</div>
+                        <div><b>未载入预览画面</b></div>
+                        <div style="font-size: 0.78rem; color: #6b7280;">请在左侧上传 PDF 文件，将在此自动呈现第 1 页重绘与消除效果</div>
+                    </div>
+
+                    <!-- Glowing Loading Spinner Overlay -->
+                    <div class="preview-spinner-overlay" id="previewSpinnerOverlay">
+                        <div class="preview-spinner"></div>
+                        <div style="font-size: 0.8rem; font-weight: 600; color: #c7d2fe;" id="previewSpinnerText">⚡ 正在极速生成重绘预览...</div>
+                    </div>
+                </div>
+
+                <!-- Preview Toolbar (Page navigation + Stats) -->
+                <div class="preview-toolbar">
+                    <div class="page-navigator">
+                        <button class="page-nav-btn" id="prevPageBtn" title="上一页" disabled>◀ 上一页</button>
+                        <span class="page-indicator">第 <span id="curPageNum">1</span> / <span id="totalPageNum">1</span> 页</span>
+                        <button class="page-nav-btn" id="nextPageBtn" title="下一页" disabled>下一页 ▶</button>
+                    </div>
+
+                    <div class="preview-badges">
+                        <span class="preview-badge time" id="previewRenderTime">⚡ 耗时: --</span>
+                        <span class="preview-badge" id="previewBoxCount">0 个气泡框</span>
+                    </div>
+                </div>
+            </div>
+
+            <!-- 2. Parameter Tuning Controls -->
+            <div class="tuning-controls">
+                <!-- Slider 1: Ink Threshold -->
+                <div class="control-item">
+                    <div class="control-item-header">
+                        <span class="control-item-label">
+                            <span>🖋️ 墨水识别阈值 (Ink Threshold)</span>
+                        </span>
+                        <span class="control-val-badge" id="valInkThresh">95</span>
+                    </div>
+                    <input type="range" class="custom-range" id="sliderInkThresh" min="50" max="160" step="1" value="95">
+                    <div class="control-item-desc">
+                        提取文字笔画的亮度阈值。<b>数值越低</b>识别越严格（仅消纯黑字，保护浅色线稿与皮肤）；<b>数值越高</b>消字越彻底（清除淡灰色字迹与杂边）。
+                    </div>
+                </div>
+
+                <!-- Slider 2: Dilation Radius -->
+                <div class="control-item">
+                    <div class="control-item-header">
+                        <span class="control-item-label">
+                            <span>🔍 笔画膨胀圈数 (Dilation Radius)</span>
+                        </span>
+                        <span class="control-val-badge" id="valDilateIter">2 圈 (6px)</span>
+                    </div>
+                    <input type="range" class="custom-range" id="sliderDilateIter" min="1" max="4" step="1" value="2">
+                    <div class="control-item-desc">
+                        文字笔画外扩像素圈数。<b>增加圈数</b>能彻底消除文字周围残留的黑边毛刺与抗锯齿杂色；<b>减小圈数</b>对狭小对话框能更好保留周边气泡边框。
+                    </div>
+                </div>
+
+                <!-- Slider 3: Max Stroke Ratio -->
+                <div class="control-item">
+                    <div class="control-item-header">
+                        <span class="control-item-label">
+                            <span>🛡️ 防误伤熔断上限 (Max Stroke Area)</span>
+                        </span>
+                        <span class="control-val-badge" id="valMaxStroke">30%</span>
+                    </div>
+                    <input type="range" class="custom-range" id="sliderMaxStroke" min="15" max="50" step="1" value="30">
+                    <div class="control-item-desc">
+                        气泡内最大黑墨水面积保护熔断比例。防止 OCR 框选过大时误将背景中的人物发丝、衣物花纹、密集网点抹除。
+                    </div>
+                </div>
+
+                <!-- Slider 4: Font Scale -->
+                <div class="control-item">
+                    <div class="control-item-header">
+                        <span class="control-item-label">
+                            <span>🔤 中文字号缩放比例 (Font Scale)</span>
+                        </span>
+                        <span class="control-val-badge" id="valFontScale">1.00x</span>
+                    </div>
+                    <input type="range" class="custom-range" id="sliderFontScale" min="0.70" max="1.40" step="0.05" value="1.00">
+                    <div class="control-item-desc">
+                        译文重绘填入汉字的全局字号微调倍率。根据不同漫画排版的宽松或紧凑程度，自由放大或缩小译文字号。
+                    </div>
+                </div>
+
+                <!-- Presets selection -->
+                <div style="display: flex; flex-direction: column; gap: 8px;">
+                    <span style="font-size: 0.78rem; font-weight: 600; color: var(--text-secondary); text-transform: uppercase; letter-spacing: 0.5px;">推荐快捷预设 (Quick Presets)</span>
+                    <div class="preset-row">
+                        <button class="preset-btn" id="presetStandard">🎯 标准平衡 (95 / 2圈 / 30% / 1.0x)</button>
+                        <button class="preset-btn" id="presetFineLine">🖋️ 精细线稿保护 (75 / 1圈 / 22% / 0.95x)</button>
+                        <button class="preset-btn" id="presetHighContrast">⬛ 纯字黑白激进 (120 / 3圈 / 35% / 1.05x)</button>
+                    </div>
+                </div>
+            </div>
+        </div>
+
+        <!-- Sidebar Footer Action -->
+        <div class="sidebar-footer">
+            <button class="btn" id="sidebarTranslateBtn" style="flex: 2; padding: 12px 18px; font-size: 0.9rem;" disabled>
+                🚀 应用参数并全本翻译
+            </button>
+            <button class="btn" id="saveParamsBtn" style="flex: 1; padding: 12px 14px; font-size: 0.85rem; background: rgba(99, 102, 241, 0.15); border: 1px solid rgba(99, 102, 241, 0.3); color: #c7d2fe;">
+                ✓ 保存并关闭
+            </button>
+        </div>
+    </aside>
+
     <!-- Front-End JavaScript SSE Logic -->
     <script>
         const fileInput = document.getElementById('fileInput');
@@ -1618,7 +1798,9 @@
                 previewMainImg.style.display = 'none';
                 compareContainer.style.display = 'block';
                 compareImgResult.src = previewImages.result;
+                compareImgResult.style.display = 'block';
                 compareImgOriginal.src = previewImages.original;
+                compareImgOriginal.style.display = 'block';
             } else {
                 compareContainer.style.display = 'none';
                 previewMainImg.style.display = 'block';
@@ -1748,160 +1930,12 @@
             closeTuningSidebar();
             translateBtn.click();
         });
+
+        // Initialize displays and hide any blank preview elements
+        updateTuningDisplays();
+        displayActivePreviewImage();
     </script>
 
-    <!-- Backdrop Overlay -->
-    <div class="sidebar-backdrop" id="sidebarBackdrop"></div>
-
-    <!-- Tuning Sidebar Drawer -->
-    <aside class="tuning-sidebar" id="tuningSidebar" aria-label="重绘效果实时调节面板">
-        <!-- Sidebar Header -->
-        <div class="sidebar-header">
-            <div class="sidebar-header-title">
-                <h3>⚙️ 实时重绘调优看板</h3>
-                <p>实时预览消字掩膜与排版效果，拖动滑块即可所见即所得微调</p>
-            </div>
-            <div style="display: flex; gap: 8px; align-items: center;">
-                <button class="preset-btn" id="resetParamsBtn" title="恢复为默认参数">🔄 恢复默认</button>
-                <button class="sidebar-close-btn" id="closeSidebarBtn" title="关闭面板 (Esc)">✕</button>
-            </div>
-        </div>
-
-        <!-- Sidebar Scrollable Body -->
-        <div class="sidebar-body">
-            <!-- 1. Visual Preview Section -->
-            <div class="preview-section">
-                <!-- Tab Mode Switcher -->
-                <div class="preview-tabs">
-                    <button class="preview-tab-btn active" id="tabBtnResult" data-mode="result">🌟 重绘结果</button>
-                    <button class="preview-tab-btn" id="tabBtnMask" data-mode="mask">🎭 消除掩膜</button>
-                    <button class="preview-tab-btn" id="tabBtnOriginal" data-mode="original">📄 原始画面</button>
-                    <button class="preview-tab-btn" id="tabBtnCompare" data-mode="compare">🌓 分屏对比</button>
-                </div>
-
-                <!-- Preview Display Stage -->
-                <div class="preview-stage" id="previewStage">
-                    <!-- Standard Image View -->
-                    <img id="previewMainImg" class="preview-image" src="" alt="预览效果" style="display: none;">
-
-                    <!-- Interactive Split Compare View -->
-                    <div class="compare-container" id="compareContainer">
-                        <img id="compareImgResult" class="compare-img-after" src="" alt="重绘后">
-                        <div class="compare-img-before-wrapper" id="compareBeforeWrapper">
-                            <img id="compareImgOriginal" class="compare-img-before" src="" alt="原始画面">
-                        </div>
-                        <div class="compare-handle" id="compareHandle">↔</div>
-                    </div>
-
-                    <!-- Placeholder before file selected -->
-                    <div class="preview-placeholder" id="previewPlaceholder">
-                        <div style="font-size: 2.2rem;">🖼️</div>
-                        <div><b>未载入预览画面</b></div>
-                        <div style="font-size: 0.78rem; color: #6b7280;">请在左侧上传 PDF 文件，将在此自动呈现第 1 页重绘与消除效果</div>
-                    </div>
-
-                    <!-- Glowing Loading Spinner Overlay -->
-                    <div class="preview-spinner-overlay" id="previewSpinnerOverlay">
-                        <div class="preview-spinner"></div>
-                        <div style="font-size: 0.8rem; font-weight: 600; color: #c7d2fe;" id="previewSpinnerText">⚡ 正在极速生成重绘预览...</div>
-                    </div>
-                </div>
-
-                <!-- Preview Toolbar (Page navigation + Stats) -->
-                <div class="preview-toolbar">
-                    <div class="page-navigator">
-                        <button class="page-nav-btn" id="prevPageBtn" title="上一页" disabled>◀ 上一页</button>
-                        <span class="page-indicator">第 <span id="curPageNum">1</span> / <span id="totalPageNum">1</span> 页</span>
-                        <button class="page-nav-btn" id="nextPageBtn" title="下一页" disabled>下一页 ▶</button>
-                    </div>
-
-                    <div class="preview-badges">
-                        <span class="preview-badge time" id="previewRenderTime">⚡ 耗时: --</span>
-                        <span class="preview-badge" id="previewBoxCount">0 个气泡框</span>
-                    </div>
-                </div>
-            </div>
-
-            <!-- 2. Parameter Tuning Controls -->
-            <div class="tuning-controls">
-                <!-- Slider 1: Ink Threshold -->
-                <div class="control-item">
-                    <div class="control-item-header">
-                        <span class="control-item-label">
-                            <span>🖋️ 墨水识别阈值 (Ink Threshold)</span>
-                        </span>
-                        <span class="control-val-badge" id="valInkThresh">95</span>
-                    </div>
-                    <input type="range" class="custom-range" id="sliderInkThresh" min="50" max="160" step="1" value="95">
-                    <div class="control-item-desc">
-                        提取文字笔画的亮度阈值。<b>数值越低</b>识别越严格（仅消纯黑字，保护浅色线稿与皮肤）；<b>数值越高</b>消字越彻底（清除淡灰色字迹与杂边）。
-                    </div>
-                </div>
-
-                <!-- Slider 2: Dilation Radius -->
-                <div class="control-item">
-                    <div class="control-item-header">
-                        <span class="control-item-label">
-                            <span>🔍 笔画膨胀圈数 (Dilation Radius)</span>
-                        </span>
-                        <span class="control-val-badge" id="valDilateIter">2 圈 (6px)</span>
-                    </div>
-                    <input type="range" class="custom-range" id="sliderDilateIter" min="1" max="4" step="1" value="2">
-                    <div class="control-item-desc">
-                        文字笔画外扩像素圈数。<b>增加圈数</b>能彻底消除文字周围残留的黑边毛刺与抗锯齿杂色；<b>减小圈数</b>对狭小对话框能更好保留周边气泡边框。
-                    </div>
-                </div>
-
-                <!-- Slider 3: Max Stroke Ratio -->
-                <div class="control-item">
-                    <div class="control-item-header">
-                        <span class="control-item-label">
-                            <span>🛡️ 防误伤熔断上限 (Max Stroke Area)</span>
-                        </span>
-                        <span class="control-val-badge" id="valMaxStroke">30%</span>
-                    </div>
-                    <input type="range" class="custom-range" id="sliderMaxStroke" min="15" max="50" step="1" value="30">
-                    <div class="control-item-desc">
-                        气泡内最大黑墨水面积保护熔断比例。防止 OCR 框选过大时误将背景中的人物发丝、衣物花纹、密集网点抹除。
-                    </div>
-                </div>
-
-                <!-- Slider 4: Font Scale -->
-                <div class="control-item">
-                    <div class="control-item-header">
-                        <span class="control-item-label">
-                            <span>🔤 中文字号缩放比例 (Font Scale)</span>
-                        </span>
-                        <span class="control-val-badge" id="valFontScale">1.00x</span>
-                    </div>
-                    <input type="range" class="custom-range" id="sliderFontScale" min="0.70" max="1.40" step="0.05" value="1.00">
-                    <div class="control-item-desc">
-                        译文重绘填入汉字的全局字号微调倍率。根据不同漫画排版的宽松或紧凑程度，自由放大或缩小译文字号。
-                    </div>
-                </div>
-
-                <!-- Presets selection -->
-                <div style="display: flex; flex-direction: column; gap: 8px;">
-                    <span style="font-size: 0.78rem; font-weight: 600; color: var(--text-secondary); text-transform: uppercase; letter-spacing: 0.5px;">推荐快捷预设 (Quick Presets)</span>
-                    <div class="preset-row">
-                        <button class="preset-btn" id="presetStandard">🎯 标准平衡 (95 / 2圈 / 30% / 1.0x)</button>
-                        <button class="preset-btn" id="presetFineLine">🖋️ 精细线稿保护 (75 / 1圈 / 22% / 0.95x)</button>
-                        <button class="preset-btn" id="presetHighContrast">⬛ 纯字黑白激进 (120 / 3圈 / 35% / 1.05x)</button>
-                    </div>
-                </div>
-            </div>
-        </div>
-
-        <!-- Sidebar Footer Action -->
-        <div class="sidebar-footer">
-            <button class="btn" id="sidebarTranslateBtn" style="flex: 2; padding: 12px 18px; font-size: 0.9rem;" disabled>
-                🚀 应用参数并全本翻译
-            </button>
-            <button class="btn" id="saveParamsBtn" style="flex: 1; padding: 12px 14px; font-size: 0.85rem; background: rgba(99, 102, 241, 0.15); border: 1px solid rgba(99, 102, 241, 0.3); color: #c7d2fe;">
-                ✓ 保存并关闭
-            </button>
-        </div>
-    </aside>
 </body>
 
 </html>
