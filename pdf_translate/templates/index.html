@@ -1074,7 +1074,7 @@
                         <div class="tune-summary-tags">
                             <span>墨水:<b id="summaryInkThresh">95</b></span>
                             <span>膨胀:<b id="summaryDilate">2圈</b></span>
-                            <span>熔断:<b id="summaryMaxStroke">30%</b></span>
+                            <span>熔断:<b id="summaryMaxStroke">35%</b></span>
                             <span>字号:<b id="summaryFontScale">1.00x</b></span>
                         </div>
                     </div>
@@ -1301,9 +1301,9 @@
                         <span class="control-item-label">
                             <span>🛡️ 防误伤熔断上限 (Max Stroke Area)</span>
                         </span>
-                        <span class="control-val-badge" id="valMaxStroke">30%</span>
+                        <span class="control-val-badge" id="valMaxStroke">35%</span>
                     </div>
-                    <input type="range" class="custom-range" id="sliderMaxStroke" min="15" max="50" step="1" value="30">
+                    <input type="range" class="custom-range" id="sliderMaxStroke" min="15" max="50" step="1" value="35">
                     <div class="control-item-desc">
                         气泡内最大黑墨水面积保护熔断比例。防止 OCR 框选过大时误将背景中的人物发丝、衣物花纹、密集网点抹除。
                     </div>
@@ -1690,7 +1690,7 @@
         let tuningParams = {
             ink_thresh: 95,
             dilate_iter: 2,
-            max_stroke_ratio: 0.30,
+            max_stroke_ratio: 0.35,
             font_scale: 1.00
         };
 
@@ -1768,10 +1768,10 @@
             onParamChanged();
         }
 
-        document.getElementById('presetStandard').addEventListener('click', () => applyPreset(95, 2, 0.30, 1.00));
+        document.getElementById('presetStandard').addEventListener('click', () => applyPreset(95, 2, 0.35, 1.00));
         document.getElementById('presetFineLine').addEventListener('click', () => applyPreset(75, 1, 0.22, 0.95));
-        document.getElementById('presetHighContrast').addEventListener('click', () => applyPreset(120, 3, 0.35, 1.05));
-        resetParamsBtn.addEventListener('click', () => applyPreset(95, 2, 0.30, 1.00));
+        document.getElementById('presetHighContrast').addEventListener('click', () => applyPreset(120, 3, 0.40, 1.05));
+        resetParamsBtn.addEventListener('click', () => applyPreset(95, 2, 0.35, 1.00));
 
         // Tab Mode Handlers
         const tabBtns = document.querySelectorAll('.preview-tab-btn');

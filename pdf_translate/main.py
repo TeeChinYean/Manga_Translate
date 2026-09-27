@@ -20,6 +20,7 @@ if hasattr(sys.stderr, 'reconfigure'):
 
 import os
 import sys
+import time
 import warnings
 warnings.filterwarnings("ignore", category=UserWarning)
 warnings.filterwarnings("ignore", category=FutureWarning)
@@ -195,7 +196,7 @@ async def translation_worker():
         target_lang = task["target_lang"]
         filename = task["filename"]
         page_range = task.get("page_range", "")
-        force_retranslate = True
+        force_retranslate = bool(task.get("force_retranslate", False))
         
         status_db[task_id] = {
             "percent": 5,
@@ -627,7 +628,7 @@ async def preview_render_page(
     page_num: int = Form(1),
     ink_thresh: int = Form(95),
     dilate_iter: int = Form(2),
-    max_stroke_ratio: float = Form(0.30),
+    max_stroke_ratio: float = Form(0.35),
     font_scale: float = Form(1.0),
     source_lang: str = Form("Japanese")
 ):
@@ -788,7 +789,7 @@ async def upload_pdf_file(
     force_retranslate: bool = Form(True),
     ink_thresh: int = Form(95),
     dilate_iter: int = Form(2),
-    max_stroke_ratio: float = Form(0.30),
+    max_stroke_ratio: float = Form(0.35),
     font_scale: float = Form(1.0)
 ):
     """

@@ -12,6 +12,7 @@ Pipeline per page:
 
 import os
 import sys
+import threading
 import cv2
 import numpy as np
 import logging
@@ -19,6 +20,32 @@ import fitz  # PyMuPDF
 from PIL import Image, ImageDraw, ImageFont
 
 logger = logging.getLogger(__name__)
+
+_LAMA_SESSION_LOCK = threading.Lock()
+_LAMA_SESSION = None
+
+def _get_lama_session():
+    """Singleton session for lama.onnx with CPU execution and ORT_DISABLE_ALL for FFC stability."""
+    global _LAMA_SESSION
+    if _LAMA_SESSION is None:
+        with _LAMA_SESSION_LOCK:
+            if _LAMA_SESSION is None:
+                try:
+                    import onnxruntime as ort
+                    model_path = os.path.join(os.path.dirname(os.path.abspath(__file__)), "..", "data", "models", "onnx", "lama.onnx")
+                    if os.path.exists(model_path):
+                        opts = ort.SessionOptions()
+                        opts.graph_optimization_level = ort.GraphOptimizationLevel.ORT_DISABLE_ALL
+                        opts.intra_op_num_threads = 4
+                        # LaMa runs on CPU to guarantee FFC DFT node numerical stability
+                        _LAMA_SESSION = ort.InferenceSession(model_path, sess_options=opts, providers=['CPUExecutionProvider'])
+                        logger.info(f"[LaMa] Loaded LaMa ONNX session on CPU with ORT_DISABLE_ALL")
+                    else:
+                        logger.info(f"[LaMa] Model not found at {model_path}, using Telea diffusion fallback.")
+                except Exception as e:
+                    logger.warning(f"[LaMa] Failed to load LaMa session: {e}")
+                    _LAMA_SESSION = None
+    return _LAMA_SESSION
 
 # ── Font config ────────────────────────────────────────────────────────────────
 _FONT_PATHS = [
@@ -41,6 +68,11 @@ _FONT_PATH = next((p for p in _FONT_PATHS if os.path.exists(p)), None)
 
 def unload_models():
     """Cleans up memory/cache if needed."""
+    global _LAMA_SESSION
+    with _LAMA_SESSION_LOCK:
+        if _LAMA_SESSION is not None:
+            del _LAMA_SESSION
+            _LAMA_SESSION = None
     try:
         import torch
         if torch.cuda.is_available():
@@ -190,14 +222,58 @@ def _fast_telea_inpaint(img_pil: Image.Image, mask_pil: Image.Image) -> Image.Im
     return Image.fromarray(inpainted_rgb)
 
 
-def _create_stroke_mask(crop_rgb: np.ndarray, ink_thresh: int = 95, dilate_iter: int = 2, max_stroke_ratio: float = 0.30) -> tuple:
+def _lama_inpaint(img_pil: Image.Image, mask_pil: Image.Image) -> Image.Image:
+    """
+    High-fidelity neural inpainting using LaMa ONNX (Fast Fourier Convolutions).
+    Reconstructs complex manga screentones, halftones, lineart, and textures.
+    Falls back gracefully to OpenCV Telea if LaMa is unavailable.
+    """
+    session = _get_lama_session()
+    if session is None:
+        return _fast_telea_inpaint(img_pil, mask_pil)
+
+    try:
+        img_np = np.array(img_pil.convert("RGB"))
+        mask_np = np.array(mask_pil.convert("L"))
+
+        _, mask_bin = cv2.threshold(mask_np, 10, 255, cv2.THRESH_BINARY)
+        if np.count_nonzero(mask_bin) == 0:
+            return img_pil
+
+        h, w = img_np.shape[:2]
+
+        # Downsample to 512x512 for LaMa inference
+        img_512 = cv2.resize(img_np, (512, 512), interpolation=cv2.INTER_AREA)
+        mask_512 = cv2.resize(mask_bin, (512, 512), interpolation=cv2.INTER_NEAREST)
+        mask_512 = cv2.dilate(mask_512, cv2.getStructuringElement(cv2.MORPH_RECT, (2, 2)), iterations=1)
+
+        lama_img_in = (img_512.astype(np.float32) / 255.0).transpose((2, 0, 1))[None, ...]
+        lama_mask_in = (mask_512 > 0).astype(np.float32)[None, None, ...]
+
+        with _LAMA_SESSION_LOCK:
+            lama_out = session.run(None, {'l_image_': lama_img_in, 'l_mask_': lama_mask_in})[0]
+
+        inpainted_512 = np.clip(lama_out[0].transpose((1, 2, 0)), 0, 255).astype(np.uint8)
+        inpainted_full = cv2.resize(inpainted_512, (w, h), interpolation=cv2.INTER_CUBIC)
+
+        # Blend: Only replace pixels covered by the mask!
+        # Background artwork and line art outside the mask remain 100% bit-exact original.
+        mask_binary = (mask_bin > 0)[:, :, None]
+        final_rgb = np.where(mask_binary, inpainted_full, img_np)
+        return Image.fromarray(final_rgb)
+    except Exception as e:
+        logger.warning(f"[LaMa] Inference error, falling back to Telea: {e}")
+        return _fast_telea_inpaint(img_pil, mask_pil)
+
+
+def _create_stroke_mask(crop_rgb: np.ndarray, ink_thresh: int = 95, dilate_iter: int = 2, max_stroke_ratio: float = 0.35) -> tuple:
     """
     Extracts precise text stroke contours (glyph pixels) instead of a blunt rectangle.
     Suppresses manga halftone/screentone noise and completely eliminates ghost character edges.
     Parameters allow real-time tuning from the sidebar:
       - ink_thresh: strictly filters glyph ink (default 95, range 50-160)
       - dilate_iter: stroke dilation radius (default 2, range 1-4)
-      - max_stroke_ratio: protection ratio to avoid removing artwork/hair (default 0.30, range 0.15-0.50)
+      - max_stroke_ratio: protection ratio to avoid removing artwork/hair (default 0.35, range 0.15-0.50)
     Returns: (mask_np, bg_val)
     """
     h, w = crop_rgb.shape[:2]
@@ -258,7 +334,7 @@ def _create_stroke_mask(crop_rgb: np.ndarray, ink_thresh: int = 95, dilate_iter:
 class PDFLayoutRenderer:
     def __init__(self, original_pdf_path=None, output_pdf_path=None,
                  ink_thresh: int = 95, dilate_iter: int = 2,
-                 max_stroke_ratio: float = 0.30, font_scale: float = 1.0):
+                 max_stroke_ratio: float = 0.35, font_scale: float = 1.0):
         self.original_pdf_path = original_pdf_path
         self.output_pdf_path = output_pdf_path or (original_pdf_path.replace(".pdf", "_translated.pdf") if original_pdf_path else None)
         self.ink_thresh = int(ink_thresh)
@@ -326,7 +402,7 @@ class PDFLayoutRenderer:
                 img_pil = Image.fromarray(img_np)
                 mask_pil = Image.fromarray(mask_np)
                 async with sem:
-                    healed = _fast_telea_inpaint(img_pil, mask_pil)
+                    healed = _lama_inpaint(img_pil, mask_pil)
             else:
                 healed = Image.fromarray(img_np)
 
@@ -447,9 +523,9 @@ class PDFLayoutRenderer:
             mask_vis[mask_bool] = (0.35 * mask_vis[mask_bool].astype(np.float32) + 0.65 * overlay_color).astype(np.uint8)
         mask_img = Image.fromarray(mask_vis)
 
-        # 4. Inpaint with OpenCV Telea
+        # 4. Inpaint with LaMa Neural Inpainting
         if np.any(mask_bool):
-            healed = _fast_telea_inpaint(orig_img, Image.fromarray(mask_np))
+            healed = _lama_inpaint(orig_img, Image.fromarray(mask_np))
         else:
             healed = Image.fromarray(img_np)
 

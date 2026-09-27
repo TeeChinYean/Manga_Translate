@@ -46,7 +46,7 @@ def _save_text_cache(cache_base_dir: str, cache: dict):
 
 async def _run_pipeline_async(pdf_path, page_range_str, source_lang, target_lang, task_id, progress_callback,
                               ink_thresh: int = 95, dilate_iter: int = 2,
-                              max_stroke_ratio: float = 0.30, font_scale: float = 1.0):
+                              max_stroke_ratio: float = 0.35, font_scale: float = 1.0):
     def _safe_callback(percent: int, message: str, status: str):
         """
         Safe wrapper for the C# progress_callback delegate.

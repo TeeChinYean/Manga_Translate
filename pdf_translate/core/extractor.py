@@ -37,8 +37,115 @@ _OCR_READER = None
 _MANGA_OCR_LOCK = threading.Lock()
 _MANGA_OCR_INSTANCE = None
 
+_COMIC_DETECTOR_LOCK = threading.Lock()
+_COMIC_DETECTOR_SESSION = None
+
+_PADDLE_OCR_LOCK = threading.Lock()
+_PADDLE_OCR_INSTANCE = None
+
 _OCR_READER_JA = None
 _OCR_READER_EN = None
+
+def _get_paddle_ocr():
+    """
+    Singleton session for PaddleOCR (RapidOCR ONNX Runtime).
+    Fast, lightweight (~15MB ONNX), multi-language OCR recognition.
+    """
+    global _PADDLE_OCR_INSTANCE
+    if _PADDLE_OCR_INSTANCE is None:
+        with _PADDLE_OCR_LOCK:
+            if _PADDLE_OCR_INSTANCE is None:
+                try:
+                    from rapidocr_onnxruntime import RapidOCR
+                    _PADDLE_OCR_INSTANCE = RapidOCR(text_score=0.35)
+                    logger.info("[PaddleOCR] Initialized RapidOCR ONNX engine.")
+                except ImportError:
+                    logger.warning("[PaddleOCR] rapidocr_onnxruntime is not installed.")
+                    _PADDLE_OCR_INSTANCE = None
+                except Exception as e:
+                    logger.warning(f"[PaddleOCR] Failed to initialize RapidOCR: {e}")
+                    _PADDLE_OCR_INSTANCE = None
+    return _PADDLE_OCR_INSTANCE
+
+def _get_comic_detector():
+    """Singleton session for comic-text-detector.onnx with DirectML GPU acceleration and CPU fallback."""
+    global _COMIC_DETECTOR_SESSION
+    if _COMIC_DETECTOR_SESSION is None:
+        with _COMIC_DETECTOR_LOCK:
+            if _COMIC_DETECTOR_SESSION is None:
+                try:
+                    import onnxruntime as ort
+                    model_path = os.path.join(os.path.dirname(os.path.abspath(__file__)), "..", "data", "models", "onnx", "comic-text-detector.onnx")
+                    if os.path.exists(model_path):
+                        available_providers = ort.get_available_providers()
+                        providers = []
+                        if 'DmlExecutionProvider' in available_providers:
+                            providers.append('DmlExecutionProvider')
+                        providers.append('CPUExecutionProvider')
+                        _COMIC_DETECTOR_SESSION = ort.InferenceSession(model_path, providers=providers)
+                        logger.info(f"[ComicTextDetector] Initialized detector with providers: {providers}")
+                    else:
+                        logger.info(f"[ComicTextDetector] Model not found at {model_path}, will use CRAFT fallback.")
+                except Exception as e:
+                    logger.warning(f"[ComicTextDetector] Failed to load ONNX detector: {e}")
+                    _COMIC_DETECTOR_SESSION = None
+    return _COMIC_DETECTOR_SESSION
+
+def _detect_with_comic_detector(img_rgb: np.ndarray, session) -> list:
+    """
+    Runs comic-text-detector.onnx on an RGB image.
+    Uses letterbox to 1024x1024, NMS with IoU 0.35, and returns list of (x0, y0, x1, y1) bounding boxes.
+    """
+    h, w = img_rgb.shape[:2]
+    target_size = 1024
+    scale = min(target_size / w, target_size / h)
+    nw, nh = int(w * scale), int(h * scale)
+    resized = cv2.resize(img_rgb, (nw, nh), interpolation=cv2.INTER_LINEAR)
+    
+    canvas = np.zeros((target_size, target_size, 3), dtype=np.uint8)
+    dx = (target_size - nw) // 2
+    dy = (target_size - nh) // 2
+    canvas[dy:dy+nh, dx:dx+nw] = resized
+    
+    inp = (canvas.astype(np.float32) / 255.0).transpose((2, 0, 1))[None, ...]
+    
+    with _COMIC_DETECTOR_LOCK:
+        blk, seg, det = session.run(None, {'images': inp})
+        
+    candidates = []
+    for i in range(blk.shape[1]):
+        row = blk[0, i]
+        obj_conf = float(row[4])
+        if obj_conf > 0.35:
+            cx = (float(row[0]) - dx) / scale
+            cy = (float(row[1]) - dy) / scale
+            bw = float(row[2]) / scale
+            bh = float(row[3]) / scale
+            x0 = max(0, int(cx - bw / 2))
+            y0 = max(0, int(cy - bh / 2))
+            x1 = min(w, int(cx + bw / 2))
+            y1 = min(h, int(cy + bh / 2))
+            if x1 > x0 and y1 > y0:
+                candidates.append((obj_conf, (x0, y0, x1, y1)))
+                
+    candidates.sort(key=lambda x: x[0], reverse=True)
+    keep = []
+    for conf, (x0, y0, x1, y1) in candidates:
+        area = (x1 - x0) * (y1 - y0)
+        overlap = False
+        for kx0, ky0, kx1, ky1 in keep:
+            karea = (kx1 - kx0) * (ky1 - ky0)
+            ix0, iy0 = max(x0, kx0), max(y0, ky0)
+            ix1, iy1 = min(x1, kx1), min(y1, ky1)
+            inter = max(0, ix1 - ix0) * max(0, iy1 - iy0)
+            union = area + karea - inter
+            if union > 0 and (inter / union) > 0.35:
+                overlap = True
+                break
+        if not overlap:
+            keep.append((x0, y0, x1, y1))
+            
+    return keep
 
 def _get_ocr_reader(lang="Japanese"):
     global _OCR_READER_JA, _OCR_READER_EN
@@ -89,8 +196,8 @@ def _get_manga_ocr():
     return _MANGA_OCR_INSTANCE
 
 def unload_models():
-    """Completely unloads and releases PyTorch OCR models from VRAM and CPU RAM to free memory for downstream stages."""
-    global _OCR_READER_JA, _OCR_READER_EN, _MANGA_OCR_INSTANCE
+    """Completely unloads and releases PyTorch & ONNX OCR models to free memory for downstream stages."""
+    global _OCR_READER_JA, _OCR_READER_EN, _MANGA_OCR_INSTANCE, _COMIC_DETECTOR_SESSION, _PADDLE_OCR_INSTANCE
     import torch
     import gc
     
@@ -106,6 +213,16 @@ def unload_models():
         if _MANGA_OCR_INSTANCE is not None:
             del _MANGA_OCR_INSTANCE
             _MANGA_OCR_INSTANCE = None
+
+    with _COMIC_DETECTOR_LOCK:
+        if _COMIC_DETECTOR_SESSION is not None:
+            del _COMIC_DETECTOR_SESSION
+            _COMIC_DETECTOR_SESSION = None
+
+    with _PADDLE_OCR_LOCK:
+        if _PADDLE_OCR_INSTANCE is not None:
+            del _PADDLE_OCR_INSTANCE
+            _PADDLE_OCR_INSTANCE = None
                 
     if torch.cuda.is_available():
         torch.cuda.empty_cache()
@@ -383,43 +500,47 @@ class PDFLayoutExtractor:
         img_np = np.frombuffer(pix.samples, dtype=np.uint8).reshape((pix.height, pix.width, 3))
         doc.close()
         
-        # 2. Robust Text Region Detection using EasyOCR (CRAFT)
-        # We strictly use it for bounding boxes, not recognition.
-        # It natively ignores manga screentones and halftones.
-        reader = _get_ocr_reader(source_lang)
-        with _OCR_LOCK:
-            # Calibrated CRAFT settings: avoids clothing lace/buttons/hair while capturing all bubbles & vertical dialogue
-            ocr_results = reader.readtext(
-                img_np,
-                paragraph=True,
-                x_ths=0.15,
-                y_ths=0.15,
-                text_threshold=0.60,
-                low_text=0.35,
-                link_threshold=0.35
-            )
-
-        # Collect raw bounding boxes from CRAFT
-        candidate_boxes = []
+        # 2. Text Region Detection (Comic-Text-Detector ONNX with CRAFT fallback)
+        comic_session = _get_comic_detector()
         raw_box_to_text = {}
-        for coords, text in ocr_results:
-            xs = [pt[0] for pt in coords]
-            ys = [pt[1] for pt in coords]
-            x0, x1 = max(0, int(min(xs))), min(img_np.shape[1], int(max(xs)))
-            y0, y1 = max(0, int(min(ys))), min(img_np.shape[0], int(max(ys)))
-            if x1 > x0 and y1 > y0:
-                candidate_boxes.append([x0, y0, x1, y1])
-                raw_box_to_text[(x0, y0, x1, y1)] = text
+        
+        if comic_session is not None:
+            # High-speed specialized YOLOv8 detection for manga dialogue bubbles
+            merged_boxes = _detect_with_comic_detector(img_np, comic_session)
+            logger.info(f"[ComicTextDetector] Page {page_num}: Detected {len(merged_boxes)} speech bubbles.")
+        else:
+            # Fallback to EasyOCR CRAFT
+            reader = _get_ocr_reader(source_lang)
+            with _OCR_LOCK:
+                ocr_results = reader.readtext(
+                    img_np,
+                    paragraph=True,
+                    x_ths=0.15,
+                    y_ths=0.15,
+                    text_threshold=0.60,
+                    low_text=0.35,
+                    link_threshold=0.35
+                )
 
-        # Merge overlapping, multi-column and redundant boxes into unified bubble boxes!
-        merged_boxes = _merge_overlapping_boxes(candidate_boxes)
-        logger.info(f"[BoxMerge] Page {page_num}: CRAFT detected {len(candidate_boxes)} boxes → merged into {len(merged_boxes)} bubble boxes.")
+            candidate_boxes = []
+            for coords, text in ocr_results:
+                xs = [pt[0] for pt in coords]
+                ys = [pt[1] for pt in coords]
+                x0, x1 = max(0, int(min(xs))), min(img_np.shape[1], int(max(xs)))
+                y0, y1 = max(0, int(min(ys))), min(img_np.shape[0], int(max(ys)))
+                if x1 > x0 and y1 > y0:
+                    candidate_boxes.append([x0, y0, x1, y1])
+                    raw_box_to_text[(x0, y0, x1, y1)] = text
+
+            merged_boxes = _merge_overlapping_boxes(candidate_boxes)
+            logger.info(f"[CRAFT Fallback] Page {page_num}: CRAFT detected {len(candidate_boxes)} boxes → merged into {len(merged_boxes)} bubble boxes.")
             
         blocks = []
         block_id_counter = 0
         seen_texts = set()
         
-        # Only load MangaOCR if we are translating Japanese
+        # Primary OCR: PaddleOCR (RapidOCR ONNX), Secondary: MangaOCR / EasyOCR
+        paddle_ocr = _get_paddle_ocr()
         mocr = None
         if source_lang == "Japanese":
             mocr = _get_manga_ocr()
@@ -430,58 +551,71 @@ class PDFLayoutExtractor:
                 continue
                 
             raw_text = ""
+            ocr_engine_name = "PaddleOCR (PP-OCRv4)"
             
-            if source_lang == "Japanese":
-                # --- MANGA-OCR ALWAYS ON UNIFIED BUBBLE ---
-                if mocr is not None:
-                    try:
-                        # Pad the crop slightly for better ViT recognition
-                        pad = 8
-                        cx0 = max(0, x0 - pad)
-                        cy0 = max(0, y0 - pad)
-                        cx1 = min(img_np.shape[1], x1 + pad)
-                        cy1 = min(img_np.shape[0], y1 + pad)
-                        
-                        # Guard: skip degenerate crops (width or height < 8px)
-                        if (cx1 - cx0) < 8 or (cy1 - cy0) < 8:
-                            continue
-                        
+            # --- 3a. Primary: PaddleOCR (PP-OCRv4 ONNX) ---
+            if paddle_ocr is not None:
+                try:
+                    pad = 6
+                    cx0 = max(0, x0 - pad)
+                    cy0 = max(0, y0 - pad)
+                    cx1 = min(img_np.shape[1], x1 + pad)
+                    cy1 = min(img_np.shape[0], y1 + pad)
+                    if (cx1 - cx0) >= 8 and (cy1 - cy0) >= 8:
                         crop_np = img_np[cy0:cy1, cx0:cx1]
-                        if crop_np.size == 0:
-                            continue
-                        
-                        crop_img = Image.fromarray(crop_np)
-                        # Ensure minimum size for ViT (32x32)
-                        if crop_img.width < 16 or crop_img.height < 16:
-                            crop_img = crop_img.resize(
-                                (max(crop_img.width, 32), max(crop_img.height, 32)),
-                                Image.LANCZOS
-                            )
-                        
-                        with _MANGA_OCR_LOCK:
-                            import torch
-                            with torch.inference_mode():
-                                try:
-                                    x = mocr._preprocess(crop_img)
-                                    tokens = mocr.model.generate(x[None].to(mocr.model.device), max_new_tokens=64, max_length=None)[0].cpu()
-                                    raw_text = mocr.tokenizer.decode(tokens, skip_special_tokens=True)
-                                    from manga_ocr.ocr import post_process
-                                    raw_text = post_process(raw_text)
-                                except Exception:
-                                    raw_text = mocr(crop_img)
-                            
-                        if raw_text:
-                            raw_text = raw_text.strip()
-                            logger.info(f"[MangaOCR] Page {page_num}: detected '{raw_text}'")
-                    except Exception as e:
-                        logger.error(f"[!] MangaOCR failed on crop: {e}")
-            else:
-                # Use matching EasyOCR text for English/Malay
+                        paddle_res, _ = paddle_ocr(crop_np)
+                        if paddle_res:
+                            raw_text = "".join(line[1].strip() for line in paddle_res if line and len(line) > 1 and line[1])
+                            if raw_text:
+                                raw_text = raw_text.strip()
+                                logger.info(f"[PaddleOCR] Page {page_num}: detected '{raw_text}'")
+                except Exception as pe:
+                    logger.warning(f"[PaddleOCR] Recognition failed on crop: {pe}")
+
+            # --- 3b. Secondary Fallback: MangaOCR (for Japanese if PaddleOCR missed) ---
+            if not raw_text and source_lang == "Japanese" and mocr is not None:
+                try:
+                    pad = 8
+                    cx0 = max(0, x0 - pad)
+                    cy0 = max(0, y0 - pad)
+                    cx1 = min(img_np.shape[1], x1 + pad)
+                    cy1 = min(img_np.shape[0], y1 + pad)
+                    if (cx1 - cx0) >= 8 and (cy1 - cy0) >= 8:
+                        crop_np = img_np[cy0:cy1, cx0:cx1]
+                        if crop_np.size > 0:
+                            crop_img = Image.fromarray(crop_np)
+                            if crop_img.width < 16 or crop_img.height < 16:
+                                crop_img = crop_img.resize(
+                                    (max(crop_img.width, 32), max(crop_img.height, 32)),
+                                    Image.LANCZOS
+                                )
+                            with _MANGA_OCR_LOCK:
+                                import torch
+                                with torch.inference_mode():
+                                    try:
+                                        x = mocr._preprocess(crop_img)
+                                        tokens = mocr.model.generate(x[None].to(mocr.model.device), max_new_tokens=64, max_length=None)[0].cpu()
+                                        raw_text = mocr.tokenizer.decode(tokens, skip_special_tokens=True)
+                                        from manga_ocr.ocr import post_process
+                                        raw_text = post_process(raw_text)
+                                    except Exception:
+                                        raw_text = mocr(crop_img)
+                            if raw_text:
+                                raw_text = raw_text.strip()
+                                ocr_engine_name = "MangaOCR (ViT Fallback)"
+                                logger.info(f"[MangaOCR Fallback] Page {page_num}: detected '{raw_text}'")
+                except Exception as e:
+                    logger.error(f"[!] MangaOCR failed on crop: {e}")
+
+            # --- 3c. Tertiary Fallback: EasyOCR text matching ---
+            if not raw_text and raw_box_to_text:
                 matching = [
                     t for (rx0, ry0, rx1, ry1), t in raw_box_to_text.items()
                     if max(0, min(x1, rx1) - max(x0, rx0)) * max(0, min(y1, ry1) - max(y0, ry0)) > 0
                 ]
                 raw_text = " ".join(matching).strip()
+                if raw_text:
+                    ocr_engine_name = "EasyOCR (Fallback)"
             
             if not raw_text or not self._is_meaningful_text(raw_text):
                 continue
@@ -510,7 +644,7 @@ class PDFLayoutExtractor:
                 "height": by1 - by0,
                 "center_x": (bx0 + bx1) / 2.0,
                 "center_y": (by0 + by1) / 2.0,
-                "ocr_engine": "MangaOCR (ViT)" if (source_lang == "Japanese" and mocr is not None) else "EasyOCR (CRAFT)"
+                "ocr_engine": ocr_engine_name
             })
             block_id_counter += 1
 
