@@ -467,17 +467,519 @@
             width: 0%;
             background: linear-gradient(90deg, var(--accent-indigo), var(--accent-purple));
             border-radius: 99px;
-            transition: width 0.4s ease;
+        /* ===================================================
+           TUNING SIDEBAR & LIVE PREVIEW STYLES
+           =================================================== */
+
+        /* Backdrop Overlay */
+        .sidebar-backdrop {
+            position: fixed;
+            top: 0;
+            left: 0;
+            width: 100vw;
+            height: 100vh;
+            background: rgba(4, 5, 8, 0.75);
+            backdrop-filter: blur(6px);
+            -webkit-backdrop-filter: blur(6px);
+            z-index: 998;
+            opacity: 0;
+            pointer-events: none;
+            transition: opacity 0.3s ease;
         }
 
-        footer {
-            margin-top: 60px;
-            padding: 30px 0;
-            font-size: 0.8rem;
-            color: #4b5563;
+        .sidebar-backdrop.active {
+            opacity: 1;
+            pointer-events: auto;
+        }
+
+        /* Sidebar Drawer Container */
+        .tuning-sidebar {
+            position: fixed;
+            top: 0;
+            right: 0;
+            width: 620px;
+            max-width: 95vw;
+            height: 100vh;
+            background: rgba(13, 16, 26, 0.96);
+            backdrop-filter: blur(28px);
+            -webkit-backdrop-filter: blur(28px);
+            border-left: 1px solid rgba(255, 255, 255, 0.1);
+            box-shadow: -20px 0 60px rgba(0, 0, 0, 0.75);
+            z-index: 999;
+            display: flex;
+            flex-direction: column;
+            transform: translateX(100%);
+            transition: transform 0.35s cubic-bezier(0.16, 1, 0.3, 1);
+        }
+
+        .tuning-sidebar.open {
+            transform: translateX(0);
+        }
+
+        /* Sidebar Header */
+        .sidebar-header {
+            padding: 20px 24px;
+            border-bottom: 1px solid var(--border-color);
+            display: flex;
+            justify-content: space-between;
+            align-items: center;
+            background: rgba(255, 255, 255, 0.015);
+        }
+
+        .sidebar-header-title {
+            display: flex;
+            flex-direction: column;
+            gap: 4px;
+        }
+
+        .sidebar-header-title h3 {
+            font-family: 'Outfit', sans-serif;
+            font-size: 1.25rem;
+            font-weight: 700;
+            background: linear-gradient(135deg, #c7d2fe, var(--accent-indigo));
+            -webkit-background-clip: text;
+            -webkit-text-fill-color: transparent;
+            display: flex;
+            align-items: center;
+            gap: 8px;
+        }
+
+        .sidebar-header-title p {
+            font-size: 0.78rem;
+            color: var(--text-secondary);
+        }
+
+        .sidebar-close-btn {
+            background: rgba(255, 255, 255, 0.06);
+            border: 1px solid var(--border-color);
+            color: var(--text-secondary);
+            width: 34px;
+            height: 34px;
+            border-radius: 10px;
+            display: flex;
+            align-items: center;
+            justify-content: center;
+            cursor: pointer;
+            font-size: 1.1rem;
+            transition: all 0.2s ease;
+        }
+
+        .sidebar-close-btn:hover {
+            background: rgba(239, 68, 68, 0.2);
+            border-color: rgba(239, 68, 68, 0.4);
+            color: #fca5a5;
+            transform: scale(1.05);
+        }
+
+        /* Sidebar Scrollable Body */
+        .sidebar-body {
+            flex: 1;
+            overflow-y: auto;
+            padding: 20px 24px;
+            display: flex;
+            flex-direction: column;
+            gap: 20px;
+        }
+
+        /* Preview Window Section */
+        .preview-section {
+            background: rgba(0, 0, 0, 0.45);
+            border: 1px solid rgba(255, 255, 255, 0.08);
+            border-radius: 16px;
+            padding: 14px;
+            display: flex;
+            flex-direction: column;
+            gap: 12px;
+        }
+
+        .preview-tabs {
+            display: flex;
+            gap: 6px;
+            background: rgba(255, 255, 255, 0.03);
+            padding: 4px;
+            border-radius: 10px;
+            border: 1px solid rgba(255, 255, 255, 0.05);
+        }
+
+        .preview-tab-btn {
+            flex: 1;
+            padding: 7px 10px;
+            font-size: 0.75rem;
+            font-weight: 600;
+            border: none;
+            background: transparent;
+            color: var(--text-secondary);
+            border-radius: 6px;
+            cursor: pointer;
+            transition: all 0.2s ease;
             text-align: center;
+            white-space: nowrap;
+        }
+
+        .preview-tab-btn:hover {
+            color: var(--text-primary);
+            background: rgba(255, 255, 255, 0.05);
+        }
+
+        .preview-tab-btn.active {
+            background: var(--accent-indigo);
+            color: white;
+            box-shadow: 0 2px 10px rgba(99, 102, 241, 0.4);
+        }
+
+        /* Preview Image Stage */
+        .preview-stage {
+            position: relative;
             width: 100%;
-            border-top: 1px solid rgba(255, 255, 255, 0.04);
+            height: 380px;
+            background: #040508;
+            border-radius: 12px;
+            overflow: hidden;
+            display: flex;
+            align-items: center;
+            justify-content: center;
+            border: 1px solid rgba(255, 255, 255, 0.06);
+            user-select: none;
+        }
+
+        .preview-image {
+            max-width: 100%;
+            max-height: 100%;
+            object-fit: contain;
+            display: block;
+        }
+
+        /* Split Compare Slider Container */
+        .compare-container {
+            position: relative;
+            width: 100%;
+            height: 100%;
+            overflow: hidden;
+            display: none;
+            cursor: ew-resize;
+        }
+
+        .compare-img-after {
+            position: absolute;
+            top: 0;
+            left: 0;
+            width: 100%;
+            height: 100%;
+            object-fit: contain;
+        }
+
+        .compare-img-before-wrapper {
+            position: absolute;
+            top: 0;
+            left: 0;
+            width: 50%;
+            height: 100%;
+            overflow: hidden;
+            border-right: 2px solid var(--accent-indigo);
+            box-shadow: 2px 0 12px rgba(99, 102, 241, 0.6);
+        }
+
+        .compare-img-before {
+            position: absolute;
+            top: 0;
+            left: 0;
+            width: 100%;
+            height: 100%;
+            object-fit: contain;
+        }
+
+        .compare-handle {
+            position: absolute;
+            top: 50%;
+            left: 50%;
+            transform: translate(-50%, -50%);
+            width: 30px;
+            height: 30px;
+            background: var(--accent-indigo);
+            border-radius: 50%;
+            display: flex;
+            align-items: center;
+            justify-content: center;
+            color: white;
+            font-size: 0.75rem;
+            box-shadow: 0 0 15px rgba(99, 102, 241, 0.9);
+            pointer-events: none;
+        }
+
+        .preview-placeholder {
+            display: flex;
+            flex-direction: column;
+            align-items: center;
+            justify-content: center;
+            gap: 10px;
+            color: var(--text-secondary);
+            font-size: 0.85rem;
+            padding: 24px;
+            text-align: center;
+        }
+
+        .preview-spinner-overlay {
+            position: absolute;
+            inset: 0;
+            background: rgba(8, 9, 13, 0.75);
+            backdrop-filter: blur(4px);
+            display: flex;
+            flex-direction: column;
+            align-items: center;
+            justify-content: center;
+            gap: 12px;
+            z-index: 10;
+            opacity: 0;
+            pointer-events: none;
+            transition: opacity 0.2s ease;
+        }
+
+        .preview-spinner-overlay.active {
+            opacity: 1;
+            pointer-events: auto;
+        }
+
+        .preview-spinner {
+            width: 36px;
+            height: 36px;
+            border: 3px solid rgba(99, 102, 241, 0.2);
+            border-top-color: var(--accent-indigo);
+            border-radius: 50%;
+            animation: spin 0.8s linear infinite;
+        }
+
+        /* Preview Toolbar (Page Switcher + Info) */
+        .preview-toolbar {
+            display: flex;
+            justify-content: space-between;
+            align-items: center;
+            font-size: 0.8rem;
+        }
+
+        .page-navigator {
+            display: flex;
+            align-items: center;
+            gap: 8px;
+        }
+
+        .page-nav-btn {
+            background: rgba(255, 255, 255, 0.05);
+            border: 1px solid var(--border-color);
+            color: var(--text-primary);
+            padding: 4px 10px;
+            border-radius: 6px;
+            font-size: 0.75rem;
+            cursor: pointer;
+            transition: all 0.2s;
+        }
+
+        .page-nav-btn:hover:not(:disabled) {
+            background: rgba(99, 102, 241, 0.2);
+            border-color: var(--accent-indigo);
+        }
+
+        .page-nav-btn:disabled {
+            opacity: 0.35;
+            cursor: not-allowed;
+        }
+
+        .page-indicator {
+            font-family: 'Fira Code', monospace;
+            color: var(--text-primary);
+            font-weight: 600;
+        }
+
+        .preview-badges {
+            display: flex;
+            gap: 6px;
+        }
+
+        .preview-badge {
+            font-size: 0.7rem;
+            padding: 3px 8px;
+            border-radius: 6px;
+            background: rgba(255, 255, 255, 0.04);
+            border: 1px solid rgba(255, 255, 255, 0.08);
+            color: var(--text-secondary);
+        }
+
+        .preview-badge.time {
+            color: var(--accent-emerald);
+            border-color: rgba(16, 185, 129, 0.25);
+            background: rgba(16, 185, 129, 0.06);
+        }
+
+        /* Sliders Section */
+        .tuning-controls {
+            display: flex;
+            flex-direction: column;
+            gap: 16px;
+        }
+
+        .control-item {
+            background: rgba(255, 255, 255, 0.02);
+            border: 1px solid rgba(255, 255, 255, 0.06);
+            border-radius: 14px;
+            padding: 14px 16px;
+            display: flex;
+            flex-direction: column;
+            gap: 8px;
+            transition: all 0.2s ease;
+        }
+
+        .control-item:hover {
+            border-color: rgba(99, 102, 241, 0.3);
+            background: rgba(99, 102, 241, 0.02);
+        }
+
+        .control-item-header {
+            display: flex;
+            justify-content: space-between;
+            align-items: center;
+        }
+
+        .control-item-label {
+            font-size: 0.82rem;
+            font-weight: 600;
+            color: var(--text-primary);
+            display: flex;
+            align-items: center;
+            gap: 6px;
+        }
+
+        .control-val-badge {
+            font-family: 'Fira Code', monospace;
+            font-size: 0.78rem;
+            font-weight: 700;
+            color: var(--accent-indigo);
+            background: rgba(99, 102, 241, 0.12);
+            border: 1px solid rgba(99, 102, 241, 0.3);
+            padding: 2px 8px;
+            border-radius: 6px;
+        }
+
+        .custom-range {
+            -webkit-appearance: none;
+            width: 100%;
+            height: 6px;
+            border-radius: 5px;
+            background: rgba(255, 255, 255, 0.1);
+            outline: none;
+            transition: background 0.2s;
+        }
+
+        .custom-range::-webkit-slider-thumb {
+            -webkit-appearance: none;
+            appearance: none;
+            width: 18px;
+            height: 18px;
+            border-radius: 50%;
+            background: var(--accent-indigo);
+            cursor: pointer;
+            box-shadow: 0 0 10px rgba(99, 102, 241, 0.8);
+            transition: transform 0.1s ease, box-shadow 0.2s ease;
+        }
+
+        .custom-range::-webkit-slider-thumb:hover {
+            transform: scale(1.2);
+            box-shadow: 0 0 16px rgba(99, 102, 241, 1);
+        }
+
+        .control-item-desc {
+            font-size: 0.72rem;
+            color: var(--text-secondary);
+            line-height: 1.4;
+        }
+
+        /* Preset Action Pills */
+        .preset-row {
+            display: flex;
+            gap: 8px;
+            flex-wrap: wrap;
+        }
+
+        .preset-btn {
+            padding: 6px 12px;
+            font-size: 0.74rem;
+            font-weight: 500;
+            border-radius: 8px;
+            background: rgba(255, 255, 255, 0.04);
+            border: 1px solid var(--border-color);
+            color: var(--text-primary);
+            cursor: pointer;
+            transition: all 0.2s ease;
+        }
+
+        .preset-btn:hover {
+            background: rgba(99, 102, 241, 0.15);
+            border-color: rgba(99, 102, 241, 0.4);
+            color: #c7d2fe;
+        }
+
+        /* Sidebar Footer */
+        .sidebar-footer {
+            padding: 16px 24px;
+            border-top: 1px solid var(--border-color);
+            display: flex;
+            gap: 12px;
+            background: rgba(10, 12, 18, 0.95);
+        }
+
+        /* Tuning summary bar on main upload card */
+        .tune-summary-bar {
+            background: rgba(99, 102, 241, 0.06);
+            border: 1px solid rgba(99, 102, 241, 0.2);
+            border-radius: 12px;
+            padding: 12px 16px;
+            display: flex;
+            justify-content: space-between;
+            align-items: center;
+            cursor: pointer;
+            transition: all 0.25s ease;
+        }
+
+        .tune-summary-bar:hover {
+            background: rgba(99, 102, 241, 0.12);
+            border-color: var(--accent-indigo);
+            box-shadow: 0 0 20px var(--glow-indigo);
+        }
+
+        .tune-summary-left {
+            display: flex;
+            flex-direction: column;
+            gap: 3px;
+        }
+
+        .tune-summary-title {
+            font-size: 0.85rem;
+            font-weight: 600;
+            color: #e0e7ff;
+            display: flex;
+            align-items: center;
+            gap: 6px;
+        }
+
+        .tune-summary-tags {
+            font-size: 0.72rem;
+            color: var(--text-secondary);
+            display: flex;
+            gap: 8px;
+            font-family: 'Fira Code', monospace;
+        }
+
+        .tune-summary-tags b {
+            color: #a5b4fc;
+        }
+
+        .tune-summary-btn {
+            font-size: 0.78rem;
+            font-weight: 600;
+            color: var(--accent-indigo);
+            background: rgba(99, 102, 241, 0.15);
+            padding: 6px 12px;
+            border-radius: 8px;
+            border: 1px solid rgba(99, 102, 241, 0.3);
+            white-space: nowrap;
         }
     </style>
 </head>
@@ -535,6 +1037,22 @@
                         style="width: 100%; padding: 12px; background: rgba(255, 255, 255, 0.05); border: 1px solid rgba(255, 255, 255, 0.1); border-radius: 8px; color: var(--text-primary); outline: none; transition: border 0.3s; font-size: 0.9rem;">
                 </div>
 
+                <!-- Live Inpaint Tuning Bar Trigger -->
+                <div class="tune-summary-bar" id="openSidebarBtn" title="点击展开实时重绘与排版调优侧边栏">
+                    <div class="tune-summary-left">
+                        <div class="tune-summary-title">
+                            <span>🎨 实时重绘调优 & 效果预览</span>
+                            <span class="badge" id="tuneBadgeStatus" style="font-size:0.68rem; padding:2px 6px; border-radius:4px; background:rgba(16,185,129,0.15); border:1px solid rgba(16,185,129,0.3); color:var(--accent-emerald);">实时生效</span>
+                        </div>
+                        <div class="tune-summary-tags">
+                            <span>墨水:<b id="summaryInkThresh">95</b></span>
+                            <span>膨胀:<b id="summaryDilate">2圈</b></span>
+                            <span>熔断:<b id="summaryMaxStroke">30%</b></span>
+                            <span>字号:<b id="summaryFontScale">1.00x</b></span>
+                        </div>
+                    </div>
+                    <div class="tune-summary-btn">调节参数 ⚙️</div>
+                </div>
 
                 <!-- Run trigger -->
                 <div style="display: flex; gap: 16px; width: 100%;">
@@ -720,7 +1238,7 @@
         });
 
         function handleFileSelect(file) {
-            if (file.type !== 'application/pdf') {
+            if (file.type !== 'application/pdf' && !file.name.endsWith('.pdf')) {
                 logToConsole('[-] 错误: 仅支持 PDF 格式的文件！', 'err');
                 return;
             }
@@ -728,6 +1246,11 @@
             uploadStatusText.textContent = `已选择: ${file.name}`;
             translateBtn.disabled = false;
             logToConsole(`[+] 成功载入源 PDF: ${file.name} (${(file.size / 1024 / 1024).toFixed(2)} MB)`, 'success');
+            
+            // Auto open Tuning Sidebar & fetch real-time preview for page 1
+            if (typeof openTuningSidebar === 'function') {
+                openTuningSidebar(true);
+            }
         }
 
         // Action Trigger
@@ -760,13 +1283,17 @@
 
             logToConsole(`[+] 启动排版翻译流水线。正在分发任务...`);
 
-            // Assemble Form
+            // Assemble Form with tuned inpainting & typography parameters
             const formData = new FormData();
             formData.append('file', selectedFile);
             formData.append('source_lang', srcLangSelect.value);
             formData.append('target_lang', 'Simplified Chinese');
             formData.append('page_range', document.getElementById('pageRange').value);
             formData.append('force_retranslate', 'true');
+            formData.append('ink_thresh', tuningParams.ink_thresh);
+            formData.append('dilate_iter', tuningParams.dilate_iter);
+            formData.append('max_stroke_ratio', tuningParams.max_stroke_ratio);
+            formData.append('font_scale', tuningParams.font_scale);
 
             try {
                 const response = await fetch('/api/v1/translate/upload', {
@@ -933,7 +1460,448 @@
                 cancelBtn.style.display = 'none';
             });
         }
+
+        // ══════════════════════════════════════════════════════════════════════
+        // ── Tuning Sidebar & Live Preview System ──────────────────────────────
+        // ══════════════════════════════════════════════════════════════════════
+        const sidebarBackdrop = document.getElementById('sidebarBackdrop');
+        const tuningSidebar = document.getElementById('tuningSidebar');
+        const openSidebarBtn = document.getElementById('openSidebarBtn');
+        const closeSidebarBtn = document.getElementById('closeSidebarBtn');
+        const resetParamsBtn = document.getElementById('resetParamsBtn');
+        const saveParamsBtn = document.getElementById('saveParamsBtn');
+        const sidebarTranslateBtn = document.getElementById('sidebarTranslateBtn');
+
+        // Sliders & Value Badges
+        const sliderInkThresh = document.getElementById('sliderInkThresh');
+        const valInkThresh = document.getElementById('valInkThresh');
+        const sliderDilateIter = document.getElementById('sliderDilateIter');
+        const valDilateIter = document.getElementById('valDilateIter');
+        const sliderMaxStroke = document.getElementById('sliderMaxStroke');
+        const valMaxStroke = document.getElementById('valMaxStroke');
+        const sliderFontScale = document.getElementById('sliderFontScale');
+        const valFontScale = document.getElementById('valFontScale');
+
+        // Summary Badges on Left Panel
+        const summaryInkThresh = document.getElementById('summaryInkThresh');
+        const summaryDilate = document.getElementById('summaryDilate');
+        const summaryMaxStroke = document.getElementById('summaryMaxStroke');
+        const summaryFontScale = document.getElementById('summaryFontScale');
+
+        // Preview Elements
+        const previewStage = document.getElementById('previewStage');
+        const previewMainImg = document.getElementById('previewMainImg');
+        const compareContainer = document.getElementById('compareContainer');
+        const compareImgResult = document.getElementById('compareImgResult');
+        const compareBeforeWrapper = document.getElementById('compareBeforeWrapper');
+        const compareImgOriginal = document.getElementById('compareImgOriginal');
+        const compareHandle = document.getElementById('compareHandle');
+        const previewPlaceholder = document.getElementById('previewPlaceholder');
+        const previewSpinnerOverlay = document.getElementById('previewSpinnerOverlay');
+        const previewSpinnerText = document.getElementById('previewSpinnerText');
+        const prevPageBtn = document.getElementById('prevPageBtn');
+        const nextPageBtn = document.getElementById('nextPageBtn');
+        const curPageNum = document.getElementById('curPageNum');
+        const totalPageNum = document.getElementById('totalPageNum');
+        const previewRenderTime = document.getElementById('previewRenderTime');
+        const previewBoxCount = document.getElementById('previewBoxCount');
+
+        // State
+        let tuningParams = {
+            ink_thresh: 95,
+            dilate_iter: 2,
+            max_stroke_ratio: 0.30,
+            font_scale: 1.00
+        };
+
+        let currentPreviewId = null;
+        let currentPreviewPage = 1;
+        let totalPreviewPages = 1;
+        let previewImages = { original: null, mask: null, result: null };
+        let activeTabMode = 'result';
+        let previewDebounceTimer = null;
+        let isPreviewLoading = false;
+
+        function openTuningSidebar(autoFetch = false) {
+            tuningSidebar.classList.add('open');
+            sidebarBackdrop.classList.add('active');
+            if (autoFetch && selectedFile) {
+                fetchPreview(true, 1);
+            }
+        }
+
+        function closeTuningSidebar() {
+            tuningSidebar.classList.remove('open');
+            sidebarBackdrop.classList.remove('active');
+        }
+
+        openSidebarBtn.addEventListener('click', () => openTuningSidebar(selectedFile && !currentPreviewId));
+        closeSidebarBtn.addEventListener('click', closeTuningSidebar);
+        sidebarBackdrop.addEventListener('click', closeTuningSidebar);
+        saveParamsBtn.addEventListener('click', closeTuningSidebar);
+
+        document.addEventListener('keydown', (e) => {
+            if (e.key === 'Escape' && tuningSidebar.classList.contains('open')) {
+                closeTuningSidebar();
+            }
+        });
+
+        // Sync slider values with UI displays
+        function updateTuningDisplays() {
+            valInkThresh.textContent = tuningParams.ink_thresh;
+            valDilateIter.textContent = `${tuningParams.dilate_iter} 圈 (${tuningParams.dilate_iter * 3}px)`;
+            valMaxStroke.textContent = `${Math.round(tuningParams.max_stroke_ratio * 100)}%`;
+            valFontScale.textContent = `${tuningParams.font_scale.toFixed(2)}x`;
+
+            summaryInkThresh.textContent = tuningParams.ink_thresh;
+            summaryDilate.textContent = `${tuningParams.dilate_iter}圈`;
+            summaryMaxStroke.textContent = `${Math.round(tuningParams.max_stroke_ratio * 100)}%`;
+            summaryFontScale.textContent = `${tuningParams.font_scale.toFixed(2)}x`;
+        }
+
+        function onParamChanged() {
+            tuningParams.ink_thresh = parseInt(sliderInkThresh.value, 10);
+            tuningParams.dilate_iter = parseInt(sliderDilateIter.value, 10);
+            tuningParams.max_stroke_ratio = parseInt(sliderMaxStroke.value, 10) / 100.0;
+            tuningParams.font_scale = parseFloat(sliderFontScale.value);
+            updateTuningDisplays();
+
+            if (selectedFile || currentPreviewId) {
+                clearTimeout(previewDebounceTimer);
+                previewDebounceTimer = setTimeout(() => {
+                    fetchPreview(false, currentPreviewPage);
+                }, 220);
+            }
+        }
+
+        sliderInkThresh.addEventListener('input', onParamChanged);
+        sliderDilateIter.addEventListener('input', onParamChanged);
+        sliderMaxStroke.addEventListener('input', onParamChanged);
+        sliderFontScale.addEventListener('input', onParamChanged);
+
+        // Presets Handlers
+        function applyPreset(ink, dilate, maxRatio, fontScale) {
+            sliderInkThresh.value = ink;
+            sliderDilateIter.value = dilate;
+            sliderMaxStroke.value = Math.round(maxRatio * 100);
+            sliderFontScale.value = fontScale.toFixed(2);
+            onParamChanged();
+        }
+
+        document.getElementById('presetStandard').addEventListener('click', () => applyPreset(95, 2, 0.30, 1.00));
+        document.getElementById('presetFineLine').addEventListener('click', () => applyPreset(75, 1, 0.22, 0.95));
+        document.getElementById('presetHighContrast').addEventListener('click', () => applyPreset(120, 3, 0.35, 1.05));
+        resetParamsBtn.addEventListener('click', () => applyPreset(95, 2, 0.30, 1.00));
+
+        // Tab Mode Handlers
+        const tabBtns = document.querySelectorAll('.preview-tab-btn');
+        tabBtns.forEach(btn => {
+            btn.addEventListener('click', () => {
+                tabBtns.forEach(b => b.classList.remove('active'));
+                btn.classList.add('active');
+                activeTabMode = btn.dataset.mode;
+                displayActivePreviewImage();
+            });
+        });
+
+        function displayActivePreviewImage() {
+            if (!previewImages.result) {
+                previewPlaceholder.style.display = 'flex';
+                previewMainImg.style.display = 'none';
+                compareContainer.style.display = 'none';
+                return;
+            }
+
+            previewPlaceholder.style.display = 'none';
+
+            if (activeTabMode === 'compare') {
+                previewMainImg.style.display = 'none';
+                compareContainer.style.display = 'block';
+                compareImgResult.src = previewImages.result;
+                compareImgOriginal.src = previewImages.original;
+            } else {
+                compareContainer.style.display = 'none';
+                previewMainImg.style.display = 'block';
+                if (activeTabMode === 'result') {
+                    previewMainImg.src = previewImages.result;
+                } else if (activeTabMode === 'mask') {
+                    previewMainImg.src = previewImages.mask;
+                } else if (activeTabMode === 'original') {
+                    previewMainImg.src = previewImages.original;
+                }
+            }
+        }
+
+        // Split Compare Slider Mouse/Touch Interactions
+        let isComparing = false;
+        function updateComparePosition(clientX) {
+            const rect = compareContainer.getBoundingClientRect();
+            let x = clientX - rect.left;
+            x = Math.max(0, Math.min(x, rect.width));
+            const pct = (x / rect.width) * 100;
+            compareBeforeWrapper.style.width = `${pct}%`;
+            compareHandle.style.left = `${pct}%`;
+        }
+
+        compareContainer.addEventListener('mousedown', (e) => {
+            isComparing = true;
+            updateComparePosition(e.clientX);
+        });
+
+        window.addEventListener('mousemove', (e) => {
+            if (isComparing) updateComparePosition(e.clientX);
+        });
+
+        window.addEventListener('mouseup', () => { isComparing = false; });
+
+        compareContainer.addEventListener('touchstart', (e) => {
+            if (e.touches.length > 0) {
+                isComparing = true;
+                updateComparePosition(e.touches[0].clientX);
+            }
+        });
+
+        window.addEventListener('touchmove', (e) => {
+            if (isComparing && e.touches.length > 0) {
+                updateComparePosition(e.touches[0].clientX);
+            }
+        });
+
+        window.addEventListener('touchend', () => { isComparing = false; });
+
+        // Page Navigation Handlers
+        prevPageBtn.addEventListener('click', () => {
+            if (currentPreviewPage > 1 && !isPreviewLoading) {
+                fetchPreview(false, currentPreviewPage - 1);
+            }
+        });
+
+        nextPageBtn.addEventListener('click', () => {
+            if (currentPreviewPage < totalPreviewPages && !isPreviewLoading) {
+                fetchPreview(false, currentPreviewPage + 1);
+            }
+        });
+
+        // Live Preview API Fetcher
+        async function fetchPreview(isNewUpload = false, targetPage = 1) {
+            if (isPreviewLoading) return;
+            if (!selectedFile && !currentPreviewId) return;
+
+            isPreviewLoading = true;
+            previewSpinnerOverlay.classList.add('active');
+            previewSpinnerText.textContent = isNewUpload ? '⚡ 正在提取版面与排版预览...' : '⚡ 正在极速重绘与排版渲染...';
+
+            const formData = new FormData();
+            if (isNewUpload && selectedFile) {
+                formData.append('file', selectedFile);
+            } else if (currentPreviewId) {
+                formData.append('preview_id', currentPreviewId);
+            }
+            formData.append('page_num', targetPage);
+            formData.append('ink_thresh', tuningParams.ink_thresh);
+            formData.append('dilate_iter', tuningParams.dilate_iter);
+            formData.append('max_stroke_ratio', tuningParams.max_stroke_ratio);
+            formData.append('font_scale', tuningParams.font_scale);
+            formData.append('source_lang', srcLangSelect.value);
+
+            try {
+                const res = await fetch('/api/v1/preview/render', {
+                    method: 'POST',
+                    body: formData
+                });
+                const data = await res.json();
+
+                if (data.success) {
+                    currentPreviewId = data.preview_id;
+                    currentPreviewPage = data.page_num;
+                    totalPreviewPages = data.total_pages;
+
+                    previewImages = {
+                        original: data.original_img,
+                        mask: data.mask_img,
+                        result: data.result_img
+                    };
+
+                    curPageNum.textContent = currentPreviewPage;
+                    totalPageNum.textContent = totalPreviewPages;
+                    prevPageBtn.disabled = currentPreviewPage <= 1;
+                    nextPageBtn.disabled = currentPreviewPage >= totalPreviewPages;
+
+                    previewRenderTime.textContent = `⚡ 渲染: ${data.render_time_ms}ms`;
+                    previewBoxCount.textContent = `${data.blocks_count || 0} 个气泡框`;
+
+                    sidebarTranslateBtn.disabled = false;
+                    displayActivePreviewImage();
+                } else {
+                    logToConsole(`[-] 预览生成提示: ${data.error || '未知错误'}`, 'warn');
+                }
+            } catch (err) {
+                logToConsole(`[-] 预览请求异常: ${err}`, 'err');
+            } finally {
+                isPreviewLoading = false;
+                previewSpinnerOverlay.classList.remove('active');
+            }
+        }
+
+        // Trigger translation directly from sidebar
+        sidebarTranslateBtn.addEventListener('click', () => {
+            closeTuningSidebar();
+            translateBtn.click();
+        });
     </script>
+
+    <!-- Backdrop Overlay -->
+    <div class="sidebar-backdrop" id="sidebarBackdrop"></div>
+
+    <!-- Tuning Sidebar Drawer -->
+    <aside class="tuning-sidebar" id="tuningSidebar" aria-label="重绘效果实时调节面板">
+        <!-- Sidebar Header -->
+        <div class="sidebar-header">
+            <div class="sidebar-header-title">
+                <h3>⚙️ 实时重绘调优看板</h3>
+                <p>实时预览消字掩膜与排版效果，拖动滑块即可所见即所得微调</p>
+            </div>
+            <div style="display: flex; gap: 8px; align-items: center;">
+                <button class="preset-btn" id="resetParamsBtn" title="恢复为默认参数">🔄 恢复默认</button>
+                <button class="sidebar-close-btn" id="closeSidebarBtn" title="关闭面板 (Esc)">✕</button>
+            </div>
+        </div>
+
+        <!-- Sidebar Scrollable Body -->
+        <div class="sidebar-body">
+            <!-- 1. Visual Preview Section -->
+            <div class="preview-section">
+                <!-- Tab Mode Switcher -->
+                <div class="preview-tabs">
+                    <button class="preview-tab-btn active" id="tabBtnResult" data-mode="result">🌟 重绘结果</button>
+                    <button class="preview-tab-btn" id="tabBtnMask" data-mode="mask">🎭 消除掩膜</button>
+                    <button class="preview-tab-btn" id="tabBtnOriginal" data-mode="original">📄 原始画面</button>
+                    <button class="preview-tab-btn" id="tabBtnCompare" data-mode="compare">🌓 分屏对比</button>
+                </div>
+
+                <!-- Preview Display Stage -->
+                <div class="preview-stage" id="previewStage">
+                    <!-- Standard Image View -->
+                    <img id="previewMainImg" class="preview-image" src="" alt="预览效果" style="display: none;">
+
+                    <!-- Interactive Split Compare View -->
+                    <div class="compare-container" id="compareContainer">
+                        <img id="compareImgResult" class="compare-img-after" src="" alt="重绘后">
+                        <div class="compare-img-before-wrapper" id="compareBeforeWrapper">
+                            <img id="compareImgOriginal" class="compare-img-before" src="" alt="原始画面">
+                        </div>
+                        <div class="compare-handle" id="compareHandle">↔</div>
+                    </div>
+
+                    <!-- Placeholder before file selected -->
+                    <div class="preview-placeholder" id="previewPlaceholder">
+                        <div style="font-size: 2.2rem;">🖼️</div>
+                        <div><b>未载入预览画面</b></div>
+                        <div style="font-size: 0.78rem; color: #6b7280;">请在左侧上传 PDF 文件，将在此自动呈现第 1 页重绘与消除效果</div>
+                    </div>
+
+                    <!-- Glowing Loading Spinner Overlay -->
+                    <div class="preview-spinner-overlay" id="previewSpinnerOverlay">
+                        <div class="preview-spinner"></div>
+                        <div style="font-size: 0.8rem; font-weight: 600; color: #c7d2fe;" id="previewSpinnerText">⚡ 正在极速生成重绘预览...</div>
+                    </div>
+                </div>
+
+                <!-- Preview Toolbar (Page navigation + Stats) -->
+                <div class="preview-toolbar">
+                    <div class="page-navigator">
+                        <button class="page-nav-btn" id="prevPageBtn" title="上一页" disabled>◀ 上一页</button>
+                        <span class="page-indicator">第 <span id="curPageNum">1</span> / <span id="totalPageNum">1</span> 页</span>
+                        <button class="page-nav-btn" id="nextPageBtn" title="下一页" disabled>下一页 ▶</button>
+                    </div>
+
+                    <div class="preview-badges">
+                        <span class="preview-badge time" id="previewRenderTime">⚡ 耗时: --</span>
+                        <span class="preview-badge" id="previewBoxCount">0 个气泡框</span>
+                    </div>
+                </div>
+            </div>
+
+            <!-- 2. Parameter Tuning Controls -->
+            <div class="tuning-controls">
+                <!-- Slider 1: Ink Threshold -->
+                <div class="control-item">
+                    <div class="control-item-header">
+                        <span class="control-item-label">
+                            <span>🖋️ 墨水识别阈值 (Ink Threshold)</span>
+                        </span>
+                        <span class="control-val-badge" id="valInkThresh">95</span>
+                    </div>
+                    <input type="range" class="custom-range" id="sliderInkThresh" min="50" max="160" step="1" value="95">
+                    <div class="control-item-desc">
+                        提取文字笔画的亮度阈值。<b>数值越低</b>识别越严格（仅消纯黑字，保护浅色线稿与皮肤）；<b>数值越高</b>消字越彻底（清除淡灰色字迹与杂边）。
+                    </div>
+                </div>
+
+                <!-- Slider 2: Dilation Radius -->
+                <div class="control-item">
+                    <div class="control-item-header">
+                        <span class="control-item-label">
+                            <span>🔍 笔画膨胀圈数 (Dilation Radius)</span>
+                        </span>
+                        <span class="control-val-badge" id="valDilateIter">2 圈 (6px)</span>
+                    </div>
+                    <input type="range" class="custom-range" id="sliderDilateIter" min="1" max="4" step="1" value="2">
+                    <div class="control-item-desc">
+                        文字笔画外扩像素圈数。<b>增加圈数</b>能彻底消除文字周围残留的黑边毛刺与抗锯齿杂色；<b>减小圈数</b>对狭小对话框能更好保留周边气泡边框。
+                    </div>
+                </div>
+
+                <!-- Slider 3: Max Stroke Ratio -->
+                <div class="control-item">
+                    <div class="control-item-header">
+                        <span class="control-item-label">
+                            <span>🛡️ 防误伤熔断上限 (Max Stroke Area)</span>
+                        </span>
+                        <span class="control-val-badge" id="valMaxStroke">30%</span>
+                    </div>
+                    <input type="range" class="custom-range" id="sliderMaxStroke" min="15" max="50" step="1" value="30">
+                    <div class="control-item-desc">
+                        气泡内最大黑墨水面积保护熔断比例。防止 OCR 框选过大时误将背景中的人物发丝、衣物花纹、密集网点抹除。
+                    </div>
+                </div>
+
+                <!-- Slider 4: Font Scale -->
+                <div class="control-item">
+                    <div class="control-item-header">
+                        <span class="control-item-label">
+                            <span>🔤 中文字号缩放比例 (Font Scale)</span>
+                        </span>
+                        <span class="control-val-badge" id="valFontScale">1.00x</span>
+                    </div>
+                    <input type="range" class="custom-range" id="sliderFontScale" min="0.70" max="1.40" step="0.05" value="1.00">
+                    <div class="control-item-desc">
+                        译文重绘填入汉字的全局字号微调倍率。根据不同漫画排版的宽松或紧凑程度，自由放大或缩小译文字号。
+                    </div>
+                </div>
+
+                <!-- Presets selection -->
+                <div style="display: flex; flex-direction: column; gap: 8px;">
+                    <span style="font-size: 0.78rem; font-weight: 600; color: var(--text-secondary); text-transform: uppercase; letter-spacing: 0.5px;">推荐快捷预设 (Quick Presets)</span>
+                    <div class="preset-row">
+                        <button class="preset-btn" id="presetStandard">🎯 标准平衡 (95 / 2圈 / 30% / 1.0x)</button>
+                        <button class="preset-btn" id="presetFineLine">🖋️ 精细线稿保护 (75 / 1圈 / 22% / 0.95x)</button>
+                        <button class="preset-btn" id="presetHighContrast">⬛ 纯字黑白激进 (120 / 3圈 / 35% / 1.05x)</button>
+                    </div>
+                </div>
+            </div>
+        </div>
+
+        <!-- Sidebar Footer Action -->
+        <div class="sidebar-footer">
+            <button class="btn" id="sidebarTranslateBtn" style="flex: 2; padding: 12px 18px; font-size: 0.9rem;" disabled>
+                🚀 应用参数并全本翻译
+            </button>
+            <button class="btn" id="saveParamsBtn" style="flex: 1; padding: 12px 14px; font-size: 0.85rem; background: rgba(99, 102, 241, 0.15); border: 1px solid rgba(99, 102, 241, 0.3); color: #c7d2fe;">
+                ✓ 保存并关闭
+            </button>
+        </div>
+    </aside>
 </body>
 
 </html>

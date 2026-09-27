@@ -44,7 +44,9 @@ def _save_text_cache(cache_base_dir: str, cache: dict):
     except Exception as e:
         print(f"[Pipeline] ⚠️  写入翻译缓存失败: {e}")
 
-async def _run_pipeline_async(pdf_path, page_range_str, source_lang, target_lang, task_id, progress_callback):
+async def _run_pipeline_async(pdf_path, page_range_str, source_lang, target_lang, task_id, progress_callback,
+                              ink_thresh: int = 95, dilate_iter: int = 2,
+                              max_stroke_ratio: float = 0.30, font_scale: float = 1.0):
     def _safe_callback(percent: int, message: str, status: str):
         """
         Safe wrapper for the C# progress_callback delegate.
@@ -65,7 +67,14 @@ async def _run_pipeline_async(pdf_path, page_range_str, source_lang, target_lang
         translation_engine = HighPerformanceTranslationEngine()
         
         output_pdf_path = pdf_path.replace('.pdf', '_translated.pdf')
-        renderer = PDFLayoutRenderer(pdf_path, output_pdf_path)
+        renderer = PDFLayoutRenderer(
+            pdf_path,
+            output_pdf_path,
+            ink_thresh=ink_thresh,
+            dilate_iter=dilate_iter,
+            max_stroke_ratio=max_stroke_ratio,
+            font_scale=font_scale
+        )
         
         # 2. Parse page range
         doc = fitz.open(pdf_path)
@@ -354,8 +363,12 @@ async def _run_pipeline_async(pdf_path, page_range_str, source_lang, target_lang
         except Exception:
             pass
 
-def run_pipeline(pdf_path, page_range_str, source_lang, target_lang, task_id, progress_callback):
+def run_pipeline(pdf_path, page_range_str, source_lang, target_lang, task_id, progress_callback,
+                 ink_thresh: int = 95, dilate_iter: int = 2,
+                 max_stroke_ratio: float = 0.30, font_scale: float = 1.0):
     """
     Synchronous entrypoint called from C# to run the async pipeline.
     """
-    asyncio.run(_run_pipeline_async(pdf_path, page_range_str, source_lang, target_lang, task_id, progress_callback))
+    asyncio.run(_run_pipeline_async(pdf_path, page_range_str, source_lang, target_lang, task_id, progress_callback,
+                                   ink_thresh=ink_thresh, dilate_iter=dilate_iter,
+                                   max_stroke_ratio=max_stroke_ratio, font_scale=font_scale))

@@ -106,7 +106,7 @@ def _get_font(fs: int):
     except Exception:
         return ImageFont.load_default()
 
-def _best_font(text: str, box_w: int, box_h: int):
+def _best_font(text: str, box_w: int, box_h: int, font_scale: float = 1.0):
     # Calculate usable area with 15% padding to prevent text from touching the borders
     pad_w = int(box_w * 0.15)
     pad_h = int(box_h * 0.15)
@@ -160,6 +160,12 @@ def _best_font(text: str, box_w: int, box_h: int):
         else:
             high = mid - 1 # shrink font
             
+    if abs(font_scale - 1.0) > 0.01:
+        scaled_fs = max(8, min(120, int(best_fs * font_scale)))
+        scaled_font = _get_font(scaled_fs)
+        scaled_lines = _wrap_cjk(text, scaled_font, usable_w)
+        return scaled_font, scaled_lines, scaled_fs
+
     return best_font, best_lines, best_fs
 
 
@@ -184,10 +190,14 @@ def _fast_telea_inpaint(img_pil: Image.Image, mask_pil: Image.Image) -> Image.Im
     return Image.fromarray(inpainted_rgb)
 
 
-def _create_stroke_mask(crop_rgb: np.ndarray) -> tuple:
+def _create_stroke_mask(crop_rgb: np.ndarray, ink_thresh: int = 95, dilate_iter: int = 2, max_stroke_ratio: float = 0.30) -> tuple:
     """
     Extracts precise text stroke contours (glyph pixels) instead of a blunt rectangle.
     Suppresses manga halftone/screentone noise and completely eliminates ghost character edges.
+    Parameters allow real-time tuning from the sidebar:
+      - ink_thresh: strictly filters glyph ink (default 95, range 50-160)
+      - dilate_iter: stroke dilation radius (default 2, range 1-4)
+      - max_stroke_ratio: protection ratio to avoid removing artwork/hair (default 0.30, range 0.15-0.50)
     Returns: (mask_np, bg_val)
     """
     h, w = crop_rgb.shape[:2]
@@ -205,13 +215,13 @@ def _create_stroke_mask(crop_rgb: np.ndarray) -> tuple:
     
     if bg_val >= 160:
         # Light background (speech bubble or bright scene)
-        # Real text ink is distinctly darker than background; clamp to 95 to prevent grabbing skin/clothing/lace
-        thresh_val = min(bg_val - 45, 95)
+        # Real text ink is distinctly darker than background; clamp to ink_thresh to prevent grabbing skin/clothing/lace
+        thresh_val = min(bg_val - 45, float(ink_thresh))
         mask = (blurred < thresh_val).astype(np.uint8) * 255
     elif bg_val <= 90:
         # Dark background (night scene, black bubble, dark panel)
         # Real text ink is distinctly lighter than background
-        thresh_val = max(bg_val + 45, 160)
+        thresh_val = max(bg_val + 45, float(255 - ink_thresh))
         mask = (blurred > thresh_val).astype(np.uint8) * 255
     else:
         # Midtone background (shading, textured drawing)
@@ -223,16 +233,16 @@ def _create_stroke_mask(crop_rgb: np.ndarray) -> tuple:
     clean_kernel = cv2.getStructuringElement(cv2.MORPH_RECT, (2, 2))
     cleaned_mask = cv2.morphologyEx(mask, cv2.MORPH_OPEN, clean_kernel)
     
-    # 4. Dilate text strokes with 2 iterations (3x3 ellipse) to safely cover anti-aliased character edges
+    # 4. Dilate text strokes with dilate_iter iterations (3x3 ellipse) to safely cover anti-aliased character edges
     dilate_kernel = cv2.getStructuringElement(cv2.MORPH_ELLIPSE, (3, 3))
-    dilated = cv2.dilate(cleaned_mask, dilate_kernel, iterations=2)
+    dilated = cv2.dilate(cleaned_mask, dilate_kernel, iterations=max(1, int(dilate_iter)))
     
     stroke_ratio = np.count_nonzero(dilated) / float(h * w)
     
     # Protection against grabbing artwork/lace/hair:
-    # Text in bubbles rarely exceeds 25-30% of box area.
-    # If stroke_ratio > 0.30, strictly clamp to deep black ink (< 60)
-    if stroke_ratio > 0.30:
+    # Text in bubbles rarely exceeds max_stroke_ratio of box area.
+    # If stroke_ratio > max_stroke_ratio, strictly clamp to deep black ink (< 60)
+    if stroke_ratio > float(max_stroke_ratio):
         strict_mask = (blurred < 60).astype(np.uint8) * 255
         strict_cleaned = cv2.morphologyEx(strict_mask, cv2.MORPH_OPEN, clean_kernel)
         dilated = cv2.dilate(strict_cleaned, dilate_kernel, iterations=1)
@@ -246,9 +256,15 @@ def _create_stroke_mask(crop_rgb: np.ndarray) -> tuple:
 
 # ── Main Renderer Class ────────────────────────────────────────────────────────
 class PDFLayoutRenderer:
-    def __init__(self, original_pdf_path, output_pdf_path=None):
+    def __init__(self, original_pdf_path=None, output_pdf_path=None,
+                 ink_thresh: int = 95, dilate_iter: int = 2,
+                 max_stroke_ratio: float = 0.30, font_scale: float = 1.0):
         self.original_pdf_path = original_pdf_path
-        self.output_pdf_path = output_pdf_path or original_pdf_path.replace(".pdf", "_translated.pdf")
+        self.output_pdf_path = output_pdf_path or (original_pdf_path.replace(".pdf", "_translated.pdf") if original_pdf_path else None)
+        self.ink_thresh = int(ink_thresh)
+        self.dilate_iter = int(dilate_iter)
+        self.max_stroke_ratio = float(max_stroke_ratio)
+        self.font_scale = float(font_scale)
 
     async def render_single_page_to_temp(self, page_data, src_page, translated_text_map, temp_dir, sem):
         """
@@ -286,7 +302,12 @@ class PDFLayoutRenderer:
                 continue
 
             crop_rgb = img_np[py0:py1, px0:px1]
-            stroke_mask, bg_val = _create_stroke_mask(crop_rgb)
+            stroke_mask, bg_val = _create_stroke_mask(
+                crop_rgb,
+                ink_thresh=self.ink_thresh,
+                dilate_iter=self.dilate_iter,
+                max_stroke_ratio=self.max_stroke_ratio
+            )
 
             # Always route stroke masks to OpenCV Telea diffusion.
             # Never overwrite with flat solid fill_color (which caused white blocking on characters/clothes).
@@ -330,7 +351,7 @@ class PDFLayoutRenderer:
                     bg = _sample_bg(healed, px0, py0, px1, py1)
                     fg = _contrast_color(bg)
 
-                font, lines, fs = _best_font(translated, bw, bh)
+                font, lines, fs = _best_font(translated, bw, bh, font_scale=self.font_scale)
                 lh = fs * 1.25
                 total_h = len(lines) * lh
                 curr_y = py0 + (bh - total_h) / 2
@@ -364,6 +385,137 @@ class PDFLayoutRenderer:
             
         return temp_path
 
+    def render_preview_images(self, page_data, src_page, translated_text_map):
+        """
+        Renders preview images for interactive sidebar tuning:
+        Returns base64 data URLs for:
+        - original: high-res original page
+        - mask: translucent magenta mask overlay on original page
+        - result: inpainted and translated CJK text overlay
+        """
+        import io
+        import base64
+
+        TARGET_HEIGHT = 1600.0
+        SCALE = min(2.0, TARGET_HEIGHT / max(1.0, float(src_page.rect.height)))
+
+        # 1. Render page to image
+        mat = fitz.Matrix(SCALE, SCALE)
+        pix = src_page.get_pixmap(matrix=mat, alpha=False)
+        orig_img = Image.frombytes("RGB", [pix.width, pix.height], pix.samples)
+        img_np = np.array(orig_img)
+
+        # 2. Build precision mask
+        mask_np = np.zeros((orig_img.height, orig_img.width), dtype=np.uint8)
+        blocks_to_render = []
+        page_num = page_data.get("page_num", 1)
+
+        for block in page_data.get("blocks", []):
+            block_id = block["id"]
+            translated = translated_text_map.get((page_num, block_id), "").strip()
+            # If no translation in map yet, use block's translated text or original text as preview placeholder
+            if not translated:
+                translated = block.get("translated_text", "").strip() or block.get("text", "").strip()
+            if not translated:
+                continue
+
+            bx0, by0, bx1, by1 = block["bbox"]
+            px0 = max(0, min(orig_img.width - 1, int(bx0 * SCALE)))
+            py0 = max(0, min(orig_img.height - 1, int(by0 * SCALE)))
+            px1 = max(0, min(orig_img.width, int(bx1 * SCALE)))
+            py1 = max(0, min(orig_img.height, int(by1 * SCALE)))
+
+            if px1 <= px0 or py1 <= py0:
+                continue
+
+            crop_rgb = img_np[py0:py1, px0:px1]
+            stroke_mask, bg_val = _create_stroke_mask(
+                crop_rgb,
+                ink_thresh=self.ink_thresh,
+                dilate_iter=self.dilate_iter,
+                max_stroke_ratio=self.max_stroke_ratio
+            )
+            mask_np[py0:py1, px0:px1] = np.maximum(mask_np[py0:py1, px0:px1], stroke_mask)
+            blocks_to_render.append((px0, py0, px1, py1, translated, block))
+
+        # 3. Create Mask Overlay visualization (Hot magenta / crimson highlight on original image)
+        mask_vis = img_np.copy()
+        mask_bool = mask_np > 0
+        if np.any(mask_bool):
+            # Blend original with translucent vivid crimson (RGB 255, 30, 90)
+            overlay_color = np.array([255, 30, 90], dtype=np.float32)
+            mask_vis[mask_bool] = (0.35 * mask_vis[mask_bool].astype(np.float32) + 0.65 * overlay_color).astype(np.uint8)
+        mask_img = Image.fromarray(mask_vis)
+
+        # 4. Inpaint with OpenCV Telea
+        if np.any(mask_bool):
+            healed = _fast_telea_inpaint(orig_img, Image.fromarray(mask_np))
+        else:
+            healed = Image.fromarray(img_np)
+
+        # 5. Draw CJK text
+        draw = ImageDraw.Draw(healed)
+        for (px0, py0, px1, py1, translated, block) in blocks_to_render:
+            bw = max(px1 - px0, 1)
+            bh = max(py1 - py0, 1)
+
+            orig_color = block.get("color", None)
+            if orig_color and isinstance(orig_color, (list, tuple)) and len(orig_color) == 3:
+                r = int(orig_color[0] * 255)
+                g = int(orig_color[1] * 255)
+                b_ch = int(orig_color[2] * 255)
+                lum = 0.299 * r + 0.587 * g + 0.114 * b_ch
+                if lum > 230:
+                    bg = _sample_bg(healed, px0, py0, px1, py1)
+                    fg = _contrast_color(bg)
+                else:
+                    fg = (r, g, b_ch)
+            else:
+                bg = _sample_bg(healed, px0, py0, px1, py1)
+                fg = _contrast_color(bg)
+
+            font, lines, fs = _best_font(translated, bw, bh, font_scale=self.font_scale)
+            lh = fs * 1.25
+            total_h = len(lines) * lh
+            curr_y = py0 + (bh - total_h) / 2
+
+            for line in lines:
+                try:
+                    lw = font.getbbox(line)[2] - font.getbbox(line)[0]
+                except Exception:
+                    lw = len(line) * fs * 0.9
+                curr_x = px0 + (bw - lw) / 2
+
+                if isinstance(fg, tuple) and len(fg) == 3:
+                    fg_lum = 0.299 * fg[0] + 0.587 * fg[1] + 0.114 * fg[2]
+                else:
+                    fg_lum = 255 if fg == "white" else 0
+
+                st_fill = "black" if fg_lum > 127 else "white"
+                st_width = max(1, int(fs / 16))
+
+                draw.text(
+                    (curr_x, curr_y),
+                    line,
+                    fill=fg,
+                    font=font,
+                    stroke_width=st_width,
+                    stroke_fill=st_fill
+                )
+                curr_y += lh
+
+        def img_to_b64(pil_im, quality=80):
+            buf = io.BytesIO()
+            pil_im.save(buf, format="JPEG", quality=quality, optimize=True)
+            return "data:image/jpeg;base64," + base64.b64encode(buf.getvalue()).decode("ascii")
+
+        return {
+            "original": img_to_b64(orig_img, 75),
+            "mask": img_to_b64(mask_img, 80),
+            "result": img_to_b64(healed, 85),
+            "blocks_count": len(blocks_to_render)
+        }
+
     async def render_translated_pdf(self, layout_data, translated_text_map, progress_callback=None):
         """
         Renders PDF pages concurrently to a temp folder and assembles them in order.
@@ -371,9 +523,6 @@ class PDFLayoutRenderer:
         import asyncio
         import tempfile
         import shutil
-
-        # Warm up the LaMa model natively
-        await _get_lama()
 
         src_doc = fitz.open(self.original_pdf_path)
         total_pages = len(layout_data)

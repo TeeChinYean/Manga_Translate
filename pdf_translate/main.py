@@ -61,6 +61,8 @@ except ImportError:
 from fastapi import FastAPI, UploadFile, File, Form, HTTPException
 from fastapi.responses import HTMLResponse, StreamingResponse, FileResponse
 
+import fitz
+
 # Import core pipeline components
 from core.extractor import PDFLayoutExtractor
 from core.engine import HighPerformanceTranslationEngine
@@ -286,7 +288,19 @@ async def translation_worker():
             # Create a temp dir for rendered page JPEGs
             temp_dir = tempfile.mkdtemp(prefix="pdf_render_")
             
-            renderer = PDFLayoutRenderer(pdf_path, None)
+            ink_thresh = int(task_metadata.get("ink_thresh", 95))
+            dilate_iter = int(task_metadata.get("dilate_iter", 2))
+            max_stroke_ratio = float(task_metadata.get("max_stroke_ratio", 0.30))
+            font_scale = float(task_metadata.get("font_scale", 1.0))
+
+            renderer = PDFLayoutRenderer(
+                pdf_path,
+                None,
+                ink_thresh=ink_thresh,
+                dilate_iter=dilate_iter,
+                max_stroke_ratio=max_stroke_ratio,
+                font_scale=font_scale
+            )
             
             # Semaphore to restrict GPU inpainting to 1 concurrent task to guarantee 4GB VRAM safety
             render_sem = asyncio.Semaphore(1)
@@ -602,16 +616,183 @@ async def serve_index_dashboard():
     else:
         raise HTTPException(status_code=404, detail="Index templates not found.")
 
+# Session memory database for interactive tuning preview
+preview_sessions = {}
+preview_lock = asyncio.Lock()
+
+@app.post("/api/v1/preview/render")
+async def preview_render_page(
+    file: UploadFile = File(None),
+    preview_id: str = Form(None),
+    page_num: int = Form(1),
+    ink_thresh: int = Form(95),
+    dilate_iter: int = Form(2),
+    max_stroke_ratio: float = Form(0.30),
+    font_scale: float = Form(1.0),
+    source_lang: str = Form("Japanese")
+):
+    """
+    Lightning-fast interactive preview rendering endpoint for tuning sidebar:
+    1. First call with file: uploads PDF, creates preview_id, extracts requested page layout & text.
+    2. Subsequent calls with preview_id: uses cached layout and text, only re-runs inpainting & typography in ~25ms!
+    Returns original, mask overlay (highlighting ink in magenta), and rendered result base64 images.
+    """
+    global translation_engine
+    import time
+    t0 = time.time()
+    
+    try:
+        async with preview_lock:
+            if file is not None and file.filename:
+                if not file.filename.endswith(".pdf"):
+                    return {"success": False, "error": "Only PDF files are supported for preview."}
+                preview_id = uuid.uuid4().hex[:10]
+                temp_preview_path = os.path.join(UPLOAD_DIR, f"preview_{preview_id}_{file.filename}")
+                try:
+                    content = await file.read()
+                    with open(temp_preview_path, "wb") as f:
+                        f.write(content)
+                except Exception as ex:
+                    return {"success": False, "error": f"Failed to save preview upload: {ex}"}
+                
+                try:
+                    doc = fitz.open(temp_preview_path)
+                    total_pages = len(doc)
+                    doc.close()
+                except Exception as ex:
+                    return {"success": False, "error": f"Invalid PDF file: {ex}"}
+
+                # Bound cache size to prevent memory/disk bloat
+                if len(preview_sessions) >= 8:
+                    oldest_id = min(preview_sessions.keys(), key=lambda k: preview_sessions[k].get("last_accessed", 0))
+                    old_info = preview_sessions.pop(oldest_id, None)
+                    if old_info and os.path.exists(old_info.get("pdf_path", "")):
+                        try:
+                            os.remove(old_info["pdf_path"])
+                        except Exception:
+                            pass
+
+                preview_sessions[preview_id] = {
+                    "pdf_path": temp_preview_path,
+                    "total_pages": total_pages,
+                    "pages": {},
+                    "translated_text_map": {},
+                    "last_accessed": time.time()
+                }
+            elif preview_id:
+                if preview_id not in preview_sessions:
+                    return {"success": False, "error": "Preview session expired or not found. Please re-select the file."}
+                preview_sessions[preview_id]["last_accessed"] = time.time()
+            else:
+                return {"success": False, "error": "Either file or preview_id must be provided."}
+
+        sess = preview_sessions[preview_id]
+        pdf_path = sess["pdf_path"]
+        total_pages = sess["total_pages"]
+        page_num = max(1, min(int(page_num), total_pages))
+
+        # 1. Ensure page layout is extracted (cached per session)
+        if page_num not in sess["pages"]:
+            extractor = PDFLayoutExtractor(pdf_path)
+            page_data = await asyncio.to_thread(extractor._extract_single_page, pdf_path, page_num, source_lang)
+            sess["pages"][page_num] = page_data
+        else:
+            page_data = sess["pages"][page_num]
+
+        # 2. Ensure text blocks are translated (cached per session)
+        if translation_engine is None:
+            translation_engine = HighPerformanceTranslationEngine()
+
+        untranslated_blocks = []
+        for b in page_data.get("blocks", []):
+            b_key = (page_num, b["id"])
+            if b_key not in sess["translated_text_map"]:
+                raw_text = b.get("text", "").strip()
+                if raw_text:
+                    untranslated_blocks.append(b)
+                else:
+                    sess["translated_text_map"][b_key] = ""
+
+        if untranslated_blocks:
+            try:
+                await asyncio.to_thread(translation_engine.translate_batch, untranslated_blocks, source_lang=source_lang)
+                for b in untranslated_blocks:
+                    sess["translated_text_map"][(page_num, b["id"])] = b.get("translated_text", "")
+            except Exception as trans_ex:
+                logger.warning(f"Preview translation fallback: {trans_ex}")
+                for b in untranslated_blocks:
+                    sess["translated_text_map"][(page_num, b["id"])] = b.get("text", "")
+
+        # 3. Render preview images using tuned parameters
+        doc = fitz.open(pdf_path)
+        src_page = doc[page_num - 1]
+
+        renderer = PDFLayoutRenderer(
+            original_pdf_path=pdf_path,
+            ink_thresh=ink_thresh,
+            dilate_iter=dilate_iter,
+            max_stroke_ratio=max_stroke_ratio,
+            font_scale=font_scale
+        )
+
+        t_render = time.time()
+        preview_output = await asyncio.to_thread(
+            renderer.render_preview_images,
+            page_data,
+            src_page,
+            sess["translated_text_map"]
+        )
+        doc.close()
+        render_time_ms = int((time.time() - t_render) * 1000)
+        total_time_ms = int((time.time() - t0) * 1000)
+
+        detected_blocks = []
+        for b in page_data.get("blocks", []):
+            b_id = b["id"]
+            detected_blocks.append({
+                "id": b_id,
+                "text": b.get("text", ""),
+                "translated": sess["translated_text_map"].get((page_num, b_id), ""),
+                "bbox": b.get("bbox", [])
+            })
+
+        return {
+            "success": True,
+            "preview_id": preview_id,
+            "page_num": page_num,
+            "total_pages": total_pages,
+            "original_img": preview_output["original"],
+            "mask_img": preview_output["mask"],
+            "result_img": preview_output["result"],
+            "blocks_count": preview_output["blocks_count"],
+            "blocks": detected_blocks,
+            "render_time_ms": render_time_ms,
+            "total_time_ms": total_time_ms,
+            "params": {
+                "ink_thresh": ink_thresh,
+                "dilate_iter": dilate_iter,
+                "max_stroke_ratio": max_stroke_ratio,
+                "font_scale": font_scale
+            }
+        }
+    except Exception as e:
+        logger.error(f"Failed to generate preview: {e}", exc_info=True)
+        return {"success": False, "error": str(e)}
+
 @app.post("/api/v1/translate/upload")
 async def upload_pdf_file(
     file: UploadFile = File(...),
     source_lang: str = Form(...),
     target_lang: str = Form("Simplified Chinese"),
     page_range: str = Form(""),
-    force_retranslate: bool = Form(True)
+    force_retranslate: bool = Form(True),
+    ink_thresh: int = Form(95),
+    dilate_iter: int = Form(2),
+    max_stroke_ratio: float = Form(0.30),
+    font_scale: float = Form(1.0)
 ):
     """
-    Uploads the raw PDF file, assigns uuid, and queues the task.
+    Uploads the raw PDF file, assigns uuid, applies custom tuning parameters, and queues the task.
     """
     if not file.filename.endswith(".pdf"):
         return {"error": "Invalid format. Only PDF files are supported."}
@@ -634,7 +815,11 @@ async def upload_pdf_file(
         "target_lang": target_lang,
         "filename": file.filename,
         "page_range": page_range,
-        "force_retranslate": force_retranslate
+        "force_retranslate": force_retranslate,
+        "ink_thresh": ink_thresh,
+        "dilate_iter": dilate_iter,
+        "max_stroke_ratio": max_stroke_ratio,
+        "font_scale": font_scale
     }
     
     status_db[task_id] = {
