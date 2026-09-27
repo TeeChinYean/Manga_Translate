@@ -32,6 +32,8 @@ import multiprocessing
 import hashlib
 import zipfile
 import shutil
+import tempfile
+import fitz
 
 # Dynamic CPU core detection and multi-threading optimization
 num_cores = multiprocessing.cpu_count()
@@ -285,11 +287,6 @@ async def translation_worker():
                 "tokens_generated": 0
             }
             
-            import tempfile
-            import shutil
-            import fitz
-            import zipfile
-            
             # Create a temp dir for rendered page JPEGs
             temp_dir = tempfile.mkdtemp(prefix="pdf_render_")
             
@@ -316,6 +313,7 @@ async def translation_worker():
             extracted_count = 0
             translated_count = 0
             rendered_count = 0
+            pipeline_error = None
             progress_lock = asyncio.Lock()
             
             def update_progress():
@@ -346,6 +344,7 @@ async def translation_worker():
             translation_queue_internal = asyncio.Queue(maxsize=3)
 
             async def extractor_producer():
+                nonlocal extracted_count, pipeline_error
                 try:
                     async for chunk_page in extractor.extract_layout_stream(page_range_list=selected_pages, source_lang=source_lang):
                         if task_id in cancelled_tasks:
@@ -357,11 +356,12 @@ async def translation_worker():
                         await extraction_queue.put(chunk_page)
                 except Exception as ex:
                     logger.error(f"[Pipeline Extractor] Error: {ex}", exc_info=True)
+                    pipeline_error = ex
                 finally:
                     await extraction_queue.put(None)
 
             async def translator_worker():
-                nonlocal batch_count
+                nonlocal batch_count, translated_count, rendered_count, pipeline_error
                 try:
                     while True:
                         if task_id in cancelled_tasks:
@@ -438,11 +438,12 @@ async def translation_worker():
                         await translation_queue_internal.put(page)
                 except Exception as ex:
                     logger.error(f"[Pipeline Translator] Error: {ex}", exc_info=True)
+                    pipeline_error = ex
                 finally:
                     await translation_queue_internal.put(None)
 
             async def renderer_worker():
-                nonlocal rendered_count
+                nonlocal rendered_count, pipeline_error
                 try:
                     while True:
                         if task_id in cancelled_tasks:
@@ -477,6 +478,7 @@ async def translation_worker():
                             update_progress()
                 except Exception as ex:
                     logger.error(f"[Pipeline Renderer] Error: {ex}", exc_info=True)
+                    pipeline_error = ex
 
             # Execute Extractor, Translator, and Renderer concurrently
             await asyncio.gather(
@@ -484,6 +486,12 @@ async def translation_worker():
                 translator_worker(),
                 renderer_worker()
             )
+
+            if pipeline_error is not None:
+                raise Exception(f"流水线处理异常: {pipeline_error}")
+
+            if not layout_data:
+                raise Exception("未能成功提取到任何页面数据，请检查 PDF 文件完整性或页面范围设置。")
 
             # Retain original sequential reading order for DOC and JSON generation
             layout_data.sort(key=lambda x: x["page_num"])
