@@ -106,6 +106,9 @@ def ensure_turbovec_llm_ready(auto_launch: bool = True, max_wait_seconds: int = 
         subprocess.Popen(
             cmd,
             cwd=rag_dir,
+            stdin=subprocess.DEVNULL,
+            stdout=subprocess.DEVNULL,
+            stderr=subprocess.DEVNULL,
             creationflags=DETACHED_PROCESS | CREATE_NEW_PROCESS_GROUP,
             close_fds=True
         )
@@ -168,8 +171,11 @@ def _call_turbovec_llm(payload: dict, timeout: float = 15.0):
                 last_err = e
                 continue
                 
-        # If connection refused and attempt 1, try auto-launching or waiting
-        if attempt < 3:
+        # If connection refused on attempt 1, auto-heal and boot the LLM server
+        if attempt == 1 and last_err and "10061" in str(last_err):
+            logger.info("⚡ [Turbovec LLM] Target machine refused connection. Attempting auto-boot...")
+            ensure_turbovec_llm_ready(auto_launch=True, max_wait_seconds=20)
+        elif attempt < 3:
             time.sleep(1.0)
             continue
             
@@ -633,6 +639,7 @@ class HighPerformanceTranslationEngine:
                     qwen_needed.append(i)
 
             if qwen_needed:
+                ensure_turbovec_llm_ready(auto_launch=True, max_wait_seconds=20)
                 logger.info(f"[Qwen Japanese Translation] Translating {len(qwen_needed)} blocks in context batch...")
                 chunk_size = 12
                 for c_start in range(0, len(qwen_needed), chunk_size):
@@ -703,13 +710,14 @@ class HighPerformanceTranslationEngine:
                             logger.warning(f"[Qwen Batch Translation] Attempt {attempt} failed: {ex}")
                             time.sleep(0.5)
                             
-                    # Single-sentence LLM fallback only if LLM is online and responsive
-                    if batch_llm_success:
-                        for idx in chunk_indices:
-                            if not results[idx]:
-                                raw_text = blocks[idx].get("cleaned_text", "").strip()
-                                if not raw_text:
-                                    continue
+                    # Fallback for any untranslated blocks in this batch
+                    for idx in chunk_indices:
+                        if not results[idx]:
+                            raw_text = blocks[idx].get("cleaned_text", "").strip()
+                            if not raw_text:
+                                continue
+                            # 1. Single-sentence LLM fallback if LLM batch succeeded
+                            if batch_llm_success:
                                 single_prompt = f"原文：{raw_text}\n请直接给出最完美的本地化中文译文："
                                 single_payload = {
                                     "model": TURBOVEC_MODEL,
@@ -730,10 +738,8 @@ class HighPerformanceTranslationEngine:
                                 except Exception as sex:
                                     logger.warning(f"[Qwen Single Fallback Failed] '{raw_text[:30]}': {sex}")
 
-                    # Ultimate safety fallback: Google Translate API (guarantees NO text is ever left untranslated)
-                        if not results[idx]:
-                            raw_text = blocks[idx].get("cleaned_text", "").strip()
-                            if raw_text:
+                            # 2. Safety fallback: Google Translate API (guarantees text is translated even if LLM is down)
+                            if not results[idx]:
                                 try:
                                     g_res = _google_translate_one(raw_text, src="ja", tgt="zh-CN")
                                     if g_res and any('\u4e00' <= c <= '\u9fff' for c in g_res):
@@ -742,6 +748,11 @@ class HighPerformanceTranslationEngine:
                                         logger.info(f"[Google Fallback OK] ID {idx} → '{results[idx]}'")
                                 except Exception as g_err:
                                     logger.warning(f"[Google Fallback Failed] ID {idx}: {g_err}")
+
+                            # 3. Defensive fallback: if all translation fails, keep raw_text so renderer never silently drops the bubble
+                            if not results[idx] and raw_text:
+                                results[idx] = raw_text
+                                blocks[idx]["translation_engine"] = "Original Text (Preserved)"
 
             # Note: For Japanese, Qwen directly outputs localized, context-aware manga dialogues with glossary adherence.
             # Skipping the redundant 2nd polishing pass saves 5-15s per page and prevents dropping lines.

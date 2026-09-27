@@ -45,3 +45,6 @@ $RECYCLE.BIN/
 # Test sample PDFs
 test_ori_clip.pdf
 test_manga_sample.pdf
+
+# Scratch development scripts
+scratch/

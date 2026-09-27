@@ -208,6 +208,10 @@ async def translation_worker():
         try:
             logger.info(f"🚀 Processing Task {task_id} inside background loop...")
             
+            if source_lang == "Japanese":
+                from core.engine import ensure_turbovec_llm_ready
+                await asyncio.to_thread(ensure_turbovec_llm_ready, True, 20)
+            
             # Treat STATIC_DIR as cache: keep only the latest run's files
             try:
                 for f in os.listdir(STATIC_DIR):
@@ -460,7 +464,12 @@ async def translation_worker():
                         )
                         
                         if dest_path and os.path.exists(dest_path):
-                            await asyncio.to_thread(shutil.copy, dest_path, cache_path)
+                            page_blocks = page.get("blocks", [])
+                            has_translated = (not page_blocks) or any(
+                                translated_text_map.get((p_num, b["id"]), "").strip() for b in page_blocks
+                            )
+                            if has_translated:
+                                await asyncio.to_thread(shutil.copy, dest_path, cache_path)
                             temp_paths[p_num] = dest_path
                             
                         async with progress_lock:
