@@ -24,3 +24,4 @@ rapidocr-onnxruntime>=1.2.0
 
 # Note: For GPU support on Windows, manually install PyTorch first:
 # pip install torch torchvision --index-url https://download.pytorch.org/whl/cu118
+psutil

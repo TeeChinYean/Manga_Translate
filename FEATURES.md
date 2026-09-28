@@ -122,3 +122,10 @@
 - 实现要点：用满全部逻辑核；环境变量 LAMA_PARALLEL / LAMA_THREADS 仍可覆盖；serial 模式重绘页并发跟随 LAMA_PARALLEL。
 - 相关测试：tests/test_lama_layout.py
 - 状态：Done
+
+### [Extract] OCR 模型按需常驻（OCR_UNLOAD）
+- 说明：提取结束只释放占 VRAM 的模型；CPU 模型在可用 RAM ≥ 3000MB 时常驻，下一次任务省掉约 23s 冷加载。
+- 涉及文件/模块：core/extractor.py `_models_to_unload` / `unload_models`；main.py 日志；requirements.txt 增加 psutil
+- 实现要点：OCR_UNLOAD=auto（默认）/always（旧行为）/never；OCR_KEEP_MIN_FREE_MB 调阈值；无 psutil 时退回全部释放。
+- 相关测试：tests/test_ocr_unload.py
+- 状态：Done

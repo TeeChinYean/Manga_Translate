@@ -550,9 +550,10 @@ async def translation_worker():
 
             async def unload_ocr_models():
                 from core.extractor import unload_models as unload_ocr
-                await asyncio.to_thread(unload_ocr)
+                released = await asyncio.to_thread(unload_ocr)
                 _mark("ocr_unloaded")
-                logger.info("[Pipeline] OCR models unloaded (RAM/VRAM freed for translation + rendering).")
+                logger.info(f"[Pipeline] OCR models released: {sorted(released or [])} "
+                            "(GPU ones always; CPU ones only when RAM is low, see OCR_UNLOAD).")
 
             def _check_cancel():
                 if task_id in cancelled_tasks:

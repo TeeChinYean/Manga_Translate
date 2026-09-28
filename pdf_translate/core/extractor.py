@@ -489,38 +489,70 @@ def _get_manga_ocr():
                     _MANGA_OCR_INSTANCE.model = _MANGA_OCR_INSTANCE.model.to(device)
     return _MANGA_OCR_INSTANCE
 
-def unload_models():
-    """Completely unloads and releases PyTorch & ONNX OCR models to free memory for downstream stages."""
+# ── OCR unload policy ─────────────────────────────────────────────────────────
+# Measured: reloading the OCR models costs ~23s per job (cold load, 10-page bench), while
+# an idle CPU-resident model uses no CPU, only RAM. So by default ("auto") only models that
+# hold VRAM are released (the LLM/renderer need it); CPU models stay loaded while the
+# machine has enough free RAM. OCR_UNLOAD=always restores the old full unload.
+OCR_UNLOAD = os.getenv("OCR_UNLOAD", "auto").strip().lower()
+OCR_KEEP_MIN_FREE_MB = int(os.getenv("OCR_KEEP_MIN_FREE_MB", "3000"))
+_UNLOADABLE = ("easyocr", "manga_ocr", "comic_detector", "paddle_ocr")
+
+
+def _free_ram_mb():
+    try:
+        import psutil
+        return psutil.virtual_memory().available / (1024 * 1024)
+    except Exception:
+        return None
+
+
+def _models_to_unload(policy: str, placement: dict, free_ram_mb, min_free_mb: int) -> set:
+    """Names from _UNLOADABLE to release. Unknown free RAM -> behave like 'always'."""
+    if policy == "never":
+        return set()
+    if policy != "auto" or free_ram_mb is None or free_ram_mb < min_free_mb:
+        return set(_UNLOADABLE)
+    return {m for m in _UNLOADABLE if placement.get(m) == "gpu"}
+
+
+def unload_models(force: bool = False):
+    """Release OCR models to free memory for downstream stages (see OCR_UNLOAD policy).
+
+    Returns the set of model names that were released."""
     global _OCR_READER_JA, _OCR_READER_EN, _MANGA_OCR_INSTANCE, _COMIC_DETECTOR_SESSION, _PADDLE_OCR_INSTANCE
-    import torch
     import gc
-    
-    with _OCR_LOCK:
-        if _OCR_READER_JA is not None:
-            del _OCR_READER_JA
+
+    free_mb = _free_ram_mb()
+    which = set(_UNLOADABLE) if force else _models_to_unload(OCR_UNLOAD, _PLACEMENT, free_mb, OCR_KEEP_MIN_FREE_MB)
+    kept = [m for m in _UNLOADABLE if m not in which]
+    if kept:
+        logger.info(f"[OCR] Keeping {kept} resident (policy={OCR_UNLOAD}, free RAM={free_mb and int(free_mb)}MB): "
+                    f"next job skips the cold load.")
+
+    if "easyocr" in which:
+        with _OCR_LOCK:
             _OCR_READER_JA = None
-        if _OCR_READER_EN is not None:
-            del _OCR_READER_EN
             _OCR_READER_EN = None
-                
-    with _MANGA_OCR_LOCK:
-        if _MANGA_OCR_INSTANCE is not None:
-            del _MANGA_OCR_INSTANCE
+    if "manga_ocr" in which:
+        with _MANGA_OCR_LOCK:
             _MANGA_OCR_INSTANCE = None
-
-    with _COMIC_DETECTOR_LOCK:
-        if _COMIC_DETECTOR_SESSION is not None:
-            del _COMIC_DETECTOR_SESSION
+    if "comic_detector" in which:
+        with _COMIC_DETECTOR_LOCK:
             _COMIC_DETECTOR_SESSION = None
-
-    with _PADDLE_OCR_LOCK:
-        if _PADDLE_OCR_INSTANCE is not None:
-            del _PADDLE_OCR_INSTANCE
+    if "paddle_ocr" in which:
+        with _PADDLE_OCR_LOCK:
             _PADDLE_OCR_INSTANCE = None
-                
-    if torch.cuda.is_available():
-        torch.cuda.empty_cache()
-    gc.collect()
+
+    if which:
+        gc.collect()
+        try:
+            import torch
+            if torch.cuda.is_available():
+                torch.cuda.empty_cache()
+        except Exception:
+            pass
+    return which
 
 def detect_text_regions(img_bgr: np.ndarray) -> list[tuple[int, int, int, int]]:
     """

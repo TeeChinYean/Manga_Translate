@@ -49,5 +49,5 @@ if __name__ == "__main__":
     print("\nmode      result    wall(s)  stage_times")
     for mode, ev, wall, st, note in rows:
         print(f"{mode:<9} {ev:<9} {wall:<8} {st} {note}")
-    print("\nNote: 'overlap'/'serial' unload OCR at the end of extraction, so the NEXT run reloads it;"
-          " run each mode twice or reorder to compare warm vs cold.")
+    print("\nNote: CPU OCR models now stay loaded between jobs (OCR_UNLOAD=auto), so only the FIRST run"
+          " pays the cold load (see extract breakdown load_ocr_models); set OCR_UNLOAD=always to measure cold.")
