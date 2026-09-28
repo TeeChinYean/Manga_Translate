@@ -131,6 +131,10 @@ def parse_page_range(range_str: str, max_pages: int) -> set:
     return pages if pages else set(range(1, max_pages + 1))
 
 
+PIPELINE_MODES = ("stream", "overlap", "serial")
+DEFAULT_CONTEXT_CHUNK = 36  # Japanese lines per LLM call in 'serial' mode
+
+
 def build_failed_pages_warning(failed_pages) -> str:
     """Human-readable warning for pages whose extraction failed (BUG.md B4). Empty if none."""
     if not failed_pages:
@@ -358,42 +362,61 @@ async def translation_worker():
                         extracted_count += 1
                         update_progress()
                     yield chunk_page
+                _mark("extract_done")
 
-            async def translate_page(page):
-                nonlocal batch_count, translated_count, rendered_count
+            # ── Stage timing (for comparing pipeline modes) ──
+            stage_times = {}
+            t_pipeline0 = time.time()
+
+            def _mark(name):
+                stage_times[name] = round(time.time() - t_pipeline0, 1)
+
+            async def _restore_cached(page) -> bool:
+                """Cached page: restore the rendered JPEG and skip translation + rendering."""
+                nonlocal translated_count, rendered_count
                 page_num = page["page_num"]
                 cache_path = os.path.join(cache_base_dir, f"page_{page_num}.jpg")
+                if not os.path.exists(cache_path):
+                    return False
+                logger.info(f"Page {page_num} found in cache. Skipping translation.")
+                temp_dest = os.path.join(temp_dir, f"rendered_page_{page_num}.jpg")
+                await asyncio.to_thread(shutil.copy, cache_path, temp_dest)
+                temp_paths[page_num] = temp_dest
+                async with progress_lock:
+                    translated_count += 1
+                    rendered_count += 1
+                    update_progress()
+                return True
 
-                if os.path.exists(cache_path):
-                    # Cached page: restore and skip translation + rendering
-                    logger.info(f"Page {page_num} found in cache. Skipping translation.")
-                    temp_dest = os.path.join(temp_dir, f"rendered_page_{page_num}.jpg")
-                    await asyncio.to_thread(shutil.copy, cache_path, temp_dest)
-                    temp_paths[page_num] = temp_dest
-                    async with progress_lock:
-                        translated_count += 1
-                        rendered_count += 1
-                        update_progress()
-                    return None
-
-                blocks = page.get("blocks", [])
-                if blocks:
-                    combined_blocks = []
-                    block_refs = {}
-                    for u_id, block in enumerate(blocks):
-                        orig_block_id = block["id"]
+            async def translate_pages(pages, context_chunk_size=12):
+                """
+                Translate the blocks of several pages in ONE engine call so the LLM sees the
+                dialogue across page boundaries. Returns the pages that still need rendering.
+                """
+                nonlocal batch_count, translated_count, rendered_count
+                to_render = []
+                combined_blocks = []
+                block_refs = {}
+                for page in pages:
+                    if await _restore_cached(page):
+                        continue
+                    to_render.append(page)
+                    for block in page.get("blocks", []):
+                        u_id = len(combined_blocks)
                         block_copy = dict(block)
                         block_copy["id"] = u_id
-                        block_copy["page_num"] = page_num
+                        block_copy["page_num"] = page["page_num"]
                         combined_blocks.append(block_copy)
-                        block_refs[u_id] = (block, orig_block_id)
+                        block_refs[u_id] = (page["page_num"], block, block["id"])
 
+                if combined_blocks:
                     # Offload synchronous translation to thread pool so event loop is never frozen
                     translations, metrics = await asyncio.to_thread(
                         translation_engine.translate_batch,
                         combined_blocks,
                         source_lang=source_lang,
-                        target_lang=target_lang
+                        target_lang=target_lang,
+                        context_chunk_size=context_chunk_size
                     )
 
                     total_metrics["tokens_per_sec"] += metrics.get("tokens_per_sec", 0.0)
@@ -409,21 +432,24 @@ async def translation_worker():
                             total_metrics["model_usage"][k] = total_metrics["model_usage"].get(k, 0) + v
 
                     for temp_block in combined_blocks:
-                        u_id = temp_block["id"]
-                        orig_block, orig_block_id = block_refs[u_id]
+                        page_num, orig_block, orig_block_id = block_refs[temp_block["id"]]
                         orig_block["translated_text"] = temp_block.get("translated_text", "")
                         orig_block["is_sfx"] = temp_block.get("is_sfx", False)
                         orig_block["google_trans"] = temp_block.get("google_trans", "")
                         orig_block["cleaned_text"] = temp_block.get("cleaned_text", "")
                         orig_block["ocr_engine"] = temp_block.get("ocr_engine", orig_block.get("ocr_engine", "PaddleOCR (PP-OCRv4)"))
                         orig_block["translation_engine"] = temp_block.get("translation_engine", "Turbovec Qwen 3.5 4B")
-
                         translated_text_map[(page_num, orig_block_id)] = orig_block["translated_text"]
 
                 async with progress_lock:
-                    translated_count += 1
+                    translated_count += len(to_render)
                     update_progress()
-                return page
+                _mark("translate_done")
+                return to_render
+
+            async def translate_page(page):
+                out = await translate_pages([page])
+                return out[0] if out else None
 
             async def render_page(page):
                 nonlocal rendered_count
@@ -451,20 +477,78 @@ async def translation_worker():
                 async with progress_lock:
                     rendered_count += 1
                     update_progress()
+                _mark("render_done")
+
+            async def unload_ocr_models():
+                from core.extractor import unload_models as unload_ocr
+                await asyncio.to_thread(unload_ocr)
+                _mark("ocr_unloaded")
+                logger.info("[Pipeline] OCR models unloaded (RAM/VRAM freed for translation + rendering).")
+
+            def _check_cancel():
+                if task_id in cancelled_tasks:
+                    raise PipelineCancelled("Task cancelled by user.")
+
+            async def run_serial():
+                """Mode 'serial': extract ALL -> unload OCR -> translate ALL (big context) -> render ALL."""
+                pages = []
+                async for p in extracted_pages():
+                    _check_cancel()
+                    pages.append(p)
+                pages.sort(key=lambda x: x["page_num"])
+                await unload_ocr_models()
+
+                # Group whole pages so each engine call carries up to context_chunk_size lines
+                to_render, group, n_lines = [], [], 0
+                for p in pages:
+                    n = len(p.get("blocks", []))
+                    if group and n_lines + n > context_chunk_size:
+                        _check_cancel()
+                        to_render += await translate_pages(group, context_chunk_size)
+                        group, n_lines = [], 0
+                    group.append(p)
+                    n_lines += n
+                if group:
+                    _check_cancel()
+                    to_render += await translate_pages(group, context_chunk_size)
+
+                for p in to_render:
+                    _check_cancel()
+                    await render_page(p)
+
+            pipeline_mode = task.get("pipeline_mode", "stream")
+            if pipeline_mode not in PIPELINE_MODES:
+                pipeline_mode = "stream"
+            context_chunk_size = max(1, int(task.get("context_chunk_size", DEFAULT_CONTEXT_CHUNK)))
+            logger.info(f"[Pipeline] mode={pipeline_mode} context_chunk_size={context_chunk_size if pipeline_mode == 'serial' else 12}")
 
             try:
-                await run_three_stage_pipeline(
-                    extracted_pages(),
-                    translate_page,
-                    render_page,
-                    is_cancelled=lambda: task_id in cancelled_tasks,
-                    queue_size=3,
-                )
+                if pipeline_mode == "serial":
+                    await run_serial()
+                else:
+                    # 'stream' : extract / translate / render all concurrently (original behaviour)
+                    # 'overlap': extract + translate concurrently; when extraction ends, unload OCR,
+                    #            then render concurrently with the remaining translation
+                    await run_three_stage_pipeline(
+                        extracted_pages(),
+                        translate_page,
+                        render_page,
+                        is_cancelled=lambda: task_id in cancelled_tasks,
+                        queue_size=3,
+                        hold_render_until_source_done=(pipeline_mode == "overlap"),
+                        on_source_done=unload_ocr_models if pipeline_mode == "overlap" else None,
+                    )
             except PipelineCancelled:
                 raise Exception("Task cancelled by user.")
             except Exception as ex:
                 logger.error(f"[Pipeline] Stage error: {ex}", exc_info=True)
                 raise Exception(f"流水线处理异常: {ex}")
+
+            stage_times["total"] = round(time.time() - t_pipeline0, 1)
+            total_metrics["pipeline_mode"] = pipeline_mode
+            total_metrics["stage_times"] = stage_times
+            logger.info(f"[Timing] mode={pipeline_mode} pages={total_selected_pages} {stage_times}")
+
 
             failed_pages = sorted(extractor.failed_pages)
             if not layout_data:
@@ -813,7 +897,9 @@ async def upload_pdf_file(
     ink_thresh: int = Form(95),
     dilate_iter: int = Form(2),
     max_stroke_ratio: float = Form(0.35),
-    font_scale: float = Form(1.0)
+    font_scale: float = Form(1.0),
+    pipeline_mode: str = Form("stream"),
+    context_chunk_size: int = Form(DEFAULT_CONTEXT_CHUNK)
 ):
     """
     Uploads the raw PDF file, assigns uuid, applies custom tuning parameters, and queues the task.
@@ -843,7 +929,9 @@ async def upload_pdf_file(
         "ink_thresh": ink_thresh,
         "dilate_iter": dilate_iter,
         "max_stroke_ratio": max_stroke_ratio,
-        "font_scale": font_scale
+        "font_scale": font_scale,
+        "pipeline_mode": pipeline_mode if pipeline_mode in PIPELINE_MODES else "stream",
+        "context_chunk_size": context_chunk_size
     }
     
     status_db[task_id] = {
@@ -902,7 +990,7 @@ async def get_translation_status_stream(task_id: str):
                 last_percent = percent
                 
                 if status == "complete":
-                    yield f"event: complete\ndata: {json.dumps({'download_url': task_status.get('download_url'), 'download_zip_url': task_status.get('download_zip_url'), 'download_doc_url': task_status.get('download_doc_url'), 'download_json_url': task_status.get('download_json_url'), 'warning': task_status.get('warning', ''), 'failed_pages': task_status.get('failed_pages', [])}, ensure_ascii=False)}\n\n"
+                    yield f"event: complete\ndata: {json.dumps({'download_url': task_status.get('download_url'), 'download_zip_url': task_status.get('download_zip_url'), 'download_doc_url': task_status.get('download_doc_url'), 'download_json_url': task_status.get('download_json_url'), 'warning': task_status.get('warning', ''), 'failed_pages': task_status.get('failed_pages', []), 'stage_times': (task_status.get('metrics') or {}).get('stage_times'), 'pipeline_mode': (task_status.get('metrics') or {}).get('pipeline_mode')}, ensure_ascii=False)}\n\n"
                     break
                 elif status == "failed":
                     yield f"event: error\ndata: {json.dumps({'message': task_status.get('message', 'Processing pipeline crashed.')})}\n\n"

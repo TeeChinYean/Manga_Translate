@@ -663,6 +663,19 @@ def _extract_proper_nouns_from_batch(blocks: list, results: list):
         logger.warning(f"[Dynamo] Proper noun extraction failed: {e}")
 
 
+MIN_CONTEXT_CHUNK = 12
+
+
+def _batch_max_tokens(n_lines: int) -> int:
+    """Output budget for an n-line JSON batch (~60 tokens per translated line + JSON overhead)."""
+    return int(min(4096, max(2048, 64 * n_lines + 256)))
+
+
+def _batch_timeout(n_lines: int) -> float:
+    """Generation at ~35-50 tok/s needs longer timeouts for bigger batches."""
+    return float(max(18.0, 1.2 * n_lines + 10.0))
+
+
 class HighPerformanceTranslationEngine:
     """
     Primary: Google Translate API (30 concurrent workers).
@@ -679,7 +692,13 @@ class HighPerformanceTranslationEngine:
         logger.info("[Engine v7] Google API (primary) + OPUS-MT (fallback) ready.")
         logger.info("[Google API] Translation engine initialized - 30 concurrent workers, no model download needed.")
 
-    def translate_batch(self, blocks, source_lang="English", target_lang="Simplified Chinese"):
+    def translate_batch(self, blocks, source_lang="English", target_lang="Simplified Chinese",
+                        context_chunk_size: int = 12):
+        """
+        context_chunk_size: how many Japanese lines go into one LLM call (more = more dialogue
+        context). If a large chunk fails (e.g. exceeds the server context), it is split in half
+        and retried down to MIN_CONTEXT_CHUNK before falling back to single-line / Google.
+        """
         if not blocks:
             return [], self._empty_metrics()
 
@@ -742,9 +761,10 @@ class HighPerformanceTranslationEngine:
             if qwen_needed:
                 ensure_turbovec_llm_ready(auto_launch=True, max_wait_seconds=20)
                 logger.info(f"[Qwen Japanese Translation] Translating {len(qwen_needed)} blocks in context batch...")
-                chunk_size = 12
-                for c_start in range(0, len(qwen_needed), chunk_size):
-                    chunk_indices = qwen_needed[c_start:c_start + chunk_size]
+                chunk_size = max(1, int(context_chunk_size))
+                pending_chunks = [qwen_needed[c:c + chunk_size] for c in range(0, len(qwen_needed), chunk_size)]
+                while pending_chunks:
+                    chunk_indices = pending_chunks.pop(0)
                     batch_texts = [blocks[idx].get("cleaned_text", "").strip() for idx in chunk_indices]
                     
                     # Match relevant terminology for this batch
@@ -783,14 +803,14 @@ class HighPerformanceTranslationEngine:
                             {"role": "user", "content": user_prompt}
                         ],
                         "temperature": 0.2,
-                        "max_tokens": 2048,
+                        "max_tokens": _batch_max_tokens(len(chunk_indices)),
                         "response_format": {"type": "json_object"}
                     }
                     
                     batch_llm_success = False
                     for attempt in range(1, 3):
                         try:
-                            data = _call_turbovec_llm(payload, timeout=18.0)
+                            data = _call_turbovec_llm(payload, timeout=_batch_timeout(len(chunk_indices)))
                             if data and "choices" in data and len(data["choices"]) > 0:
                                 batch_llm_success = True
                                 reply = data["choices"][0]["message"]["content"].strip()
@@ -811,6 +831,13 @@ class HighPerformanceTranslationEngine:
                             logger.warning(f"[Qwen Batch Translation] Attempt {attempt} failed: {ex}")
                             time.sleep(0.5)
                             
+                    # Large chunk failed as a whole (context overflow / timeout): split and retry
+                    if not batch_llm_success and len(chunk_indices) > MIN_CONTEXT_CHUNK:
+                        half = (len(chunk_indices) + 1) // 2
+                        logger.warning(f"[Qwen Batch] {len(chunk_indices)}-line chunk failed, retrying as {half} + {len(chunk_indices) - half}")
+                        pending_chunks[:0] = [chunk_indices[:half], chunk_indices[half:]]
+                        continue
+
                     # Fallback for any untranslated blocks in this batch
                     for idx in chunk_indices:
                         if not results[idx]:

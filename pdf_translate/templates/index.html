@@ -1064,6 +1064,16 @@
                         style="width: 100%; padding: 12px; background: rgba(255, 255, 255, 0.05); border: 1px solid rgba(255, 255, 255, 0.1); border-radius: 8px; color: var(--text-primary); outline: none; transition: border 0.3s; font-size: 0.9rem;">
                 </div>
 
+                <!-- Pipeline scheduling mode (for A/B speed comparison) -->
+                <div class="control-group">
+                    <label for="pipelineMode">流水线模式 (Pipeline Mode)</label>
+                    <select id="pipelineMode">
+                        <option value="stream">全并发：提取 / 翻译 / 重绘同时进行</option>
+                        <option value="overlap">模式1：提取+翻译 → 卸载 OCR → 重绘+翻译</option>
+                        <option value="serial">模式2：串行 提取 → 翻译(大上下文) → 重绘</option>
+                    </select>
+                </div>
+
                 <!-- Live Inpaint Tuning Bar Trigger -->
                 <div class="tune-summary-bar" id="openSidebarBtn" title="点击展开实时重绘与排版调优侧边栏">
                     <div class="tune-summary-left">
@@ -1474,6 +1484,7 @@
             formData.append('dilate_iter', tuningParams.dilate_iter);
             formData.append('max_stroke_ratio', tuningParams.max_stroke_ratio);
             formData.append('font_scale', tuningParams.font_scale);
+            formData.append('pipeline_mode', document.getElementById('pipelineMode').value);
 
             try {
                 const response = await fetch('/api/v1/translate/upload', {
@@ -1595,6 +1606,9 @@
 
                 progressBarFill.style.width = '100%';
                 logToConsole(`[✓] 恭喜！布局保真 PDF 翻译重构成功！全部流程总耗时 ${finalTime} 秒`, 'success');
+                if (data.stage_times) {
+                    logToConsole(`[⏱] 模式 ${data.pipeline_mode} 各阶段完成时刻(秒): ${JSON.stringify(data.stage_times)}`, 'success');
+                }
                 if (data.warning) {
                     logToConsole(`[!] 注意: ${data.warning}`, 'warn');
                 }
