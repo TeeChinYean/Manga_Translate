@@ -30,6 +30,53 @@ MODEL_VRAM_MB = {
     "manga_ocr": 900,        # ViT encoder + BERT decoder, fp32, generate()
     "paddle_ocr": 300,       # PP-OCRv4 det+cls+rec
 }
+DEFAULT_MODEL_VRAM_MB = dict(MODEL_VRAM_MB)
+_MEASURED_PATH = os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__))), "data", "gpu_model_vram.json")
+CALIBRATION_MARGIN = 1.2   # measured delta x1.2 (activations can peak higher on bigger pages)
+
+
+def _load_measured():
+    """Replace the default estimates with values measured on this machine (if any)."""
+    try:
+        import json
+        with open(_MEASURED_PATH, "r", encoding="utf-8") as f:
+            data = json.load(f)
+        for k, v in data.items():
+            if k in MODEL_VRAM_MB and isinstance(v, (int, float)) and 50 <= v <= 8000:
+                MODEL_VRAM_MB[k] = int(v)
+    except Exception:
+        pass
+
+
+def record_measured(model: str, delta_mb: float) -> bool:
+    """
+    Store a measured VRAM cost for `model` (free-before minus free-after its GPU load and
+    first inference). Ignores implausible values caused by other processes (e.g. the LLM
+    growing its KV cache at the same moment).
+    """
+    if model not in MODEL_VRAM_MB or delta_mb is None or not (30 <= delta_mb <= 6000):
+        return False
+    value = int(max(100, delta_mb * CALIBRATION_MARGIN))
+    MODEL_VRAM_MB[model] = value
+    try:
+        import json
+        data = {}
+        if os.path.exists(_MEASURED_PATH):
+            with open(_MEASURED_PATH, "r", encoding="utf-8") as f:
+                data = json.load(f)
+        data[model] = value
+        tmp = _MEASURED_PATH + ".tmp"
+        with open(tmp, "w", encoding="utf-8") as f:
+            json.dump(data, f, indent=2)
+        os.replace(tmp, _MEASURED_PATH)
+    except Exception as e:
+        logger.warning(f"[GPU Budget] could not save measured VRAM: {e}")
+    logger.info(f"[GPU Budget] measured {model}: {int(delta_mb)}MB -> planning with {value}MB")
+    return True
+
+
+_load_measured()
+
 # Placement priority: most GPU-benefit per MB first.
 PRIORITY = ("comic_detector", "manga_ocr", "paddle_ocr")
 
@@ -110,7 +157,7 @@ def free_vram_mb(force: bool = False):
         return free, source
 
 
-def plan_placement(capable: dict, free_mb=None, resident=()) -> dict:
+def plan_placement(capable: dict, free_mb=None, resident=(), source: str = "override") -> dict:
     """
     Decide GPU/CPU per model.
       capable:  {model_name: bool} — whether a GPU backend exists for that model.
@@ -129,7 +176,6 @@ def plan_placement(capable: dict, free_mb=None, resident=()) -> dict:
         plan.update(_reason="EXTRACT_DEVICE=gpu (VRAM check skipped)", _free_mb=None)
         return plan
 
-    source = "override"
     if free_mb is None:
         free_mb, source = free_vram_mb()
     if free_mb is None:

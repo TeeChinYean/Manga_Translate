@@ -51,3 +51,5 @@ scratch/
 
 # Runtime LLM-discovered terms (hint-only, BUG.md B5)
 pdf_translate/data/proper_nouns_auto.json
+# Machine-specific measured VRAM cost of extraction models
+pdf_translate/data/gpu_model_vram.json

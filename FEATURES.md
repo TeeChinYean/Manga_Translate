@@ -36,6 +36,7 @@
   - 已经在 GPU 上的模型有迟滞：剩余显存 ≥ 预留的一半就继续留在 GPU，避免每个任务来回切换。
   - 后端：ORT 模型用 CUDA EP 或 DirectML EP；MangaOCR 需要 CUDA 版 PyTorch，CPU 版 torch 下永远留在 CPU。
   - 环境变量 `EXTRACT_DEVICE=auto|cpu|gpu` 可手动覆盖。
+  - 自动校准：模型第一次上 GPU 时，测量「加载 + 首次推理」前后的剩余显存差 ×1.2，写入 `data/gpu_model_vram.json`（本机专用，已加入 gitignore）。之后的任务按实测值分配，不再用估算值。
   - 行为变化：以前只要装了 DirectML，CTD 就一律上 GPU。现在如果探测不到剩余显存，会留在 CPU（保守默认）。
-- 相关测试：`tests/test_gpu_budget.py`（10 个用例），已加入 pre-commit。
+- 相关测试：`tests/test_gpu_budget.py`（13 个用例），已加入 pre-commit。
 - 状态：Done（待用户在 Windows 上跑 `scratch/gpu_diag.py` 确认探测方式）

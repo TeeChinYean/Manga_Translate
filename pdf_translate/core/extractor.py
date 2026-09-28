@@ -99,7 +99,7 @@ def prepare_extract_devices(force_probe: bool = True) -> dict:
         free, _src = gpu_budget.free_vram_mb(force=force_probe)
         loaded = _loaded_models()
         resident = {m for m, dev in _PLACEMENT.items() if dev == "gpu" and loaded.get(m)}
-        plan = gpu_budget.plan_placement(capable, free_mb=free, resident=resident)
+        plan = gpu_budget.plan_placement(capable, free_mb=free, resident=resident, source=_src)
         for m in ("comic_detector", "manga_ocr", "paddle_ocr"):
             if loaded[m] and _PLACEMENT.get(m) != plan[m]:
                 if m == "comic_detector":
@@ -123,6 +123,20 @@ def _free_torch_cache():
             torch.cuda.empty_cache()
     except Exception:
         pass
+
+
+def _measure_gpu_cost(name: str, warmup):
+    """Run `warmup()` (first GPU inference) and record the VRAM it took for future planning."""
+    from core import gpu_budget
+    before, _ = gpu_budget.free_vram_mb(force=True)
+    try:
+        warmup()
+    except Exception as e:
+        logger.warning(f"[GPU Budget] {name} warm-up failed: {e}")
+        return
+    after, _ = gpu_budget.free_vram_mb(force=True)
+    if before is not None and after is not None:
+        gpu_budget.record_measured(name, before - after)
 
 
 def _device_for(name: str) -> str:
@@ -171,6 +185,11 @@ def _get_paddle_ocr():
                         _PADDLE_OCR_INSTANCE = RapidOCR(text_score=0.35)
                         gpu_kwargs = {}
                     logger.info(f"[PaddleOCR] Initialized RapidOCR ONNX engine ({'GPU ' + str(gpu_kwargs) if gpu_kwargs else 'CPU'}).")
+                    if gpu_kwargs:
+                        eng = _PADDLE_OCR_INSTANCE
+                        demo = np.full((64, 256, 3), 255, dtype=np.uint8)
+                        cv2.putText(demo, "Test 123", (8, 44), cv2.FONT_HERSHEY_SIMPLEX, 1.2, (0, 0, 0), 2)
+                        _measure_gpu_cost("paddle_ocr", lambda: eng(demo))
                 except ImportError:
                     logger.warning("[PaddleOCR] rapidocr_onnxruntime is not installed.")
                     _PADDLE_OCR_INSTANCE = None
@@ -195,6 +214,10 @@ def _get_comic_detector():
                             providers.append(gpu_ep)
                         providers.append('CPUExecutionProvider')
                         _COMIC_DETECTOR_SESSION = ort.InferenceSession(model_path, providers=providers)
+                        if len(providers) > 1:
+                            sess = _COMIC_DETECTOR_SESSION
+                            _measure_gpu_cost("comic_detector", lambda: sess.run(
+                                None, {'images': np.zeros((1, 3, 1024, 1024), dtype=np.float32)}))
                         logger.info(f"[ComicTextDetector] Initialized detector with providers: {providers}")
                     else:
                         logger.info(f"[ComicTextDetector] Model not found at {model_path}, will use CRAFT fallback.")
@@ -292,10 +315,20 @@ def _get_manga_ocr():
                     
                     local_model_path = os.path.join(os.path.dirname(os.path.abspath(__file__)), "..", "manga-ocr-base")
                     
-                    if os.path.exists(local_model_path):
-                        _MANGA_OCR_INSTANCE = MangaOcr(pretrained_model_name_or_path=local_model_path, force_cpu=not use_gpu)
+                    model_ref = local_model_path if os.path.exists(local_model_path) else 'kha-white/manga-ocr-base'
+
+                    def _load_and_warm():
+                        global _MANGA_OCR_INSTANCE
+                        _MANGA_OCR_INSTANCE = MangaOcr(pretrained_model_name_or_path=model_ref, force_cpu=not use_gpu)
+                        if use_gpu:
+                            from PIL import Image as _Img
+                            _MANGA_OCR_INSTANCE(_Img.new("RGB", (64, 256), "white"))
+
+                    if use_gpu:
+                        # Measure load + first inference VRAM so later tasks plan with the real cost
+                        _measure_gpu_cost("manga_ocr", _load_and_warm)
                     else:
-                        _MANGA_OCR_INSTANCE = MangaOcr(pretrained_model_name_or_path='kha-white/manga-ocr-base', force_cpu=not use_gpu)
+                        _load_and_warm()
                     logger.info(f"[MangaOCR] Loaded MangaOCR model on device: {device.upper()}")
                 except ImportError:
                     _MANGA_OCR_INSTANCE = None
