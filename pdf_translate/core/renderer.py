@@ -284,6 +284,8 @@ def _best_font(text: str, box_w: int, box_h: int, font_scale: float = 1.0, max_s
             
     if abs(font_scale - 1.0) > 0.01:
         scaled_fs = max(8, min(120, int(best_fs * font_scale)))
+        if max_size and max_size > 0:
+            scaled_fs = min(scaled_fs, int(max_size))  # the user scale must not undo the cap
         scaled_font = _get_font(scaled_fs)
         scaled_lines = _wrap_cjk(text, scaled_font, usable_w)
         return scaled_font, scaled_lines, scaled_fs
@@ -293,6 +295,7 @@ def _best_font(text: str, box_w: int, box_h: int, font_scale: float = 1.0, max_s
 
 # ── Typesetting helpers (BUG.md B21) ──────────────────────────────────────────
 MIN_FONT_PX = 9          # smallest lettering (was 10; text now gets more room first)
+TYPESET_MAX_TRIES = 30   # overlap-shrink attempts per block
 PAGE_GLYPH_CAP = 1.6     # font <= 1.6 x the page's median original glyph size
 PAGE_GLYPH_FLOOR = 0.8   # the size cap is at least 0.8 x the page's median glyph size
 GROW_STEP = 4            # px per growth step of a draw box inside a clean bubble
@@ -1246,7 +1249,7 @@ class PDFLayoutRenderer:
                 page_cap = int(page_glyph * PAGE_GLYPH_CAP)
                 page_floor = int(page_glyph * PAGE_GLYPH_FLOOR)
                 cap = min(max(cap, page_floor), page_cap) if cap else page_cap
-            while True:
+            for _attempt in range(TYPESET_MAX_TRIES):
                 font, lines, fs = _best_font(translated, bw, bh, font_scale=self.font_scale,
                                              max_size=cap, min_size=MIN_FONT_PX)
                 lh = fs * 1.25
@@ -1264,7 +1267,7 @@ class PDFLayoutRenderer:
                 clash = any(_rects_overlap(rect, r) for r in placed)
                 if not clash or fs <= MIN_FONT_PX:
                     break
-                cap = fs - 2
+                cap = max(MIN_FONT_PX, fs - 2)   # strictly shrinking; bounded loop (never hangs)
                 _rstat("typeset_shrunk_for_overlap", 0.0)
             placed.append(rect)
             plans.append((px0, py0, bw, bh, translated, block, style, font, lines, fs, widths, top))
