@@ -404,6 +404,45 @@ def _lama_inpaint_crop(session, crop_rgb: np.ndarray, crop_mask: np.ndarray) -> 
     return out[:h, :w]
 
 
+FLAT_RING_PX = 5        # ring just outside a hole used to test for a flat background
+FLAT_TOL = 14           # ring pixels within +-14 gray levels of the median count as "same colour"
+FLAT_SHARE_MIN = 0.90   # >=90% of the ring is that colour (a balloon outline touching the ring is ok)
+FLAT_WHITE_MIN = 235    # flat white balloon / page
+FLAT_BLACK_MAX = 25     # flat black area
+
+
+def _flat_fill_holes(img: np.ndarray, mask_bin: np.ndarray) -> np.ndarray:
+    """Fill (in place) mask components whose surrounding ring is flat white or flat black with
+    the ring's median colour; return the mask with those components removed."""
+    n, labels, stats, _ = cv2.connectedComponentsWithStats((mask_bin > 0).astype(np.uint8), 8)
+    if n <= 1:
+        return mask_bin
+    gray = cv2.cvtColor(img, cv2.COLOR_RGB2GRAY)
+    H, W = mask_bin.shape[:2]
+    k = cv2.getStructuringElement(cv2.MORPH_ELLIPSE, (2 * FLAT_RING_PX + 1, 2 * FLAT_RING_PX + 1))
+    out = mask_bin.copy()
+    for i in range(1, n):
+        x, y, w, h, _a = stats[i]
+        X0, Y0 = max(0, x - FLAT_RING_PX - 1), max(0, y - FLAT_RING_PX - 1)
+        X1, Y1 = min(W, x + w + FLAT_RING_PX + 1), min(H, y + h + FLAT_RING_PX + 1)
+        comp = (labels[Y0:Y1, X0:X1] == i).astype(np.uint8)
+        ring = (cv2.dilate(comp, k) > 0) & (mask_bin[Y0:Y1, X0:X1] == 0)
+        vals = gray[Y0:Y1, X0:X1][ring]
+        if vals.size < 20:
+            continue
+        med = float(np.median(vals))
+        if float((np.abs(vals.astype(np.int16) - med) <= FLAT_TOL).mean()) < FLAT_SHARE_MIN:
+            continue
+        if FLAT_BLACK_MAX < med < FLAT_WHITE_MIN:
+            continue
+        colour = np.median(img[Y0:Y1, X0:X1][ring], axis=0).astype(np.uint8)
+        sel = comp > 0
+        img[Y0:Y1, X0:X1][sel] = colour
+        out[Y0:Y1, X0:X1][sel] = 0
+        _rstat("lama_flat_fill", 0.0)
+    return out
+
+
 def _lama_inpaint(img_pil: Image.Image, mask_pil: Image.Image) -> Image.Image:
     """
     High-fidelity neural inpainting using LaMa ONNX (Fast Fourier Convolutions).
@@ -430,6 +469,11 @@ def _lama_inpaint(img_pil: Image.Image, mask_pil: Image.Image) -> Image.Image:
             x0, y0, x1, y1 = _expand_to_window(x0, y0, x1, y1, w, h)
             if np.any(mask_bin[y0:y1, x0:x1]):
                 windows.append((x0, y0, x1, y1))
+
+        # Holes inside a flat white (balloon) or flat black area: fill with that colour.
+        # LaMa on a big hole in flat white leaves faint ghost strokes (BUG.md B20) and costs a call.
+        mask_bin = _flat_fill_holes(result, mask_bin)
+        windows = [w_ for w_ in windows if np.any(mask_bin[w_[1]:w_[3], w_[0]:w_[2]])]
 
         def _heal(win):
             x0, y0, x1, y1 = win
@@ -735,7 +779,9 @@ def _outlined_text_mask(gray: np.ndarray, seg: np.ndarray, x0: int, y0: int, x1:
     if seg is None:
         return None
     H, W = gray.shape[:2]
-    rr = int(np.clip(round(0.3 * glyph_px) if glyph_px else 10, 4, 16))
+    # Geodesic growth stops by itself at the (non-bright) artwork, so a generous radius is safe
+    rr = int(np.clip(round(0.35 * glyph_px) if glyph_px else 12, 6, 24))
+    fringe = int(np.clip(round(0.12 * glyph_px) if glyph_px else 3, 3, 6))
     pad = rr + RIM_RING_PX + 4
     X0, Y0, X1, Y1 = max(0, x0 - pad), max(0, y0 - pad), min(W, x1 + pad), min(H, y1 + pad)
     g = gray[Y0:Y1, X0:X1]
@@ -766,7 +812,8 @@ def _outlined_text_mask(gray: np.ndarray, seg: np.ndarray, x0: int, y0: int, x1:
     dark = float((vals <= 60).mean())
     if mid < RIM_RING_MID_MIN and dark < RIM_RING_DARK_MIN:
         return None  # silhouette sits in a clean area (speech bubble): keep the normal path
-    mask = cv2.dilate(sil * 255, cv2.getStructuringElement(cv2.MORPH_ELLIPSE, (5, 5)))  # + AA fringe
+    # + AA fringe: any rim remnant left on the hole border is copied inward by LaMa
+    mask = cv2.dilate(sil * 255, cv2.getStructuringElement(cv2.MORPH_ELLIPSE, (2 * fringe + 1, 2 * fringe + 1)))
     return X0, Y0, X1, Y1, mask
 
 
@@ -776,7 +823,7 @@ def _merge_into(target: np.ndarray, x0: int, y0: int, x1: int, y1: int, mask: np
 
 # ── Main Renderer Class ────────────────────────────────────────────────────────
 # Bump whenever rendering output changes, so page JPEG caches from older logic are not reused.
-RENDER_CACHE_VERSION = "2026-09-28-rim2"
+RENDER_CACHE_VERSION = "2026-09-28-rim3"
 
 
 class PDFLayoutRenderer:
