@@ -49,3 +49,7 @@
 - 实现要点：ORT 的 `InferenceSession.run` 本身线程安全，原来的全局锁换成了 BoundedSemaphore。背景：用户实测 serial 模式重绘 106s（10 页）是瓶颈。在 VM（2 核）上 4 个 crop 的测试：LAMA_PARALLEL 1 → 28.2s，2 → 19.8s。
 - 相关测试：`tests/test_render_async.py` 新增 2 个用例（耗时分解、多页 CPU 阶段确实重叠）。
 - 状态：Done（待用户实测）
+
+### [实验] LaMa 用 DirectML 跑 GPU —— 不可行
+- 结果（2026-09-28，RTX 3050 Laptop，已停 LLM）：DML session 能创建，但第一次推理时，FFC 的 `FourierUnit ... Transpose_56` 节点报 `887A0005 The GPU device instance has been suspended`（GPU 设备被挂起）。这与 renderer 里"LaMa 在 CPU 上跑以保证 FFC DFT 稳定"的原注释一致。
+- 处理：生产代码保持 LaMa 只走 CPU（原本就如此，没有改动）。测试脚本 `scratch/lama_gpu_test.py` 保留，以后换 CUDA EP 时可以复用。
