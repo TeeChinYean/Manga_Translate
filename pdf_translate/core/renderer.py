@@ -410,6 +410,36 @@ def _ring_is_textured(gray: np.ndarray, x0: int, y0: int, x1: int, y1: int, pad:
     return white < RING_WHITE_MIN or mid > RING_MID_MAX
 
 
+# Interior test (measured on 第5巻 p1-12): clean narration boxes 0.90-1.00 white / <=0.08 mid,
+# text over artwork / tone <=0.76 white. Thresholds sit in that gap.
+INTERIOR_WHITE_MIN = 0.85   # >=85% of the non-glyph pixels inside the box are light (>=180) ...
+INTERIOR_MID_MAX = 0.12     # ... <=12% mid-tone (60..180) ...
+INTERIOR_DARK_MAX = 0.05    # ... and <=5% dark (<=60): hatching/art lines push this up
+
+
+def _route_textured(gray: np.ndarray, crop_rgb: np.ndarray, x0: int, y0: int, x1: int, y1: int,
+                    **mask_params) -> bool:
+    """
+    Telea (clean) vs LaMa (textured) routing for one text box (BUG.md B12/B14).
+    1. Outer ring clean -> clean bubble.
+    2. Ring touches art or a frame line -> look INSIDE the box: remove the glyph strokes and
+       check what is left. Narration boxes with a black frame are white inside and must use
+       Telea (LaMa invents grey streaks there). Text over artwork leaves art pixels -> LaMa.
+    """
+    if not _ring_is_textured(gray, x0, y0, x1, y1):
+        return False
+    core_mask = _create_stroke_mask(crop_rgb, textured=False, **mask_params)[0]
+    glyphs = cv2.dilate(core_mask, cv2.getStructuringElement(cv2.MORPH_ELLIPSE, (5, 5)), iterations=3) > 0
+    inner = gray[y0:y1, x0:x1][~glyphs]
+    if inner.size < 50:
+        return True
+    light = float((inner >= 180).mean())
+    mid = float(((inner > 60) & (inner < 180)).mean())
+    dark = float((inner <= 60).mean())
+    clean = light >= INTERIOR_WHITE_MIN and mid <= INTERIOR_MID_MAX and dark <= INTERIOR_DARK_MAX
+    return not clean
+
+
 def _create_stroke_mask(crop_rgb: np.ndarray, ink_thresh: int = 95, dilate_iter: int = 2, max_stroke_ratio: float = 0.35,
                         textured: bool = None) -> tuple:
     """
@@ -561,7 +591,9 @@ class PDFLayoutRenderer:
                 ink_thresh=self.ink_thresh,
                 dilate_iter=self.dilate_iter,
                 max_stroke_ratio=self.max_stroke_ratio,
-                textured=_ring_is_textured(gray_np, px0, py0, px1, py1)
+                textured=_route_textured(gray_np, crop_rgb, px0, py0, px1, py1,
+                                         ink_thresh=self.ink_thresh, dilate_iter=self.dilate_iter,
+                                         max_stroke_ratio=self.max_stroke_ratio)
             )
             stroke_mask = mask_res[0]
             bg_val = mask_res[1]
@@ -731,7 +763,9 @@ class PDFLayoutRenderer:
                 ink_thresh=self.ink_thresh,
                 dilate_iter=self.dilate_iter,
                 max_stroke_ratio=self.max_stroke_ratio,
-                textured=_ring_is_textured(gray_np, px0, py0, px1, py1)
+                textured=_route_textured(gray_np, crop_rgb, px0, py0, px1, py1,
+                                         ink_thresh=self.ink_thresh, dilate_iter=self.dilate_iter,
+                                         max_stroke_ratio=self.max_stroke_ratio)
             )
             stroke_mask = mask_res[0]
             bg_val = mask_res[1]
