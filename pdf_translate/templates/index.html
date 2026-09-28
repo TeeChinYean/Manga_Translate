@@ -1609,6 +1609,9 @@
                 if (data.stage_times) {
                     logToConsole(`[⏱] 模式 ${data.pipeline_mode} 各阶段完成时刻(秒): ${JSON.stringify(data.stage_times)}`, 'success');
                 }
+                if (data.extract_devices) {
+                    logToConsole(`[GPU] 提取模型设备: ${JSON.stringify(data.extract_devices)}`, 'success');
+                }
                 if (data.warning) {
                     logToConsole(`[!] 注意: ${data.warning}`, 'warn');
                 }

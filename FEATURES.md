@@ -22,3 +22,20 @@
   - stub 版依赖跑 `main.translation_worker`，三种模式的事件顺序都符合设计，取消也正常。
   - 真实速度对比：`scratch/bench_modes.py`（需在 Windows 上跑）。
 - 状态：Done（待用户实测对比结果）
+
+### [全局] 提取模型按剩余显存自动上 GPU
+- 说明：每个任务开始时探测剩余显存（LLM 已占用的部分不算在内）。放得下的提取模型放到 GPU，放不下的留在 CPU。运行中遇到 GPU OOM / 设备错误时，该模型自动降级到 CPU 并重试当前这一步。
+- 涉及文件/模块：
+  - `pdf_translate/core/gpu_budget.py`（新增）：显存探测 + 分配计划。
+  - `pdf_translate/core/extractor.py`：`prepare_extract_devices`、`_device_for`、`_demote_to_cpu`；三个模型的 getter 按分配结果选择设备。
+  - `main.py` / `core/pipeline.py`：每个任务开始时调用；完成信息里带 `extract_devices`，前端控制台会显示。
+  - `scratch/gpu_diag.py`：环境诊断脚本。
+- 实现要点：
+  - 显存探测顺序：`torch.cuda.mem_get_info` → `nvidia-smi` → Windows WMI GPU 计数器。用 WMI 类名而不是 Get-Counter 路径，是因为后者在中文 Windows 上会被本地化。
+  - 显存估算：CTD 700MB、MangaOCR 900MB、PaddleOCR 300MB，按这个顺序优先分配。预留 `EXTRACT_VRAM_RESERVE_MB`（默认 400MB）给 LLM 的 KV cache 增长和桌面使用。
+  - 已经在 GPU 上的模型有迟滞：剩余显存 ≥ 预留的一半就继续留在 GPU，避免每个任务来回切换。
+  - 后端：ORT 模型用 CUDA EP 或 DirectML EP；MangaOCR 需要 CUDA 版 PyTorch，CPU 版 torch 下永远留在 CPU。
+  - 环境变量 `EXTRACT_DEVICE=auto|cpu|gpu` 可手动覆盖。
+  - 行为变化：以前只要装了 DirectML，CTD 就一律上 GPU。现在如果探测不到剩余显存，会留在 CPU（保守默认）。
+- 相关测试：`tests/test_gpu_budget.py`（10 个用例），已加入 pre-commit。
+- 状态：Done（待用户在 Windows 上跑 `scratch/gpu_diag.py` 确认探测方式）

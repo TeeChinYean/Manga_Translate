@@ -46,6 +46,109 @@ _PADDLE_OCR_INSTANCE = None
 _OCR_READER_JA = None
 _OCR_READER_EN = None
 
+# ── GPU placement for extraction models (see core/gpu_budget.py) ──────────────
+# _PLACEMENT[name] = "gpu" | "cpu" for comic_detector / manga_ocr / paddle_ocr.
+_PLACEMENT = {}
+_PLACEMENT_LOCK = threading.Lock()
+
+
+def _ort_gpu_provider():
+    """Best ONNX Runtime GPU provider available in this install, or None."""
+    try:
+        import onnxruntime as ort
+        avail = ort.get_available_providers()
+    except Exception:
+        return None
+    for p in ("CUDAExecutionProvider", "DmlExecutionProvider"):
+        if p in avail:
+            return p
+    return None
+
+
+def _torch_cuda_available() -> bool:
+    try:
+        import torch
+        return bool(torch.cuda.is_available())
+    except Exception:
+        return False
+
+
+def _loaded_models() -> dict:
+    return {
+        "comic_detector": _COMIC_DETECTOR_SESSION is not None,
+        "manga_ocr": _MANGA_OCR_INSTANCE is not None,
+        "paddle_ocr": _PADDLE_OCR_INSTANCE is not None,
+    }
+
+
+def prepare_extract_devices(force_probe: bool = True) -> dict:
+    """
+    Decide GPU vs CPU for each extraction model from the current free VRAM, and drop any
+    loaded model whose placement changed so it reloads on the right device. Call at the
+    start of each task (the LLM may have grown or shrunk since the last one).
+    """
+    from core import gpu_budget
+    global _COMIC_DETECTOR_SESSION, _MANGA_OCR_INSTANCE, _PADDLE_OCR_INSTANCE
+    with _PLACEMENT_LOCK:
+        ort_gpu = _ort_gpu_provider()
+        capable = {
+            "comic_detector": ort_gpu is not None,
+            "manga_ocr": _torch_cuda_available(),
+            "paddle_ocr": ort_gpu is not None,
+        }
+        free, _src = gpu_budget.free_vram_mb(force=force_probe)
+        loaded = _loaded_models()
+        resident = {m for m, dev in _PLACEMENT.items() if dev == "gpu" and loaded.get(m)}
+        plan = gpu_budget.plan_placement(capable, free_mb=free, resident=resident)
+        for m in ("comic_detector", "manga_ocr", "paddle_ocr"):
+            if loaded[m] and _PLACEMENT.get(m) != plan[m]:
+                if m == "comic_detector":
+                    _COMIC_DETECTOR_SESSION = None
+                elif m == "manga_ocr":
+                    _MANGA_OCR_INSTANCE = None
+                else:
+                    _PADDLE_OCR_INSTANCE = None
+                logger.info(f"[GPU Budget] {m}: {_PLACEMENT.get(m)} -> {plan[m]}, will reload.")
+            _PLACEMENT[m] = plan[m]
+        logger.info(f"[GPU Budget] placement {{{', '.join(f'{m}: {_PLACEMENT[m]}' for m in capable)}}} | {plan['_reason']}")
+        if _PLACEMENT.get("manga_ocr") == "cpu" or not capable["manga_ocr"]:
+            _free_torch_cache()
+        return dict(_PLACEMENT, _reason=plan["_reason"], _ort_gpu=ort_gpu)
+
+
+def _free_torch_cache():
+    try:
+        import torch
+        if torch.cuda.is_available():
+            torch.cuda.empty_cache()
+    except Exception:
+        pass
+
+
+def _device_for(name: str) -> str:
+    if name not in _PLACEMENT:
+        prepare_extract_devices(force_probe=False)
+    return _PLACEMENT.get(name, "cpu")
+
+
+def _demote_to_cpu(name: str, exc: BaseException) -> bool:
+    """On a GPU OOM / device error, move that model to CPU for the rest of the session."""
+    from core import gpu_budget
+    global _COMIC_DETECTOR_SESSION, _MANGA_OCR_INSTANCE, _PADDLE_OCR_INSTANCE
+    if _PLACEMENT.get(name) != "gpu" or not gpu_budget.is_gpu_oom(exc):
+        return False
+    with _PLACEMENT_LOCK:
+        _PLACEMENT[name] = "cpu"
+        if name == "comic_detector":
+            _COMIC_DETECTOR_SESSION = None
+        elif name == "manga_ocr":
+            _MANGA_OCR_INSTANCE = None
+        else:
+            _PADDLE_OCR_INSTANCE = None
+    _free_torch_cache()
+    logger.warning(f"[GPU Budget] {name} hit a GPU error ({exc}); falling back to CPU.")
+    return True
+
 def _get_paddle_ocr():
     """
     Singleton session for PaddleOCR (RapidOCR ONNX Runtime).
@@ -57,8 +160,17 @@ def _get_paddle_ocr():
             if _PADDLE_OCR_INSTANCE is None:
                 try:
                     from rapidocr_onnxruntime import RapidOCR
-                    _PADDLE_OCR_INSTANCE = RapidOCR(text_score=0.35)
-                    logger.info("[PaddleOCR] Initialized RapidOCR ONNX engine.")
+                    gpu_kwargs = {}
+                    if _device_for("paddle_ocr") == "gpu":
+                        flag = "use_cuda" if _ort_gpu_provider() == "CUDAExecutionProvider" else "use_dml"
+                        gpu_kwargs = {f"{part}_{flag}": True for part in ("det", "cls", "rec")}
+                    try:
+                        _PADDLE_OCR_INSTANCE = RapidOCR(text_score=0.35, **gpu_kwargs)
+                    except TypeError:
+                        # Older rapidocr without GPU switches
+                        _PADDLE_OCR_INSTANCE = RapidOCR(text_score=0.35)
+                        gpu_kwargs = {}
+                    logger.info(f"[PaddleOCR] Initialized RapidOCR ONNX engine ({'GPU ' + str(gpu_kwargs) if gpu_kwargs else 'CPU'}).")
                 except ImportError:
                     logger.warning("[PaddleOCR] rapidocr_onnxruntime is not installed.")
                     _PADDLE_OCR_INSTANCE = None
@@ -77,10 +189,10 @@ def _get_comic_detector():
                     import onnxruntime as ort
                     model_path = os.path.join(os.path.dirname(os.path.abspath(__file__)), "..", "data", "models", "onnx", "comic-text-detector.onnx")
                     if os.path.exists(model_path):
-                        available_providers = ort.get_available_providers()
                         providers = []
-                        if 'DmlExecutionProvider' in available_providers:
-                            providers.append('DmlExecutionProvider')
+                        gpu_ep = _ort_gpu_provider()
+                        if gpu_ep and _device_for("comic_detector") == "gpu":
+                            providers.append(gpu_ep)
                         providers.append('CPUExecutionProvider')
                         _COMIC_DETECTOR_SESSION = ort.InferenceSession(model_path, providers=providers)
                         logger.info(f"[ComicTextDetector] Initialized detector with providers: {providers}")
@@ -168,7 +280,7 @@ def _get_ocr_reader(lang="Japanese"):
 def _get_manga_ocr():
     global _MANGA_OCR_INSTANCE
     import torch
-    use_gpu = torch.cuda.is_available()
+    use_gpu = torch.cuda.is_available() and _device_for("manga_ocr") == "gpu"
     device = 'cuda' if use_gpu else 'cpu'
     
     if _MANGA_OCR_INSTANCE is None:
@@ -517,7 +629,12 @@ class PDFLayoutExtractor:
         
         if comic_session is not None:
             # High-speed specialized YOLOv8 detection for manga dialogue bubbles
-            merged_boxes = _detect_with_comic_detector(img_np, comic_session)
+            try:
+                merged_boxes = _detect_with_comic_detector(img_np, comic_session)
+            except Exception as det_err:
+                if not _demote_to_cpu("comic_detector", det_err):
+                    raise
+                merged_boxes = _detect_with_comic_detector(img_np, _get_comic_detector())
             logger.info(f"[ComicTextDetector] Page {page_num}: Detected {len(merged_boxes)} speech bubbles.")
         else:
             # Fallback to EasyOCR CRAFT
@@ -572,6 +689,7 @@ class PDFLayoutExtractor:
             return img_np[cy0:cy1, cx0:cx1]
 
         def _ocr_paddle(x0, y0, x1, y1):
+            nonlocal paddle_ocr
             if paddle_ocr is None:
                 return ""
             try:
@@ -583,10 +701,14 @@ class PDFLayoutExtractor:
                     text = "".join(line[1].strip() for line in paddle_res if line and len(line) > 1 and line[1])
                     return text.strip()
             except Exception as pe:
+                if _demote_to_cpu("paddle_ocr", pe):
+                    paddle_ocr = _get_paddle_ocr()
+                    return _ocr_paddle(x0, y0, x1, y1)
                 logger.warning(f"[PaddleOCR] Recognition failed on crop: {pe}")
             return ""
 
         def _ocr_manga(x0, y0, x1, y1):
+            nonlocal mocr
             if mocr is None:
                 return ""
             try:
@@ -612,6 +734,14 @@ class PDFLayoutExtractor:
                             text = mocr(crop_img)
                 return (text or "").strip()
             except Exception as e:
+                if _demote_to_cpu("manga_ocr", e):
+                    mocr = _get_manga_ocr()
+                    if mocr is not None:
+                        try:
+                            return (mocr(Image.fromarray(_crop(x0, y0, x1, y1, 8))) or "").strip()
+                        except Exception as e2:
+                            logger.error(f"[!] MangaOCR (CPU retry) failed on crop: {e2}")
+                    return ""
                 logger.error(f"[!] MangaOCR failed on crop: {e}")
             return ""
 

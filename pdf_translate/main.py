@@ -158,7 +158,8 @@ async def preload_all_models():
     # 2. Preload EasyOCR and MangaOCR
     def _warm_ocr():
         try:
-            from core.extractor import _get_ocr_reader, _get_manga_ocr
+            from core.extractor import _get_ocr_reader, _get_manga_ocr, prepare_extract_devices
+            prepare_extract_devices()
             import numpy as np
             from PIL import Image
             
@@ -256,6 +257,10 @@ async def translation_worker():
             selected_pages = sorted(list(parse_page_range(page_range, actual_total_pages)))
 
             extractor = PDFLayoutExtractor(pdf_path)
+
+            # Put extraction models on the GPU only if the free VRAM (next to the LLM) allows it
+            from core.extractor import prepare_extract_devices
+            extract_devices = await asyncio.to_thread(prepare_extract_devices)
             
             # Step 2: Streaming Pipeline Setup
             status_db[task_id] = {
@@ -546,6 +551,7 @@ async def translation_worker():
 
             stage_times["total"] = round(time.time() - t_pipeline0, 1)
             total_metrics["pipeline_mode"] = pipeline_mode
+            total_metrics["extract_devices"] = {k: v for k, v in extract_devices.items() if not k.startswith("_")}
             total_metrics["stage_times"] = stage_times
             logger.info(f"[Timing] mode={pipeline_mode} pages={total_selected_pages} {stage_times}")
 
@@ -990,7 +996,7 @@ async def get_translation_status_stream(task_id: str):
                 last_percent = percent
                 
                 if status == "complete":
-                    yield f"event: complete\ndata: {json.dumps({'download_url': task_status.get('download_url'), 'download_zip_url': task_status.get('download_zip_url'), 'download_doc_url': task_status.get('download_doc_url'), 'download_json_url': task_status.get('download_json_url'), 'warning': task_status.get('warning', ''), 'failed_pages': task_status.get('failed_pages', []), 'stage_times': (task_status.get('metrics') or {}).get('stage_times'), 'pipeline_mode': (task_status.get('metrics') or {}).get('pipeline_mode')}, ensure_ascii=False)}\n\n"
+                    yield f"event: complete\ndata: {json.dumps({'download_url': task_status.get('download_url'), 'download_zip_url': task_status.get('download_zip_url'), 'download_doc_url': task_status.get('download_doc_url'), 'download_json_url': task_status.get('download_json_url'), 'warning': task_status.get('warning', ''), 'failed_pages': task_status.get('failed_pages', []), 'stage_times': (task_status.get('metrics') or {}).get('stage_times'), 'pipeline_mode': (task_status.get('metrics') or {}).get('pipeline_mode'), 'extract_devices': (task_status.get('metrics') or {}).get('extract_devices')}, ensure_ascii=False)}\n\n"
                     break
                 elif status == "failed":
                     yield f"event: error\ndata: {json.dumps({'message': task_status.get('message', 'Processing pipeline crashed.')})}\n\n"

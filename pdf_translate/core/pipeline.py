@@ -64,6 +64,8 @@ async def _run_pipeline_async(pdf_path, page_range_str, source_lang, target_lang
         
         # 1. Initialize models
         extractor = PDFLayoutExtractor(pdf_path)
+        from core.extractor import prepare_extract_devices
+        prepare_extract_devices()
         translation_engine = HighPerformanceTranslationEngine()
         
         output_pdf_path = pdf_path.replace('.pdf', '_translated.pdf')
