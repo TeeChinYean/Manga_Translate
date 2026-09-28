@@ -131,10 +131,21 @@ def parse_page_range(range_str: str, max_pages: int) -> set:
     return pages if pages else set(range(1, max_pages + 1))
 
 
-PIPELINE_MODES = ("stream", "overlap", "serial")
+PIPELINE_MODES = ("auto", "stream", "overlap", "serial")
+# 'auto': serial for short jobs, overlap for long ones. Measured 2026-09-28 on 第5巻:
+#   10 pages: serial 95.5s (translation ~10s, nothing to hide)
+#   50 pages: overlap 472.1s vs serial 566.5s (overlap hides ~145s of LLM time behind extraction)
+AUTO_OVERLAP_MIN_PAGES = max(1, int(os.getenv("AUTO_OVERLAP_MIN_PAGES", "20")))
+
+
+def resolve_pipeline_mode(mode: str, n_pages: int) -> str:
+    """Map 'auto' (or an unknown value) to a concrete mode for this job size."""
+    if mode not in PIPELINE_MODES or mode == "auto":
+        return "overlap" if n_pages >= AUTO_OVERLAP_MIN_PAGES else "serial"
+    return mode
 # Measured 2026-09-28 (第5巻 p1-10, RTX 3050 4GB + 12 threads): serial 109.2s vs stream 129.7s,
 # and serial translates the whole range with one large-context LLM call.
-DEFAULT_PIPELINE_MODE = os.getenv("PIPELINE_MODE", "serial")
+DEFAULT_PIPELINE_MODE = os.getenv("PIPELINE_MODE", "auto")
 DEFAULT_CONTEXT_CHUNK = 36  # Japanese lines per LLM call in 'serial' mode
 RENDER_CONCURRENCY = max(1, int(os.getenv("RENDER_CONCURRENCY", "3")))  # pages rendered at once (all modes)
 # stream/overlap: translate once this many lines are buffered (0 = old per-page behaviour)
@@ -580,9 +591,8 @@ async def translation_worker():
 
                 await asyncio.gather(*[_render_one(p) for p in to_render])
 
-            pipeline_mode = task.get("pipeline_mode", DEFAULT_PIPELINE_MODE)
-            if pipeline_mode not in PIPELINE_MODES:
-                pipeline_mode = DEFAULT_PIPELINE_MODE
+            requested_mode = task.get("pipeline_mode", DEFAULT_PIPELINE_MODE)
+            pipeline_mode = resolve_pipeline_mode(requested_mode, total_selected_pages)
             context_chunk_size = max(1, int(task.get("context_chunk_size", DEFAULT_CONTEXT_CHUNK)))
             # stream / overlap: buffer pages until this many lines, then translate them together
             stream_batch_lines = max(0, int(task.get("translate_batch_lines", DEFAULT_STREAM_BATCH_LINES)))
@@ -620,7 +630,7 @@ async def translation_worker():
                 raise Exception(f"流水线处理异常: {ex}")
 
             stage_times["total"] = round(time.time() - t_pipeline0, 1)
-            total_metrics["pipeline_mode"] = pipeline_mode
+            total_metrics["pipeline_mode"] = pipeline_mode if requested_mode == pipeline_mode else f"{requested_mode}->{pipeline_mode}"
             total_metrics["extract_devices"] = {k: v for k, v in extract_devices.items() if not k.startswith("_")}
             total_metrics["stage_times"] = stage_times
             total_metrics["render_breakdown"] = get_render_stats()

@@ -1068,7 +1068,8 @@
                 <div class="control-group">
                     <label for="pipelineMode">流水线模式 (Pipeline Mode)</label>
                     <select id="pipelineMode">
-                        <option value="serial" selected>串行（默认，最快）：提取 → 翻译(大上下文) → 重绘</option>
+                        <option value="auto" selected>自动（默认）：少于 20 页用串行，20 页以上用提取+翻译并行</option>
+                        <option value="serial">串行：提取 → 翻译(大上下文) → 重绘</option>
                         <option value="stream">全并发：提取 / 翻译 / 重绘同时进行</option>
                         <option value="overlap">提取+翻译 → 卸载 OCR → 重绘+翻译</option>
                     </select>

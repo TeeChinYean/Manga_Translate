@@ -93,3 +93,11 @@
 - 三种模式都只调用了 1 次 LLM（26 句不到攒批阈值 36 行，所以一次翻完），0 失败。
 - 差距主要在重绘：stream 和 overlap 的重绘 worker 只有一个。所以 `run_three_stage_pipeline` 新增了 `render_concurrency`，main 对所有模式都传 `RENDER_CONCURRENCY`（默认 3）。预计 overlap 能接近 serial。
 - 默认模式保持 serial。
+
+### [全局] 默认模式改为 auto（按页数自动选择）
+- 实测（2026-09-28，第5巻 1-50 页，用户机器）：
+  - overlap 472.1s：提取 331.0s（LLM 同时在跑，所以提取慢一些），翻译在提取结束后 15s 就完成，重绘 138s。
+  - serial 566.5s：提取 281.0s，之后翻译 147s，重绘 136s。跑 serial 时用户同时在用 Claude 改代码，结果可能偏慢。
+  - 结论：页数一多，翻译时间（约 145s LLM）就值得藏到提取后面同时进行；只有 10 页时翻译约 10s，没什么可藏的，serial 更快（95.5s）。两种模式的重绘时间现在基本一样（渲染并发已修）。
+- 改动：`PIPELINE_MODES` 加入 `auto`，`resolve_pipeline_mode()`：少于 `AUTO_OVERLAP_MIN_PAGES`（默认 20，可用环境变量调整）页用 serial，否则用 overlap。默认 `PIPELINE_MODE=auto`，前端下拉框默认选中"自动"。完成信息里会显示成类似 `auto->overlap`。
+- 相关测试：`tests/test_low_bugs.py::test_auto_mode_*`。用 stub 依赖跑：8 页 → serial 流程；把阈值设为 5 → overlap 流程。
