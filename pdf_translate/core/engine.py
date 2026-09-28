@@ -191,45 +191,98 @@ def _call_turbovec_llm(payload: dict, timeout: float = 15.0, tag: str = "llm"):
     return data
 
 
+def _stream_chat(url: str, payload: dict, headers: dict, timeout: float):
+    """
+    POST a streaming chat completion and assemble it into a normal (non-stream) response.
+
+    Why streaming: llama-server runs one slot (-np 1). With a plain request, giving up on
+    the client side does NOT stop generation, so every later request queues behind the
+    runaway. When a stream is closed the server aborts the generation and frees the slot.
+    `timeout` is a total deadline; on expiry the stream is closed and TimeoutError raised.
+    Returns (status_code, data_or_None).
+    """
+    body = dict(payload, stream=True, stream_options={"include_usage": True})
+    deadline = time.time() + timeout
+    parts, usage, n_chunks, finish = [], None, 0, None
+    read_timeout = max(1.0, min(30.0, timeout))
+    with httpx.stream("POST", url, json=body, headers=headers,
+                      timeout=httpx.Timeout(read_timeout, connect=5.0)) as r:
+        if r.status_code != 200:
+            try:
+                r.read()
+                text = r.text[:100]
+            except Exception:
+                text = ""
+            logger.warning(f"[Turbovec LLM] HTTP {r.status_code} from {url}: {text}")
+            return r.status_code, None
+        for line in r.iter_lines():
+            if time.time() > deadline:
+                raise TimeoutError(f"LLM stream exceeded {timeout:.0f}s (closed, server slot freed)")
+            if not line or not line.startswith("data:"):
+                continue
+            chunk = line[5:].strip()
+            if chunk == "[DONE]":
+                break
+            try:
+                obj = json.loads(chunk)
+            except ValueError:
+                continue
+            if obj.get("usage"):
+                usage = obj["usage"]
+            for ch in obj.get("choices") or []:
+                delta = ch.get("delta") or {}
+                if delta.get("content"):
+                    parts.append(delta["content"])
+                    n_chunks += 1
+                if ch.get("finish_reason"):
+                    finish = ch["finish_reason"]
+    return 200, {
+        "choices": [{"message": {"role": "assistant", "content": "".join(parts)}, "finish_reason": finish}],
+        "usage": usage or {"completion_tokens": n_chunks},
+    }
+
+
+def _is_timeout(e: BaseException) -> bool:
+    return isinstance(e, TimeoutError) or isinstance(e, getattr(httpx, "TimeoutException", ()))
+
+
 def _call_turbovec_llm_raw(payload: dict, timeout: float = 15.0):
     """
     Calls Turbovec OpenAI-compatible API endpoint (direct llama-server 18089 or Turbovec gateway 18088).
-    Automatically injects target model name, auth header, and provides connection resilience and retries.
+    Streams the response (see _stream_chat) so a timeout really frees the single server slot.
+    Retries only connection-level failures; timeouts and HTTP 400 are returned immediately.
     """
     if "model" not in payload or not payload["model"]:
         payload["model"] = TURBOVEC_MODEL
-        
+
     headers = {}
     key = _get_llama_api_key()
     if key:
         headers["Authorization"] = f"Bearer {key}"
-        
+
     # Prioritize 18089 direct llama-server for speed, fallback to 18088 gateway
     endpoints = [LLAMA_SERVER_DIRECT_URL, TURBOVEC_API_URL]
-    
+
+    last_err = None
     for attempt in range(1, 4):
         last_err = None
         for url in endpoints:
             try:
-                r = httpx.post(url, json=payload, headers=headers, timeout=timeout)
-                _TLS.last_status = r.status_code
-                if r.status_code == 200:
-                    return r.json()
-                else:
-                    logger.warning(f"[Turbovec LLM] HTTP {r.status_code} from {url}: {r.text[:100]}")
-                    if r.status_code == 400:
-                        # Bad request (e.g. unsupported response_format): retrying will not help
-                        return None
+                status, data = _stream_chat(url, payload, headers, timeout)
+                _TLS.last_status = status
+                if status == 200:
+                    return data
+                if status == 400:
+                    # Bad request (e.g. unsupported response_format): retrying will not help
+                    return None
             except Exception as e:
                 last_err = e
-                if isinstance(e, getattr(httpx, "TimeoutException", ())):
-                    # llama-server has a single slot (-np 1) and keeps generating after we give up;
-                    # re-sending (to either endpoint) would just queue behind the runaway request.
+                if _is_timeout(e):
                     _TLS.last_status = "timeout"
-                    logger.warning(f"[Turbovec LLM] timeout after {timeout:.0f}s on {url}; not retrying")
+                    logger.warning(f"[Turbovec LLM] {e} on {url}; not retrying")
                     return None
                 continue
-                
+
         # If connection refused on attempt 1, auto-heal and boot the LLM server
         if attempt == 1 and last_err and "10061" in str(last_err):
             logger.info("⚡ [Turbovec LLM] Target machine refused connection. Attempting auto-boot...")
@@ -237,7 +290,7 @@ def _call_turbovec_llm_raw(payload: dict, timeout: float = 15.0):
         elif attempt < 3:
             time.sleep(1.0)
             continue
-            
+
     logger.warning(f"[Turbovec LLM] All endpoints failed: {last_err}")
     return None
 
@@ -735,7 +788,6 @@ def _extract_proper_nouns_from_batch(blocks: list, results: list):
 
 
 MIN_CONTEXT_CHUNK = 12
-LINE_MAX_CHARS = 80          # schema cap per translated line (manga lines are short)
 _JSON_SCHEMA_OK = True       # flips to False if the server rejects json_schema (HTTP 400)
 
 
@@ -755,8 +807,8 @@ def _disable_json_schema():
 
 def _batch_response_format(ids) -> dict:
     """
-    Grammar-bounded JSON: exactly these keys, string values capped at LINE_MAX_CHARS.
-    llama.cpp's schema grammar also bounds whitespace, so the reply cannot run away.
+    Grammar-bounded JSON: exactly these keys, string values, no extra properties.
+    llama.cpp's schema grammar also bounds whitespace between tokens.
     """
     if not _JSON_SCHEMA_OK:
         return {"type": "json_object"}
@@ -768,7 +820,10 @@ def _batch_response_format(ids) -> dict:
             "strict": True,
             "schema": {
                 "type": "object",
-                "properties": {k: {"type": "string", "maxLength": LINE_MAX_CHARS} for k in keys},
+                # No maxLength: a {0,80} repetition per key blows up the grammar and made
+                # 15-30 key batches crawl past their timeout (serial mode). Length is bounded
+                # by max_tokens + streaming timeout instead.
+                "properties": {k: {"type": "string"} for k in keys},
                 "required": keys,
                 "additionalProperties": False,
             },
