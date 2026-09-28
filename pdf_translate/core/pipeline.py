@@ -348,7 +348,12 @@ async def _run_pipeline_async(pdf_path, page_range_str, source_lang, target_lang
         except Exception:
             pass
             
-        _safe_callback(100, "翻译完成", "complete")
+        failed = sorted(extractor.failed_pages)
+        if failed:
+            nums = ", ".join(str(p) for p, _ in failed)
+            _safe_callback(100, f"翻译完成（{len(failed)} 页提取失败，未翻译: 第 {nums} 页）", "complete")
+        else:
+            _safe_callback(100, "翻译完成", "complete")
         
     except Exception as e:
         import traceback

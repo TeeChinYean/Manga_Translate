@@ -365,6 +365,8 @@ class PDFLayoutExtractor:
         self.doc = fitz.open(self.pdf_path)
         self.num_pages = len(self.doc)
         self.doc.close()
+        # Pages whose extraction raised: list of (page_num, error message). See BUG.md B4.
+        self.failed_pages = []
 
     def extract_layout(self, page_range_list=None, source_lang="Japanese"):
         """
@@ -378,16 +380,18 @@ class PDFLayoutExtractor:
         
         # CPU Multi-threading executor (limit max_workers to prevent RAM/VRAM overload)
         with concurrent.futures.ThreadPoolExecutor(max_workers=4) as executor:
-            futures = [
-                executor.submit(self._extract_single_page, self.pdf_path, page_num, source_lang)
+            futures = {
+                executor.submit(self._extract_single_page, self.pdf_path, page_num, source_lang): page_num
                 for page_num in pages_to_extract
-            ]
+            }
             for future in concurrent.futures.as_completed(futures):
+                page_num = futures[future]
                 try:
                     result = future.result()
                     structured_data.append(result)
                 except Exception as e:
-                    logger.error(f"Failed extracting page layout: {e}")
+                    logger.error(f"Failed extracting layout of page {page_num}: {e}")
+                    self.failed_pages.append((page_num, str(e)))
                     
         # Retain original sequential reading order
         structured_data.sort(key=lambda x: x["page_num"])
@@ -413,17 +417,24 @@ class PDFLayoutExtractor:
             chunk_size = 4
             for i in range(0, len(pages_to_extract), chunk_size):
                 chunk_pages = pages_to_extract[i:i+chunk_size]
-                futures = [
-                    loop.run_in_executor(executor, self._extract_single_page, self.pdf_path, page_num, source_lang)
-                    for page_num in chunk_pages
-                ]
-                
-                for coro in asyncio.as_completed(futures):
+
+                async def _extract(page_num):
                     try:
-                        result = await coro
-                        yield result
+                        res = await loop.run_in_executor(
+                            executor, self._extract_single_page, self.pdf_path, page_num, source_lang
+                        )
+                        return page_num, res, None
                     except Exception as e:
-                        logger.error(f"Failed extracting page layout: {e}")
+                        return page_num, None, e
+
+                for coro in asyncio.as_completed([_extract(p) for p in chunk_pages]):
+                    page_num, result, err = await coro
+                    if err is not None:
+                        # Keep going, but record the page so the caller can report it (BUG.md B4)
+                        logger.error(f"Failed extracting layout of page {page_num}: {err}")
+                        self.failed_pages.append((page_num, str(err)))
+                        continue
+                    yield result
  
     def _extract_single_page(self, pdf_path, page_num, source_lang="Japanese"):
         """
@@ -539,73 +550,89 @@ class PDFLayoutExtractor:
         block_id_counter = 0
         seen_texts = set()
         
-        # Primary OCR: PaddleOCR (RapidOCR ONNX), Secondary: MangaOCR / EasyOCR
+        # OCR engine order (BUG.md B7):
+        #   Japanese -> MangaOCR first (handles vertical text + kana); PaddleOCR only as fallback.
+        #   Others   -> PaddleOCR (RapidOCR ONNX) first.
+        # RapidOCR's default PP-OCR model is Chinese/English: on vertical Japanese it returns
+        # non-empty but wrong text (kana dropped, columns interleaved), so it must not be primary.
         paddle_ocr = _get_paddle_ocr()
         mocr = None
         if source_lang == "Japanese":
             mocr = _get_manga_ocr()
-        
+            if mocr is None:
+                logger.warning("[OCR] MangaOCR unavailable; falling back to PaddleOCR for Japanese (accuracy will drop).")
+
+        def _crop(x0, y0, x1, y1, pad):
+            cx0 = max(0, x0 - pad)
+            cy0 = max(0, y0 - pad)
+            cx1 = min(img_np.shape[1], x1 + pad)
+            cy1 = min(img_np.shape[0], y1 + pad)
+            if (cx1 - cx0) < 8 or (cy1 - cy0) < 8:
+                return None
+            return img_np[cy0:cy1, cx0:cx1]
+
+        def _ocr_paddle(x0, y0, x1, y1):
+            if paddle_ocr is None:
+                return ""
+            try:
+                crop_np = _crop(x0, y0, x1, y1, 6)
+                if crop_np is None:
+                    return ""
+                paddle_res, _ = paddle_ocr(crop_np)
+                if paddle_res:
+                    text = "".join(line[1].strip() for line in paddle_res if line and len(line) > 1 and line[1])
+                    return text.strip()
+            except Exception as pe:
+                logger.warning(f"[PaddleOCR] Recognition failed on crop: {pe}")
+            return ""
+
+        def _ocr_manga(x0, y0, x1, y1):
+            if mocr is None:
+                return ""
+            try:
+                crop_np = _crop(x0, y0, x1, y1, 8)
+                if crop_np is None or crop_np.size == 0:
+                    return ""
+                crop_img = Image.fromarray(crop_np)
+                if crop_img.width < 16 or crop_img.height < 16:
+                    crop_img = crop_img.resize(
+                        (max(crop_img.width, 32), max(crop_img.height, 32)),
+                        Image.LANCZOS
+                    )
+                with _MANGA_OCR_LOCK:
+                    import torch
+                    with torch.inference_mode():
+                        try:
+                            x = mocr._preprocess(crop_img)
+                            tokens = mocr.model.generate(x[None].to(mocr.model.device), max_new_tokens=64, max_length=None)[0].cpu()
+                            text = mocr.tokenizer.decode(tokens, skip_special_tokens=True)
+                            from manga_ocr.ocr import post_process
+                            text = post_process(text)
+                        except Exception:
+                            text = mocr(crop_img)
+                return (text or "").strip()
+            except Exception as e:
+                logger.error(f"[!] MangaOCR failed on crop: {e}")
+            return ""
+
+        if mocr is not None:
+            ocr_chain = [(_ocr_manga, "MangaOCR (ViT)"), (_ocr_paddle, "PaddleOCR (PP-OCRv4 Fallback)")]
+        else:
+            ocr_chain = [(_ocr_paddle, "PaddleOCR (PP-OCRv4)")]
+
         # 3. Process each unified speech bubble box
         for (x0, y0, x1, y1) in merged_boxes:
             if x1 <= x0 or y1 <= y0:
                 continue
-                
-            raw_text = ""
-            ocr_engine_name = "PaddleOCR (PP-OCRv4)"
-            
-            # --- 3a. Primary: PaddleOCR (PP-OCRv4 ONNX) ---
-            if paddle_ocr is not None:
-                try:
-                    pad = 6
-                    cx0 = max(0, x0 - pad)
-                    cy0 = max(0, y0 - pad)
-                    cx1 = min(img_np.shape[1], x1 + pad)
-                    cy1 = min(img_np.shape[0], y1 + pad)
-                    if (cx1 - cx0) >= 8 and (cy1 - cy0) >= 8:
-                        crop_np = img_np[cy0:cy1, cx0:cx1]
-                        paddle_res, _ = paddle_ocr(crop_np)
-                        if paddle_res:
-                            raw_text = "".join(line[1].strip() for line in paddle_res if line and len(line) > 1 and line[1])
-                            if raw_text:
-                                raw_text = raw_text.strip()
-                                logger.info(f"[PaddleOCR] Page {page_num}: detected '{raw_text}'")
-                except Exception as pe:
-                    logger.warning(f"[PaddleOCR] Recognition failed on crop: {pe}")
 
-            # --- 3b. Secondary Fallback: MangaOCR (for Japanese if PaddleOCR missed) ---
-            if not raw_text and source_lang == "Japanese" and mocr is not None:
-                try:
-                    pad = 8
-                    cx0 = max(0, x0 - pad)
-                    cy0 = max(0, y0 - pad)
-                    cx1 = min(img_np.shape[1], x1 + pad)
-                    cy1 = min(img_np.shape[0], y1 + pad)
-                    if (cx1 - cx0) >= 8 and (cy1 - cy0) >= 8:
-                        crop_np = img_np[cy0:cy1, cx0:cx1]
-                        if crop_np.size > 0:
-                            crop_img = Image.fromarray(crop_np)
-                            if crop_img.width < 16 or crop_img.height < 16:
-                                crop_img = crop_img.resize(
-                                    (max(crop_img.width, 32), max(crop_img.height, 32)),
-                                    Image.LANCZOS
-                                )
-                            with _MANGA_OCR_LOCK:
-                                import torch
-                                with torch.inference_mode():
-                                    try:
-                                        x = mocr._preprocess(crop_img)
-                                        tokens = mocr.model.generate(x[None].to(mocr.model.device), max_new_tokens=64, max_length=None)[0].cpu()
-                                        raw_text = mocr.tokenizer.decode(tokens, skip_special_tokens=True)
-                                        from manga_ocr.ocr import post_process
-                                        raw_text = post_process(raw_text)
-                                    except Exception:
-                                        raw_text = mocr(crop_img)
-                            if raw_text:
-                                raw_text = raw_text.strip()
-                                ocr_engine_name = "MangaOCR (ViT Fallback)"
-                                logger.info(f"[MangaOCR Fallback] Page {page_num}: detected '{raw_text}'")
-                except Exception as e:
-                    logger.error(f"[!] MangaOCR failed on crop: {e}")
+            raw_text = ""
+            ocr_engine_name = ocr_chain[0][1]
+            for ocr_fn, engine_name in ocr_chain:
+                raw_text = ocr_fn(x0, y0, x1, y1)
+                if raw_text:
+                    ocr_engine_name = engine_name
+                    logger.info(f"[{engine_name}] Page {page_num}: detected '{raw_text}'")
+                    break
 
             # --- 3c. Tertiary Fallback: EasyOCR text matching ---
             if not raw_text and raw_box_to_text:

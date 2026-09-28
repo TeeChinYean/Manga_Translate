@@ -67,6 +67,13 @@ _FONT_PATHS = [
 ]
 _FONT_PATH = next((p for p in _FONT_PATHS if os.path.exists(p)), None)
 
+# FreeType font objects are cached and shared; serialize text drawing across threads.
+_DRAW_LOCK = threading.Lock()
+
+
+def _save_jpeg(img: Image.Image, path: str):
+    img.save(path, format="JPEG", quality=80, optimize=True)
+
 def unload_models():
     """Cleans up memory/cache if needed."""
     global _LAMA_SESSION
@@ -223,10 +230,95 @@ def _fast_telea_inpaint(img_pil: Image.Image, mask_pil: Image.Image) -> Image.Im
     return Image.fromarray(inpainted_rgb)
 
 
+LAMA_SIZE = 512          # fixed input size of lama.onnx
+LAMA_CONTEXT_PAD = 48   # surrounding context (px) given to LaMa around each masked region
+LAMA_MERGE_PX = 24      # strokes closer than this are treated as one region
+LAMA_MAX_GROUP = 768    # max side of a merged crop; >512 is downscaled uniformly (<=1.5x). Fewer LaMa calls.
+
+
+def _lama_regions(mask_bin: np.ndarray, img_w: int, img_h: int) -> list:
+    """
+    Group masked pixels into crop boxes (x0, y0, x1, y1) for LaMa.
+    Nearby regions are greedily merged while the merged box still fits in
+    LAMA_MAX_GROUP (<=1.5x uniform downscale); larger regions stay alone and
+    are downscaled uniformly (aspect ratio preserved). Each LaMa call costs
+    ~5-10s on CPU, so fewer calls matter (BUG.md B12).
+    """
+    kernel = cv2.getStructuringElement(cv2.MORPH_RECT, (LAMA_MERGE_PX, LAMA_MERGE_PX))
+    merged = cv2.dilate((mask_bin > 0).astype(np.uint8), kernel)
+    n, _, stats, _ = cv2.connectedComponentsWithStats(merged, connectivity=8)
+
+    boxes = []
+    for i in range(1, n):
+        x, y, w, h = int(stats[i, 0]), int(stats[i, 1]), int(stats[i, 2]), int(stats[i, 3])
+        boxes.append((
+            max(0, x - LAMA_CONTEXT_PAD), max(0, y - LAMA_CONTEXT_PAD),
+            min(img_w, x + w + LAMA_CONTEXT_PAD), min(img_h, y + h + LAMA_CONTEXT_PAD),
+        ))
+    boxes.sort(key=lambda b: (b[1], b[0]))
+
+    groups = []
+    for b in boxes:
+        for gi, g in enumerate(groups):
+            u = (min(g[0], b[0]), min(g[1], b[1]), max(g[2], b[2]), max(g[3], b[3]))
+            if max(u[2] - u[0], u[3] - u[1]) <= LAMA_MAX_GROUP:
+                groups[gi] = u
+                break
+        else:
+            groups.append(b)
+    return groups
+
+
+def _expand_to_window(x0: int, y0: int, x1: int, y1: int, img_w: int, img_h: int) -> tuple:
+    """
+    Grow a box smaller than LAMA_SIZE into a LAMA_SIZE window centered on it
+    (clamped to the image), so LaMa runs at native resolution with more context.
+    """
+    def grow(a0, a1, limit):
+        size = min(LAMA_SIZE, limit)
+        if a1 - a0 >= size:
+            return a0, a1
+        c = (a0 + a1) // 2
+        n0 = max(0, min(c - size // 2, limit - size))
+        return n0, n0 + size
+    x0, x1 = grow(x0, x1, img_w)
+    y0, y1 = grow(y0, y1, img_h)
+    return x0, y0, x1, y1
+
+
+def _lama_inpaint_crop(session, crop_rgb: np.ndarray, crop_mask: np.ndarray) -> np.ndarray:
+    """Run LaMa on one crop: pad to square (reflect), uniform resize to LAMA_SIZE, then undo."""
+    h, w = crop_rgb.shape[:2]
+    side = max(h, w)
+    pad_b, pad_r = side - h, side - w
+    sq_img = cv2.copyMakeBorder(crop_rgb, 0, pad_b, 0, pad_r, cv2.BORDER_REFLECT_101) if (pad_b or pad_r) else crop_rgb
+    sq_mask = cv2.copyMakeBorder(crop_mask, 0, pad_b, 0, pad_r, cv2.BORDER_CONSTANT, value=0) if (pad_b or pad_r) else crop_mask
+
+    if side != LAMA_SIZE:
+        interp = cv2.INTER_AREA if side > LAMA_SIZE else cv2.INTER_CUBIC
+        img_in = cv2.resize(sq_img, (LAMA_SIZE, LAMA_SIZE), interpolation=interp)
+        mask_in = cv2.resize(sq_mask, (LAMA_SIZE, LAMA_SIZE), interpolation=cv2.INTER_NEAREST)
+    else:
+        img_in, mask_in = sq_img, sq_mask
+    mask_in = cv2.dilate(mask_in, cv2.getStructuringElement(cv2.MORPH_RECT, (2, 2)), iterations=1)
+
+    lama_img_in = (img_in.astype(np.float32) / 255.0).transpose((2, 0, 1))[None, ...]
+    lama_mask_in = (mask_in > 0).astype(np.float32)[None, None, ...]
+    with _LAMA_SESSION_LOCK:
+        lama_out = session.run(None, {'l_image_': lama_img_in, 'l_mask_': lama_mask_in})[0]
+    out = np.clip(lama_out[0].transpose((1, 2, 0)), 0, 255).astype(np.uint8)
+
+    if side != LAMA_SIZE:
+        interp = cv2.INTER_CUBIC if side > LAMA_SIZE else cv2.INTER_AREA
+        out = cv2.resize(out, (side, side), interpolation=interp)
+    return out[:h, :w]
+
+
 def _lama_inpaint(img_pil: Image.Image, mask_pil: Image.Image) -> Image.Image:
     """
     High-fidelity neural inpainting using LaMa ONNX (Fast Fourier Convolutions).
-    Reconstructs complex manga screentones, halftones, lineart, and textures.
+    Runs per masked region crop (not the whole page), so small bubbles are
+    processed at native resolution without aspect distortion (BUG.md B2).
     Falls back gracefully to OpenCV Telea if LaMa is unavailable.
     """
     session = _get_lama_session()
@@ -242,32 +334,48 @@ def _lama_inpaint(img_pil: Image.Image, mask_pil: Image.Image) -> Image.Image:
             return img_pil
 
         h, w = img_np.shape[:2]
-
-        # Downsample to 512x512 for LaMa inference
-        img_512 = cv2.resize(img_np, (512, 512), interpolation=cv2.INTER_AREA)
-        mask_512 = cv2.resize(mask_bin, (512, 512), interpolation=cv2.INTER_NEAREST)
-        mask_512 = cv2.dilate(mask_512, cv2.getStructuringElement(cv2.MORPH_RECT, (2, 2)), iterations=1)
-
-        lama_img_in = (img_512.astype(np.float32) / 255.0).transpose((2, 0, 1))[None, ...]
-        lama_mask_in = (mask_512 > 0).astype(np.float32)[None, None, ...]
-
-        with _LAMA_SESSION_LOCK:
-            lama_out = session.run(None, {'l_image_': lama_img_in, 'l_mask_': lama_mask_in})[0]
-
-        inpainted_512 = np.clip(lama_out[0].transpose((1, 2, 0)), 0, 255).astype(np.uint8)
-        inpainted_full = cv2.resize(inpainted_512, (w, h), interpolation=cv2.INTER_CUBIC)
-
-        # Blend: Only replace pixels covered by the mask!
-        # Background artwork and line art outside the mask remain 100% bit-exact original.
-        mask_binary = (mask_bin > 0)[:, :, None]
-        final_rgb = np.where(mask_binary, inpainted_full, img_np)
-        return Image.fromarray(final_rgb)
+        result = img_np.copy()
+        for (x0, y0, x1, y1) in _lama_regions(mask_bin, w, h):
+            x0, y0, x1, y1 = _expand_to_window(x0, y0, x1, y1, w, h)
+            crop_mask = mask_bin[y0:y1, x0:x1]
+            if not np.any(crop_mask):
+                continue
+            healed = _lama_inpaint_crop(session, result[y0:y1, x0:x1], crop_mask)
+            # Only replace masked pixels; everything else stays bit-exact original.
+            sel = crop_mask > 0
+            result[y0:y1, x0:x1][sel] = healed[sel]
+        return Image.fromarray(result)
     except Exception as e:
         logger.warning(f"[LaMa] Inference error, falling back to Telea: {e}")
         return _fast_telea_inpaint(img_pil, mask_pil)
 
 
-def _create_stroke_mask(crop_rgb: np.ndarray, ink_thresh: int = 95, dilate_iter: int = 2, max_stroke_ratio: float = 0.35) -> tuple:
+RING_PAD = 8             # px ring outside the text box used to judge the background
+RING_WHITE_MIN = 0.92    # clean bubble: >=92% of ring pixels are white ...
+RING_MID_MAX = 0.08      # ... and <=8% are mid-tone (screentone / shading)
+
+
+def _ring_is_textured(gray: np.ndarray, x0: int, y0: int, x1: int, y1: int, pad: int = RING_PAD) -> bool:
+    """
+    Decide Telea vs LaMa from a thin ring *outside* the text box (BUG.md B11/B12).
+    Text boxes are tight, so the box border itself crosses glyph strokes and looks
+    "textured" even inside a clean white bubble; the outer ring does not.
+    """
+    H, W = gray.shape[:2]
+    X0, Y0, X1, Y1 = max(0, x0 - pad), max(0, y0 - pad), min(W, x1 + pad), min(H, y1 + pad)
+    region = gray[Y0:Y1, X0:X1]
+    ring = np.ones(region.shape, dtype=bool)
+    ring[y0 - Y0:y1 - Y0, x0 - X0:x1 - X0] = False
+    vals = region[ring]
+    if vals.size < 16:
+        return True
+    white = float((vals >= 200).mean())
+    mid = float(((vals > 60) & (vals < 200)).mean())
+    return white < RING_WHITE_MIN or mid > RING_MID_MAX
+
+
+def _create_stroke_mask(crop_rgb: np.ndarray, ink_thresh: int = 95, dilate_iter: int = 2, max_stroke_ratio: float = 0.35,
+                        textured: bool = None) -> tuple:
     """
     Extracts precise text stroke contours (glyph pixels) instead of a blunt rectangle.
     Suppresses manga halftone/screentone noise and completely eliminates ghost character edges.
@@ -279,7 +387,7 @@ def _create_stroke_mask(crop_rgb: np.ndarray, ink_thresh: int = 95, dilate_iter:
     """
     h, w = crop_rgb.shape[:2]
     if h < 4 or w < 4:
-        return np.zeros((h, w), dtype=np.uint8), 255.0
+        return np.zeros((h, w), dtype=np.uint8), 255.0, False
         
     gray = cv2.cvtColor(crop_rgb, cv2.COLOR_RGB2GRAY)
     
@@ -289,6 +397,9 @@ def _create_stroke_mask(crop_rgb: np.ndarray, ink_thresh: int = 95, dilate_iter:
     bg_std = float(np.std(border))
     # True if the border region is dark or has screentone/halftone/texture variance
     is_textured = (bg_val < 170) or (bg_std > 22.0)
+    if textured is not None:
+        # Caller measured the surroundings of the box (see _ring_is_textured); trust it.
+        is_textured = bool(textured)
     
     # 2. Suppress halftone screentone dots and mosquito noise
     blurred = cv2.GaussianBlur(gray, (3, 3), 0)
@@ -329,7 +440,32 @@ def _create_stroke_mask(crop_rgb: np.ndarray, ink_thresh: int = 95, dilate_iter:
         stroke_ratio = np.count_nonzero(dilated) / float(h * w)
 
     final_mask = dilated if (0.005 <= stroke_ratio <= 0.85) else mask
+    if is_textured:
+        final_mask = _add_outline_halo(final_mask, blurred, glyph_is_dark=(bg_val > 90))
     return final_mask, bg_val, is_textured
+
+
+HALO_LIGHT_MIN = 180   # halo pixels around dark glyphs must be at least this bright
+HALO_DARK_MAX = 75     # halo pixels around light glyphs must be at most this dark
+
+
+def _add_outline_halo(glyph_mask: np.ndarray, gray: np.ndarray, glyph_is_dark: bool) -> np.ndarray:
+    """
+    Outlined lettering over artwork (e.g. black glyphs with a thick white rim, or
+    white glyphs with a black rim) leaves the rim behind when only the glyph core is
+    masked; the inpainter then redraws the glyph from the rim silhouette (BUG.md B11).
+    Add the opposite-polarity rim that directly surrounds the glyph strokes.
+    """
+    h, w = glyph_mask.shape[:2]
+    if not np.any(glyph_mask):
+        return glyph_mask
+    radius = int(np.clip(round(0.06 * min(h, w)), 3, 10))
+    ring_kernel = cv2.getStructuringElement(cv2.MORPH_ELLIPSE, (2 * radius + 1, 2 * radius + 1))
+    near_glyph = cv2.dilate(glyph_mask, ring_kernel) > 0
+    rim_color = (gray >= HALO_LIGHT_MIN) if glyph_is_dark else (gray <= HALO_DARK_MAX)
+    halo = (near_glyph & rim_color).astype(np.uint8) * 255
+    combined = cv2.bitwise_or(glyph_mask, halo)
+    return cv2.dilate(combined, cv2.getStructuringElement(cv2.MORPH_ELLIPSE, (3, 3)), iterations=1)
 
 
 # ── Main Renderer Class ────────────────────────────────────────────────────────
@@ -344,28 +480,31 @@ class PDFLayoutRenderer:
         self.max_stroke_ratio = float(max_stroke_ratio)
         self.font_scale = float(font_scale)
 
-    async def render_single_page_to_temp(self, page_data, src_page, translated_text_map, temp_dir, sem):
-        """
-        Renders a single page using high-fidelity inpainting and CJK text layout, saving it to a temp JPEG file.
-        Returns the path to the temp JPEG file.
-        """
-        page_num = page_data["page_num"]
-        TARGET_HEIGHT = 1600.0
-        SCALE = min(2.0, TARGET_HEIGHT / max(1.0, float(src_page.rect.height)))
-        
-        # 1. Render page to image
-        mat = fitz.Matrix(SCALE, SCALE)
-        pix = src_page.get_pixmap(matrix=mat, alpha=False)
-        img = Image.frombytes("RGB", [pix.width, pix.height], pix.samples)
+    # ── Page rendering ──────────────────────────────────────────────────────
+    # Heavy CPU work (mask building, Telea, text drawing, JPEG encode) runs in worker
+    # threads so the event loop (SSE progress, extraction/translation stages) stays
+    # responsive (BUG.md B3). Only rasterization stays on the calling thread because
+    # the fitz.Page / Document is shared and PyMuPDF is not thread-safe.
 
-        # 2. Build precision mask and separate clean bubbles vs textured backgrounds
+    @staticmethod
+    def _rasterize(src_page):
+        TARGET_HEIGHT = 1600.0
+        scale = min(2.0, TARGET_HEIGHT / max(1.0, float(src_page.rect.height)))
+        pix = src_page.get_pixmap(matrix=fitz.Matrix(scale, scale), alpha=False)
+        img = Image.frombytes("RGB", [pix.width, pix.height], pix.samples)
+        return img, scale
+
+    def _build_masks(self, img, scale, page_data, translated_text_map):
+        """Build Telea / LaMa masks and the list of blocks to draw (thread-safe, pure numpy)."""
+        page_num = page_data["page_num"]
         img_np = np.array(img)
+        gray_np = cv2.cvtColor(img_np, cv2.COLOR_RGB2GRAY)
         telea_mask_np = np.zeros((img.height, img.width), dtype=np.uint8)
         lama_mask_np = np.zeros((img.height, img.width), dtype=np.uint8)
         has_telea_masks = False
         has_lama_masks = False
-
         blocks_to_render = []
+
         for block in page_data["blocks"]:
             block_id = block["id"]
             translated = translated_text_map.get((page_num, block_id), "").strip()
@@ -373,11 +512,10 @@ class PDFLayoutRenderer:
                 continue
 
             bx0, by0, bx1, by1 = block["bbox"]
-            px0 = max(0, min(img.width - 1, int(bx0 * SCALE)))
-            py0 = max(0, min(img.height - 1, int(by0 * SCALE)))
-            px1 = max(0, min(img.width, int(bx1 * SCALE)))
-            py1 = max(0, min(img.height, int(by1 * SCALE)))
-            
+            px0 = max(0, min(img.width - 1, int(bx0 * scale)))
+            py0 = max(0, min(img.height - 1, int(by0 * scale)))
+            px1 = max(0, min(img.width, int(bx1 * scale)))
+            py1 = max(0, min(img.height, int(by1 * scale)))
             if px1 <= px0 or py1 <= py0:
                 continue
 
@@ -386,7 +524,8 @@ class PDFLayoutRenderer:
                 crop_rgb,
                 ink_thresh=self.ink_thresh,
                 dilate_iter=self.dilate_iter,
-                max_stroke_ratio=self.max_stroke_ratio
+                max_stroke_ratio=self.max_stroke_ratio,
+                textured=_ring_is_textured(gray_np, px0, py0, px1, py1)
             )
             stroke_mask = mask_res[0]
             bg_val = mask_res[1]
@@ -404,25 +543,15 @@ class PDFLayoutRenderer:
 
             blocks_to_render.append((px0, py0, px1, py1, translated, block))
 
-        temp_path = os.path.join(temp_dir, f"page_{page_num}.jpg")
+        return {
+            "blocks": blocks_to_render,
+            "telea_mask": telea_mask_np if has_telea_masks else None,
+            "lama_mask": lama_mask_np if has_lama_masks else None,
+        }
 
-        if not blocks_to_render:
-            img.save(temp_path, format="JPEG", quality=80, optimize=True)
-        else:
-            healed = img
-            if has_telea_masks:
-                # Fast Telea inpainting on clean bubbles (takes <15ms)
-                telea_mask_pil = Image.fromarray(telea_mask_np)
-                healed = _fast_telea_inpaint(healed, telea_mask_pil)
-                
-            if has_lama_masks:
-                # Neural LaMa inpainting only for textured / dark regions!
-                lama_mask_pil = Image.fromarray(lama_mask_np)
-                async with sem:
-                    # Run in thread pool so event loop is never frozen
-                    healed = await asyncio.to_thread(_lama_inpaint, healed, lama_mask_pil)
-
-            # Draw CJK text
+    def _draw_translations(self, healed, blocks_to_render):
+        """Draw translated CJK text into `healed` in place (shared by page render and preview)."""
+        with _DRAW_LOCK:
             draw = ImageDraw.Draw(healed)
             for (px0, py0, px1, py1, translated, block) in blocks_to_render:
                 bw = max(px1 - px0, 1)
@@ -454,15 +583,15 @@ class PDFLayoutRenderer:
                     except Exception:
                         lw = len(line) * fs * 0.9
                     curr_x = px0 + (bw - lw) / 2
-                    
+
                     if isinstance(fg, tuple) and len(fg) == 3:
                         fg_lum = 0.299 * fg[0] + 0.587 * fg[1] + 0.114 * fg[2]
                     else:
                         fg_lum = 255 if fg == "white" else 0
-                    
+
                     st_fill = "black" if fg_lum > 127 else "white"
                     st_width = max(1, int(fs / 16))
-                    
+
                     draw.text(
                         (curr_x, curr_y),
                         line,
@@ -472,9 +601,35 @@ class PDFLayoutRenderer:
                         stroke_fill=st_fill
                     )
                     curr_y += lh
-            
-            healed.save(temp_path, format="JPEG", quality=80, optimize=True)
-            
+        return healed
+
+    async def render_single_page_to_temp(self, page_data, src_page, translated_text_map, temp_dir, sem):
+        """
+        Renders a single page using high-fidelity inpainting and CJK text layout, saving it to a temp JPEG file.
+        Returns the path to the temp JPEG file.
+        """
+        page_num = page_data["page_num"]
+        img, scale = self._rasterize(src_page)
+        prep = await asyncio.to_thread(self._build_masks, img, scale, page_data, translated_text_map)
+        temp_path = os.path.join(temp_dir, f"page_{page_num}.jpg")
+
+        if not prep["blocks"]:
+            await asyncio.to_thread(_save_jpeg, img, temp_path)
+            return temp_path
+
+        healed = img
+        if prep["telea_mask"] is not None:
+            healed = await asyncio.to_thread(_fast_telea_inpaint, healed, Image.fromarray(prep["telea_mask"]))
+        if prep["lama_mask"] is not None:
+            # Neural LaMa inpainting only for textured / dark regions (bounded by sem)
+            async with sem:
+                healed = await asyncio.to_thread(_lama_inpaint, healed, Image.fromarray(prep["lama_mask"]))
+
+        def _finish():
+            self._draw_translations(healed, prep["blocks"])
+            _save_jpeg(healed, temp_path)
+
+        await asyncio.to_thread(_finish)
         return temp_path
 
     def render_preview_images(self, page_data, src_page, translated_text_map):
@@ -496,6 +651,7 @@ class PDFLayoutRenderer:
         pix = src_page.get_pixmap(matrix=mat, alpha=False)
         orig_img = Image.frombytes("RGB", [pix.width, pix.height], pix.samples)
         img_np = np.array(orig_img)
+        gray_np = cv2.cvtColor(img_np, cv2.COLOR_RGB2GRAY)
 
         # 2. Build precision mask
         mask_np = np.zeros((orig_img.height, orig_img.width), dtype=np.uint8)
@@ -525,7 +681,8 @@ class PDFLayoutRenderer:
                 crop_rgb,
                 ink_thresh=self.ink_thresh,
                 dilate_iter=self.dilate_iter,
-                max_stroke_ratio=self.max_stroke_ratio
+                max_stroke_ratio=self.max_stroke_ratio,
+                textured=_ring_is_textured(gray_np, px0, py0, px1, py1)
             )
             stroke_mask = mask_res[0]
             bg_val = mask_res[1]
@@ -550,55 +707,7 @@ class PDFLayoutRenderer:
             healed = Image.fromarray(img_np)
 
         # 5. Draw CJK text
-        draw = ImageDraw.Draw(healed)
-        for (px0, py0, px1, py1, translated, block) in blocks_to_render:
-            bw = max(px1 - px0, 1)
-            bh = max(py1 - py0, 1)
-
-            orig_color = block.get("color", None)
-            if orig_color and isinstance(orig_color, (list, tuple)) and len(orig_color) == 3:
-                r = int(orig_color[0] * 255)
-                g = int(orig_color[1] * 255)
-                b_ch = int(orig_color[2] * 255)
-                lum = 0.299 * r + 0.587 * g + 0.114 * b_ch
-                if lum > 230:
-                    bg = _sample_bg(healed, px0, py0, px1, py1)
-                    fg = _contrast_color(bg)
-                else:
-                    fg = (r, g, b_ch)
-            else:
-                bg = _sample_bg(healed, px0, py0, px1, py1)
-                fg = _contrast_color(bg)
-
-            font, lines, fs = _best_font(translated, bw, bh, font_scale=self.font_scale)
-            lh = fs * 1.25
-            total_h = len(lines) * lh
-            curr_y = py0 + (bh - total_h) / 2
-
-            for line in lines:
-                try:
-                    lw = font.getbbox(line)[2] - font.getbbox(line)[0]
-                except Exception:
-                    lw = len(line) * fs * 0.9
-                curr_x = px0 + (bw - lw) / 2
-
-                if isinstance(fg, tuple) and len(fg) == 3:
-                    fg_lum = 0.299 * fg[0] + 0.587 * fg[1] + 0.114 * fg[2]
-                else:
-                    fg_lum = 255 if fg == "white" else 0
-
-                st_fill = "black" if fg_lum > 127 else "white"
-                st_width = max(1, int(fs / 16))
-
-                draw.text(
-                    (curr_x, curr_y),
-                    line,
-                    fill=fg,
-                    font=font,
-                    stroke_width=st_width,
-                    stroke_fill=st_fill
-                )
-                curr_y += lh
+        self._draw_translations(healed, blocks_to_render)
 
         def img_to_b64(pil_im, quality=80):
             buf = io.BytesIO()

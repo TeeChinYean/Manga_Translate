@@ -1595,6 +1595,9 @@
 
                 progressBarFill.style.width = '100%';
                 logToConsole(`[✓] 恭喜！布局保真 PDF 翻译重构成功！全部流程总耗时 ${finalTime} 秒`, 'success');
+                if (data.warning) {
+                    logToConsole(`[!] 注意: ${data.warning}`, 'warn');
+                }
 
                 // Show download interface
                 outFileName.textContent = `translated_${selectedFile.name}`;

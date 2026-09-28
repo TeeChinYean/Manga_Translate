@@ -183,38 +183,112 @@ def _call_turbovec_llm(payload: dict, timeout: float = 15.0):
     return None
 
 # ── Proper noun pre-fixes and glossary loaded from JSON ───────────────────────
-_PROPER_NOUNS = {}
-_PROPER_NOUNS_PATH = os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__))), "data", "proper_nouns.json")
-_GLOSSARY_PATH = os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__))), "data", "glossary.json")
+# Two tiers (BUG.md B5):
+#   _PROPER_NOUNS : curated terms (proper_nouns.json + glossary.json). Used for exact-match
+#                   overrides, input/output canonicalization and prompt hints.
+#   _AUTO_TERMS   : terms the LLM discovered at runtime (proper_nouns_auto.json). Unverified,
+#                   so they are ONLY offered to the LLM as prompt hints, never force-applied.
+# Every term passes _is_valid_term(); ASCII terms only match on word boundaries so that
+# junk like "K" / "SO" / "5" can no longer rewrite unrelated text.
+import threading
+from functools import lru_cache
 
-try:
-    if os.path.exists(_PROPER_NOUNS_PATH):
-        with open(_PROPER_NOUNS_PATH, "r", encoding="utf-8") as f:
-            _PROPER_NOUNS.update(json.load(f))
-    if os.path.exists(_GLOSSARY_PATH):
-        with open(_GLOSSARY_PATH, "r", encoding="utf-8") as f:
-            gloss_data = json.load(f)
+_DATA_DIR = os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__))), "data")
+_PROPER_NOUNS = {}
+_AUTO_TERMS = {}
+_PROPER_NOUNS_PATH = os.path.join(_DATA_DIR, "proper_nouns.json")
+_AUTO_TERMS_PATH = os.path.join(_DATA_DIR, "proper_nouns_auto.json")
+_GLOSSARY_PATH = os.path.join(_DATA_DIR, "glossary.json")
+_TERMS_LOCK = threading.Lock()
+AUTO_PROPER_NOUNS_ENABLED = os.getenv("AUTO_PROPER_NOUNS", "1") != "0"
+
+_CJK_RE = re.compile(r"[\u3040-\u30ff\u3400-\u9fff\uf900-\ufaff]")
+
+
+def _is_valid_term(key, value) -> bool:
+    """Reject terms that would corrupt text when substring-applied (single letters, digits, no-ops)."""
+    if not isinstance(key, str) or not isinstance(value, str):
+        return False
+    k, v = key.strip(), value.strip()
+    if not k or not v or k == v or len(k) > 30 or len(v) > 30:
+        return False
+    if k.replace(" ", "").isdigit():
+        return False
+    if _CJK_RE.search(k):
+        return len(k) >= 2
+    letters = sum(c.isalpha() for c in k)
+    return len(k) >= 3 and letters >= 3
+
+
+@lru_cache(maxsize=4096)
+def _term_pattern(key: str):
+    """Regex for a term: ASCII words need word boundaries, CJK terms match as substrings."""
+    if _CJK_RE.search(key):
+        return re.compile(re.escape(key))
+    return re.compile(r"(?<![A-Za-z0-9])" + re.escape(key) + r"(?![A-Za-z0-9])")
+
+
+def _term_in_text(key: str, text: str, ignore_case: bool = False) -> bool:
+    pat = _term_pattern(key)
+    if ignore_case and not _CJK_RE.search(key):
+        return re.search(pat.pattern, text, flags=re.IGNORECASE) is not None
+    return pat.search(text) is not None
+
+
+def _replace_term(text: str, key: str, value: str) -> str:
+    return _term_pattern(key).sub(lambda _m: value, text)
+
+
+def _load_json_dict(path: str) -> dict:
+    if not os.path.exists(path):
+        return {}
+    try:
+        with open(path, "r", encoding="utf-8") as f:
+            data = json.load(f)
+        return data if isinstance(data, dict) else {}
+    except Exception as e:
+        logger.warning(f"Could not load {path}: {e}")
+        return {}
+
+
+def _load_terms():
+    rejected = 0
+    for k, v in _load_json_dict(_PROPER_NOUNS_PATH).items():
+        if _is_valid_term(k, v):
+            _PROPER_NOUNS[k.strip()] = v.strip()
+        else:
+            rejected += 1
+    try:
+        if os.path.exists(_GLOSSARY_PATH):
+            with open(_GLOSSARY_PATH, "r", encoding="utf-8") as f:
+                gloss_data = json.load(f)
             if isinstance(gloss_data, list):
                 for item in gloss_data:
-                    src = item.get("src")
-                    tgt = item.get("tgt")
-                    if src and tgt and src not in _PROPER_NOUNS:
-                        _PROPER_NOUNS[src] = tgt
-except Exception as e:
-    logger.warning(f"Could not load proper nouns / glossary: {e}")
+                    src, tgt = item.get("src"), item.get("tgt")
+                    if _is_valid_term(src, tgt) and src not in _PROPER_NOUNS:
+                        _PROPER_NOUNS[src.strip()] = tgt.strip()
+    except Exception as e:
+        logger.warning(f"Could not load glossary: {e}")
+    for k, v in _load_json_dict(_AUTO_TERMS_PATH).items():
+        if _is_valid_term(k, v) and k not in _PROPER_NOUNS:
+            _AUTO_TERMS[k.strip()] = v.strip()
+    if rejected:
+        logger.warning(f"[Terms] Ignored {rejected} invalid entries in proper_nouns.json (single letters, digits, no-op mappings).")
+
+
+_load_terms()
+
 
 def _get_relevant_glossary(texts: list) -> dict:
-    """Finds glossary and character terms matching any of the texts in the current batch."""
-    if not _PROPER_NOUNS:
+    """Finds curated and auto-discovered terms that occur in the current batch (prompt hints only)."""
+    if not _PROPER_NOUNS and not _AUTO_TERMS:
         return {}
     combined = " ".join(str(t) for t in texts if t)
-    combined_lower = combined.lower()
     matched = {}
-    for k, v in _PROPER_NOUNS.items():
-        if not k or not v:
-            continue
-        if k in combined or k.lower() in combined_lower:
-            matched[k] = v
+    for source in (_AUTO_TERMS, _PROPER_NOUNS):  # curated wins on conflicts
+        for k, v in list(source.items()):
+            if _term_in_text(k, combined, ignore_case=True):
+                matched[k] = v
     return matched
 
 # ── Post-translation cleanup ─────────────────────────────────────────────────
@@ -227,7 +301,7 @@ def _clean_input(text: str) -> str:
     text = text.replace("@", "a")
     
     for wrong, right in _PROPER_NOUNS.items():
-        text = text.replace(wrong, right)
+        text = _replace_term(text, wrong, right)
         
     # Strip standalone words that are purely consonants (>=3 chars), often merged SFX like KRNCH, SHRF, TMP
     words = text.split()
@@ -275,9 +349,7 @@ def _clean_output(text: str) -> str:
     
     # Canonicalize proper nouns in output
     for wrong, right in _PROPER_NOUNS.items():
-        if wrong and right and wrong != right:
-            if wrong in text:
-                text = text.replace(wrong, right)
+        text = _replace_term(text, wrong, right)
     
     return text.strip()
 
@@ -507,17 +579,51 @@ def _polish_batch_dialogues_json(polish_tasks: list) -> dict:
     return result_dict
 
 
+def _filter_discovered_terms(parsed: dict, sources: list, translations: list) -> dict:
+    """
+    Keep only LLM-proposed terms that are grounded in this batch: the key must occur in a
+    source text and the value in a translation, and the pair must pass _is_valid_term.
+    """
+    src_all = "\n".join(sources)
+    trans_all = "\n".join(translations)
+    kept = {}
+    for k, v in (parsed or {}).items():
+        k_clean, v_clean = str(k).strip(), str(v).strip()
+        if not _is_valid_term(k_clean, v_clean):
+            continue
+        if k_clean in _PROPER_NOUNS or k_clean in _AUTO_TERMS:
+            continue
+        if not _term_in_text(k_clean, src_all) or v_clean not in trans_all:
+            continue
+        kept[k_clean] = v_clean
+    return kept
+
+
+def _save_auto_terms():
+    """Atomic write of the auto-discovered terms file (caller holds _TERMS_LOCK)."""
+    tmp = _AUTO_TERMS_PATH + ".tmp"
+    with open(tmp, "w", encoding="utf-8") as f:
+        json.dump(_AUTO_TERMS, f, ensure_ascii=False, indent=4)
+    os.replace(tmp, _AUTO_TERMS_PATH)
+
+
 def _extract_proper_nouns_from_batch(blocks: list, results: list):
     """
-    用 LLM 分析刚才这批翻译，提取可能遗漏的专有名词，动态写入 proper_nouns.json。
+    用 LLM 分析刚才这批翻译，提取可能遗漏的专有名词，写入 proper_nouns_auto.json。
+    这些词条未经人工确认，只作为后续 prompt 的参考，不会强制替换原文/译文（BUG.md B5）。
+    设置环境变量 AUTO_PROPER_NOUNS=0 可关闭（省去每批一次 LLM 调用）。
     """
-    pairs = []
+    if not AUTO_PROPER_NOUNS_ENABLED:
+        return
+    pairs, sources, translations = [], [], []
     for i, block in enumerate(blocks):
         if block.get("is_sfx"): continue
         orig = block.get("cleaned_text", "").strip()
         trans = results[i].strip()
         if orig and trans and len(orig) > 4:
             pairs.append(f"原文: {orig} | 译文: {trans}")
+            sources.append(orig)
+            translations.append(trans)
             
     if not pairs:
         return
@@ -540,24 +646,19 @@ def _extract_proper_nouns_from_batch(blocks: list, results: list):
             content = data["choices"][0]["message"]["content"].strip()
             try:
                 parsed = json.loads(content)
-                new_discovered = False
-                for k, v in parsed.items():
-                    k_clean = str(k).strip()
-                    v_clean = str(v).strip()
-                    if k_clean and v_clean and k_clean not in _PROPER_NOUNS:
-                        if len(k_clean) < 30 and len(v_clean) < 30:
-                            _PROPER_NOUNS[k_clean] = v_clean
-                            new_discovered = True
-                            
-                if new_discovered:
-                    try:
-                        with open(_PROPER_NOUNS_PATH, "w", encoding="utf-8") as f:
-                            json.dump(_PROPER_NOUNS, f, ensure_ascii=False, indent=4)
-                        logger.info(f"[Dynamo] Extracted new proper nouns! Dict size: {len(_PROPER_NOUNS)}")
-                    except Exception as e:
-                        logger.warning(f"[Dynamo] Failed to save proper nouns: {e}")
             except json.JSONDecodeError:
-                pass
+                return
+            if not isinstance(parsed, dict):
+                return
+            with _TERMS_LOCK:
+                kept = _filter_discovered_terms(parsed, sources, translations)
+                if kept:
+                    _AUTO_TERMS.update(kept)
+                    try:
+                        _save_auto_terms()
+                        logger.info(f"[Dynamo] +{len(kept)} auto terms (hint-only): {kept}")
+                    except Exception as e:
+                        logger.warning(f"[Dynamo] Failed to save auto terms: {e}")
     except Exception as e:
         logger.warning(f"[Dynamo] Proper noun extraction failed: {e}")
 

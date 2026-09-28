@@ -48,3 +48,6 @@ test_manga_sample.pdf
 
 # Scratch development scripts
 scratch/
+
+# Runtime LLM-discovered terms (hint-only, BUG.md B5)
+pdf_translate/data/proper_nouns_auto.json

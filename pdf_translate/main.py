@@ -131,6 +131,14 @@ def parse_page_range(range_str: str, max_pages: int) -> set:
     return pages if pages else set(range(1, max_pages + 1))
 
 
+def build_failed_pages_warning(failed_pages) -> str:
+    """Human-readable warning for pages whose extraction failed (BUG.md B4). Empty if none."""
+    if not failed_pages:
+        return ""
+    nums = ", ".join(str(p) for p, _ in sorted(failed_pages))
+    return f"{len(failed_pages)} 页提取失败，已保留原页未翻译: 第 {nums} 页"
+
+
 async def preload_all_models():
     """
     Preloads all OCR models and warms up the Turbovec LLM in memory during server startup.
@@ -458,8 +466,14 @@ async def translation_worker():
                 logger.error(f"[Pipeline] Stage error: {ex}", exc_info=True)
                 raise Exception(f"流水线处理异常: {ex}")
 
+            failed_pages = sorted(extractor.failed_pages)
             if not layout_data:
-                raise Exception("未能成功提取到任何页面数据，请检查 PDF 文件完整性或页面范围设置。")
+                detail = f"（失败页: {', '.join(str(p) for p, _ in failed_pages)}；首个错误: {failed_pages[0][1]}）" if failed_pages else ""
+                raise Exception("未能成功提取到任何页面数据，请检查 PDF 文件完整性或页面范围设置。" + detail)
+
+            extraction_warning = build_failed_pages_warning(failed_pages)
+            if extraction_warning:
+                logger.warning(f"Task {task_id}: {extraction_warning}")
 
             # Retain original sequential reading order for DOC and JSON generation
             layout_data.sort(key=lambda x: x["page_num"])
@@ -582,8 +596,10 @@ async def translation_worker():
             
             status_db[task_id] = {
                 "percent": 100,
-                "stage": "全部处理完成！",
+                "stage": "全部处理完成！" + (f"（{extraction_warning}）" if extraction_warning else ""),
                 "status": "complete",
+                "warning": extraction_warning,
+                "failed_pages": [p for p, _ in failed_pages],
                 "download_url": download_url,
                 "download_zip_url": download_zip_url,
                 "download_doc_url": download_doc_url,
@@ -886,7 +902,7 @@ async def get_translation_status_stream(task_id: str):
                 last_percent = percent
                 
                 if status == "complete":
-                    yield f"event: complete\ndata: {json.dumps({'download_url': task_status.get('download_url'), 'download_zip_url': task_status.get('download_zip_url'), 'download_doc_url': task_status.get('download_doc_url'), 'download_json_url': task_status.get('download_json_url')})}\n\n"
+                    yield f"event: complete\ndata: {json.dumps({'download_url': task_status.get('download_url'), 'download_zip_url': task_status.get('download_zip_url'), 'download_doc_url': task_status.get('download_doc_url'), 'download_json_url': task_status.get('download_json_url'), 'warning': task_status.get('warning', ''), 'failed_pages': task_status.get('failed_pages', [])}, ensure_ascii=False)}\n\n"
                     break
                 elif status == "failed":
                     yield f"event: error\ndata: {json.dumps({'message': task_status.get('message', 'Processing pipeline crashed.')})}\n\n"
