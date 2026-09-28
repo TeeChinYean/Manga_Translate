@@ -579,6 +579,43 @@ def _block_seg_mask(seg: np.ndarray, x0: int, y0: int, x1: int, y1: int, pad: in
     return rx0, ry0, rx1, ry1, cv2.dilate(sel.astype(np.uint8) * 255, grow)
 
 
+SEG_GATE_PX = 10         # stroke pixels further than this from detected text are not text
+
+
+def _gate_by_seg(stroke_mask: np.ndarray, seg: np.ndarray, x0: int, y0: int, x1: int, y1: int) -> np.ndarray:
+    """
+    Drop stroke-mask pixels that are not near detected text (BUG.md B16). The radius keeps
+    the outline/halo of lettering (B11 halo is 3-10px) but excludes artwork lines that just
+    happen to fall inside a loose text box.
+    """
+    near = seg[y0:y1, x0:x1].astype(np.uint8)
+    if not near.any():
+        return stroke_mask
+    k = cv2.getStructuringElement(cv2.MORPH_ELLIPSE, (2 * SEG_GATE_PX + 1, 2 * SEG_GATE_PX + 1))
+    near = cv2.dilate(near, k) > 0
+    return np.where(near, stroke_mask, 0).astype(stroke_mask.dtype)
+
+
+DRAW_BOX_MIN_COVER = 0.4   # use the tight text box only if it keeps >=40% of the detector box
+
+
+def _text_draw_box(seg, x0: int, y0: int, x1: int, y1: int):
+    """
+    Where to typeset the translation: the tight bounding box of detected text inside the
+    detector box. A loose box that also covers artwork (e.g. two scrolls + the pattern
+    between them) otherwise puts the new text on top of the art (BUG.md B16).
+    """
+    if seg is None:
+        return x0, y0, x1, y1
+    ys, xs = np.nonzero(seg[y0:y1, x0:x1])
+    if ys.size == 0:
+        return x0, y0, x1, y1
+    tx0, ty0, tx1, ty1 = x0 + int(xs.min()), y0 + int(ys.min()), x0 + int(xs.max()) + 1, y0 + int(ys.max()) + 1
+    if (tx1 - tx0) * (ty1 - ty0) < DRAW_BOX_MIN_COVER * (x1 - x0) * (y1 - y0):
+        return x0, y0, x1, y1
+    return tx0, ty0, tx1, ty1
+
+
 def _merge_into(target: np.ndarray, x0: int, y0: int, x1: int, y1: int, mask: np.ndarray):
     target[y0:y1, x0:x1] = np.maximum(target[y0:y1, x0:x1], mask)
 
@@ -654,18 +691,21 @@ class PDFLayoutRenderer:
             # - Clean/white bubble: Telea (<15ms, perfectly sharp, zero downsample blur)
             # - Textured/screentone/dark scene: LaMa neural inpainting
             target = lama_mask_np if is_textured else telea_mask_np
+            bm = _block_seg_mask(seg_full, px0, py0, px1, py1, seg_pad) if seg_full is not None else None
+            if bm is not None:
+                # Detector text mask: whole glyphs incl. anti-aliased edges + furigana (B15).
+                # Only keep stroke pixels near detected text: a box that overlaps artwork
+                # otherwise erases the art's dark lines too (white patch over patterns).
+                stroke_mask = _gate_by_seg(stroke_mask, seg_full, px0, py0, px1, py1)
+                _merge_into(target, *bm)
             _merge_into(target, px0, py0, px1, py1, stroke_mask)
-            if seg_full is not None:
-                # Detector text mask: whole glyphs incl. anti-aliased edges + furigana (B15)
-                bm = _block_seg_mask(seg_full, px0, py0, px1, py1, seg_pad)
-                if bm is not None:
-                    _merge_into(target, *bm)
             if is_textured:
                 has_lama_masks = True
             else:
                 has_telea_masks = True
 
-            blocks_to_render.append((px0, py0, px1, py1, translated, block))
+            dx0, dy0, dx1, dy1 = _text_draw_box(seg_full, px0, py0, px1, py1)
+            blocks_to_render.append((dx0, dy0, dx1, dy1, translated, block))
 
         return {
             "blocks": blocks_to_render,
@@ -829,11 +869,11 @@ class PDFLayoutRenderer:
             bg_val = mask_res[1]
             is_textured = mask_res[2] if len(mask_res) > 2 else (bg_val < 170)
             
+            bm = _block_seg_mask(seg_full, px0, py0, px1, py1, seg_pad) if seg_full is not None else None
+            if bm is not None:
+                stroke_mask = _gate_by_seg(stroke_mask, seg_full, px0, py0, px1, py1)
+                _merge_into(mask_np, *bm)
             mask_np[py0:py1, px0:px1] = np.maximum(mask_np[py0:py1, px0:px1], stroke_mask)
-            if seg_full is not None:
-                bm = _block_seg_mask(seg_full, px0, py0, px1, py1, seg_pad)
-                if bm is not None:
-                    _merge_into(mask_np, *bm)
             blocks_to_render.append((px0, py0, px1, py1, translated, block))
 
         # 3. Create Mask Overlay visualization (Hot magenta / crimson highlight on original image)
