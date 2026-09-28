@@ -74,11 +74,11 @@ def main():
                 comp = (lab == i).astype(np.uint8)
                 ring = (cv2.dilate(comp, k) > 0) & (prep["lama_mask"] == 0)
                 r1 = (cv2.dilate(comp, np.ones((3, 3), np.uint8)) > 0) & (comp == 0)
-                x, y, w, h, a = st[i]
+                x, y, w, h, area = st[i]
                 gv, gr = g[ring], g[r1]
                 med = float(np.median(gv)) if gv.size else -1
                 share = float((np.abs(gv.astype(int) - med) <= R.FLAT_TOL).mean()) if gv.size else 0
-                print(f"   hole {i}: box=({x},{y},{w},{h}) area={a} ring5_median={med:.0f} flat_share={share:.2f} "
+                print(f"   hole {i}: box=({x},{y},{w},{h}) area={area} ring5_median={med:.0f} flat_share={share:.2f} "
                       f"border1px_bright={float((gr >= 200).mean()):.2f}", flush=True)
         nl = int(np.count_nonzero(prep["lama_mask"])) if prep["lama_mask"] is not None else 0
         nt = int(np.count_nonzero(prep["telea_mask"])) if prep["telea_mask"] is not None else 0

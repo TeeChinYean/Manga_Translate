@@ -658,6 +658,9 @@ def _create_stroke_mask(crop_rgb: np.ndarray, ink_thresh: int = 95, dilate_iter:
 
 HALO_LIGHT_MIN = 180   # halo pixels around dark glyphs must be at least this bright
 HALO_DARK_MAX = 75     # halo pixels around light glyphs must be at most this dark
+HALO_BAND_PX = 6       # band beyond the halo radius used to tell a thin rim from a white balloon
+HALO_PAPER_MIN = 245   # paper white
+HALO_PAPER_SHARE = 0.6 # band >60% paper white -> balloon, no halo
 
 
 def _add_outline_halo(glyph_mask: np.ndarray, gray: np.ndarray, glyph_is_dark: bool) -> np.ndarray:
@@ -674,6 +677,14 @@ def _add_outline_halo(glyph_mask: np.ndarray, gray: np.ndarray, glyph_is_dark: b
     ring_kernel = cv2.getStructuringElement(cv2.MORPH_ELLIPSE, (2 * radius + 1, 2 * radius + 1))
     near_glyph = cv2.dilate(glyph_mask, ring_kernel) > 0
     rim_color = (gray >= HALO_LIGHT_MIN) if glyph_is_dark else (gray <= HALO_DARK_MAX)
+    if glyph_is_dark:
+        # A rim is thin. If the band just beyond the halo radius is still paper-white, the glyphs
+        # sit in a white balloon: the "halo" would swallow the whole balloon and turn a
+        # glyph-sized hole into a balloon-sized one that LaMa fills with ghost strokes (B20).
+        band_k = cv2.getStructuringElement(cv2.MORPH_ELLIPSE, (2 * (radius + HALO_BAND_PX) + 1,) * 2)
+        band = (cv2.dilate(glyph_mask, band_k) > 0) & ~near_glyph
+        if band.any() and float((gray[band] >= HALO_PAPER_MIN).mean()) > HALO_PAPER_SHARE:
+            return glyph_mask
     halo = (near_glyph & rim_color).astype(np.uint8) * 255
     combined = cv2.bitwise_or(glyph_mask, halo)
     return cv2.dilate(combined, cv2.getStructuringElement(cv2.MORPH_ELLIPSE, (3, 3)), iterations=1)
@@ -907,7 +918,7 @@ def _merge_into(target: np.ndarray, x0: int, y0: int, x1: int, y1: int, mask: np
 
 # ── Main Renderer Class ────────────────────────────────────────────────────────
 # Bump whenever rendering output changes, so page JPEG caches from older logic are not reused.
-RENDER_CACHE_VERSION = "2026-09-28-rim5"
+RENDER_CACHE_VERSION = "2026-09-28-rim6"
 
 
 class PDFLayoutRenderer:
