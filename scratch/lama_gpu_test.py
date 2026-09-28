@@ -9,6 +9,11 @@ sys.path.insert(0, os.path.join(ROOT, "pdf_translate"))
 import numpy as np, cv2, fitz
 from PIL import Image
 import onnxruntime as ort
+if hasattr(ort, "preload_dlls"):
+    try:
+        ort.preload_dlls()  # onnxruntime-gpu[cuda,cudnn]: load CUDA/cuDNN DLLs from the pip wheels
+    except Exception as _e:
+        print("preload_dlls failed:", _e)
 from core import renderer as R
 from core.extractor import _get_comic_detector, _detect_with_comic_detector
 
@@ -34,6 +39,11 @@ def make_session(provider):
     if provider == "DmlExecutionProvider":
         opts.enable_mem_pattern = False  # required by DirectML
         opts.execution_mode = ort.ExecutionMode.ORT_SEQUENTIAL
+    if provider == "CUDAExecutionProvider":
+        # Keep the CUDA arena small: this runs next to other GPU users on a 4 GB card
+        cuda_opts = {"arena_extend_strategy": "kSameAsRequested", "cudnn_conv_algo_search": "HEURISTIC"}
+        return ort.InferenceSession(MODEL, sess_options=opts,
+                                    providers=[(provider, cuda_opts), "CPUExecutionProvider"])
     return ort.InferenceSession(MODEL, sess_options=opts, providers=[provider, "CPUExecutionProvider"])
 
 
@@ -120,6 +130,9 @@ if __name__ == "__main__":
     try:
         gsess = make_session(gpu)
         print("GPU session providers:", gsess.get_providers())
+        if gsess.get_providers()[0] != gpu:
+            sys.exit(f"{gpu} could not be initialised (session fell back to CPU). "
+                     "Check CUDA/cuDNN install messages above.")
         gpu_out, gpu_t = run_all(gsess, jobs)
     except Exception as e:
         sys.exit(f"GPU LaMa FAILED: {type(e).__name__}: {e}")
