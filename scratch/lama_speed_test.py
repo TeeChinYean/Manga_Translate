@@ -83,15 +83,13 @@ def main():
     ap = argparse.ArgumentParser()
     ap.add_argument("pdf", nargs="?", default=os.path.join(ROOT, "第5巻.pdf"))
     ap.add_argument("--page", type=int, default=1)
-    ap.add_argument("--runs", type=int, default=6, help="crops per config")
+    ap.add_argument("--runs", type=int, default=12, help="crops per config")
     a = ap.parse_args()
     cpu = os.cpu_count() or 4
     inputs = make_inputs(a.pdf, a.page, a.runs)
-    configs = [("disable", 2, 3)]  # current production
-    for lvl in ("basic", "extended", "all"):
-        configs.append((lvl, 2, 3))
-    for lvl in ("disable", "all"):
-        for par, thr in ((1, cpu // 2), (1, cpu), (2, cpu // 4 * 1 or 1), (3, max(1, cpu // 3)), (2, cpu // 2)):
+    configs = [("disable", 3, max(1, cpu // 3))]  # current production
+    for lvl in ("disable",):
+        for par, thr in ((1, cpu // 2), (1, cpu), (2, cpu // 4 * 1 or 1), (3, max(1, cpu // 3)), (2, cpu // 2), (4, max(1, cpu // 4)), (6, max(1, cpu // 6))):
             if (lvl, par, thr) not in configs:
                 configs.append((lvl, par, thr))
     print(f"cpu={cpu}  crops/config={a.runs}  ort={ort.__version__}", flush=True)

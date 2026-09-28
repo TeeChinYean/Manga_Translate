@@ -27,11 +27,22 @@ _LAMA_SESSION_LOCK = threading.Lock()
 _LAMA_SESSION = None
 
 # ── LaMa CPU parallelism ──────────────────────────────────────────────────────
-# ORT InferenceSession.run is thread-safe. Running 2 crops at once with half the threads
-# each usually beats 1 crop with all threads on 8+ logical cores (better core utilisation).
+# ORT InferenceSession.run is thread-safe; more concurrent runs with fewer threads each
+# beat one run with many threads (LaMa's FFT/conv ops scale poorly with intra-op threads).
+# Measured (scratch/lama_speed_test.py, 12 logical CPUs, 512x512, output identical):
+#   1x12 5.71s/crop, 1x6 4.75, 2x3 3.78 (old default), 2x6 3.22, 3x4 2.22 (x1.70)
+# Graph optimisation level made no gain on CPU (basic/extended ~equal, all slower): keep DISABLE_ALL.
+def _default_lama_layout(cpu: int):
+    """(parallel runs, intra-op threads per run) using all logical CPUs."""
+    parallel = 3 if cpu >= 12 else (2 if cpu >= 6 else 1)
+    return parallel, max(1, cpu // parallel)
+
+
 _CPU = os.cpu_count() or 4
-LAMA_PARALLEL = max(1, int(os.getenv("LAMA_PARALLEL", "2" if _CPU >= 8 else "1")))
-LAMA_THREADS = max(1, int(os.getenv("LAMA_THREADS", str(max(2, (_CPU // 2) // LAMA_PARALLEL)))))
+_DEF_PAR, _DEF_THR = _default_lama_layout(_CPU)
+LAMA_PARALLEL = max(1, int(os.getenv("LAMA_PARALLEL", str(_DEF_PAR))))
+LAMA_THREADS = max(1, int(os.getenv("LAMA_THREADS", str(_DEF_THR if "LAMA_PARALLEL" not in os.environ
+                                                         else max(1, _CPU // LAMA_PARALLEL)))))
 _LAMA_RUN_SEM = threading.BoundedSemaphore(LAMA_PARALLEL)
 
 # ── Render timing breakdown (where does rendering time go?) ───────────────────

@@ -115,3 +115,10 @@
 - 实现要点：阶段 rasterize / load_detector / detect / load_ocr_models / manga_ocr_batch / ocr_per_box / page_total；线程安全累加。
 - 相关测试：tests/test_extract_stats.py
 - 状态：Done
+
+### [Render] LaMa CPU 并行布局 3×4
+- 说明：LaMa 默认改为 3 个并发 × 4 线程（12 逻辑核），实测 3.78→2.22s/crop（x1.70），输出一致；图优化级别无收益，保留 ORT_DISABLE_ALL。
+- 涉及文件/模块：core/renderer.py `_default_lama_layout`；scratch/lama_speed_test.py（新增 4×3、6×2 组合）
+- 实现要点：用满全部逻辑核；环境变量 LAMA_PARALLEL / LAMA_THREADS 仍可覆盖；serial 模式重绘页并发跟随 LAMA_PARALLEL。
+- 相关测试：tests/test_lama_layout.py
+- 状态：Done
