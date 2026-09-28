@@ -52,6 +52,7 @@ async def run_three_stage_pipeline(
     translate_batch: Optional[Callable[[list], Awaitable[list]]] = None,
     batch_lines: int = 0,
     page_lines: Callable[[Any], int] = lambda page: 1,
+    render_concurrency: int = 1,
 ) -> None:
     """
     Run producer -> translator -> renderer concurrently with bounded queues.
@@ -69,6 +70,8 @@ async def run_three_stage_pipeline(
     - `translate_batch(pages) -> pages_to_render` + `batch_lines`: buffer extracted pages until
       they hold >= batch_lines lines (page_lines(page) each) or extraction ends, then translate
       them in ONE call, so the LLM sees dialogue across pages. Used instead of translate_page.
+
+    - `render_concurrency`: number of pages rendered at the same time (renderer workers).
 
     Raises the first stage exception, or PipelineCancelled if cancelled.
     """
@@ -169,13 +172,18 @@ async def run_three_stage_pipeline(
             await _race(render_gate.wait(), abort)
             while True:
                 page = await get(q_translated)
-                if page is _DONE or check_cancel():
+                if page is _DONE:
+                    # Hand the end marker on to the next renderer worker
+                    await put(q_translated, _DONE)
+                    break
+                if check_cancel():
                     break
                 await render_page(page)
         except Exception as ex:
             fail(ex)
 
-    await asyncio.gather(producer(), translator(), renderer())
+    workers = [renderer() for _ in range(max(1, int(render_concurrency)))]
+    await asyncio.gather(producer(), translator(), *workers)
 
     if errors:
         raise errors[0]

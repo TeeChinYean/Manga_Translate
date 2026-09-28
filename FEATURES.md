@@ -83,3 +83,13 @@
 - `RENDER_CACHE_VERSION` 已更新，旧的页面缓存不会被复用。
 - 相关测试：`tests/test_manga_style.py`（5 个用例），已加入 pre-commit。示意图：`scratch/style_p11.jpg`（原图 | 新排版；图中译文是随便放的示例句）。
 - 状态：Done（待用户实测）
+
+### [全局] 三种模式实测对比（2026-09-28，第5巻 1-10 页，B14-B17 与攒批翻译之后）
+| 模式 | 总耗时 | 提取完成 | 翻译完成 | 说明 |
+|---|---|---|---|---|
+| serial | **95.5s** | 26.8s | 37.8s | 重绘时同时处理 3 页 |
+| overlap | 131.9s | 25.6s | 37.5s | 重绘只能一页一页来 |
+| stream | 153.9s | 33.8s | 45.1s | 提取时和 LLM 抢资源；重绘一页一页来 |
+- 三种模式都只调用了 1 次 LLM（26 句不到攒批阈值 36 行，所以一次翻完），0 失败。
+- 差距主要在重绘：stream 和 overlap 的重绘 worker 只有一个。所以 `run_three_stage_pipeline` 新增了 `render_concurrency`，main 对所有模式都传 `RENDER_CONCURRENCY`（默认 3）。预计 overlap 能接近 serial。
+- 默认模式保持 serial。

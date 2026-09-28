@@ -136,7 +136,7 @@ PIPELINE_MODES = ("stream", "overlap", "serial")
 # and serial translates the whole range with one large-context LLM call.
 DEFAULT_PIPELINE_MODE = os.getenv("PIPELINE_MODE", "serial")
 DEFAULT_CONTEXT_CHUNK = 36  # Japanese lines per LLM call in 'serial' mode
-RENDER_CONCURRENCY = max(1, int(os.getenv("RENDER_CONCURRENCY", "3")))  # pages rendered at once in 'serial' mode
+RENDER_CONCURRENCY = max(1, int(os.getenv("RENDER_CONCURRENCY", "3")))  # pages rendered at once (all modes)
 # stream/overlap: translate once this many lines are buffered (0 = old per-page behaviour)
 DEFAULT_STREAM_BATCH_LINES = max(0, int(os.getenv("TRANSLATE_BATCH_LINES", str(DEFAULT_CONTEXT_CHUNK))))
 
@@ -610,6 +610,8 @@ async def translation_worker():
                         if stream_batch_lines > 0 else None,
                         batch_lines=stream_batch_lines,
                         page_lines=lambda page: len(page.get("blocks", [])),
+                        # Several pages at once: CPU stages overlap while one page waits for LaMa
+                        render_concurrency=RENDER_CONCURRENCY,
                     )
             except PipelineCancelled:
                 raise Exception("Task cancelled by user.")
