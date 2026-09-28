@@ -977,11 +977,10 @@ class PDFLayoutExtractor:
                         imgs.append(im)
             if imgs:
                 try:
-                    import time as _t
-                    t0 = _t.time()
+                    t0 = _time.time()
                     for k, txt in zip(keys, _manga_ocr_batch(mocr, imgs)):
                         manga_cache[k] = txt
-                    logger.info(f"[MangaOCR] Page {page_num}: {len(imgs)} crops in {_t.time() - t0:.2f}s (batched)")
+                    logger.info(f"[MangaOCR] Page {page_num}: {len(imgs)} crops in {_time.time() - t0:.2f}s (batched)")
                 except Exception as be:
                     # Fall back to one-by-one recognition below
                     manga_cache.clear()
