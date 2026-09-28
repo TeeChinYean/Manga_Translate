@@ -68,6 +68,12 @@ def get_render_stats() -> dict:
     out["_config"] = {"cpu": _CPU, "lama_parallel": LAMA_PARALLEL, "lama_threads": LAMA_THREADS}
     return out
 
+def preload_lama():
+    """Load the LaMa session ahead of rendering (e.g. while the LLM translates on GPU and the
+    CPU is idle). A cold load inside rendering stalls the other pages' mask building."""
+    return _get_lama_session() is not None
+
+
 def _get_lama_session():
     """Singleton session for lama.onnx with CPU execution and ORT_DISABLE_ALL for FFC stability."""
     global _LAMA_SESSION
@@ -82,7 +88,9 @@ def _get_lama_session():
                         opts.graph_optimization_level = ort.GraphOptimizationLevel.ORT_DISABLE_ALL
                         opts.intra_op_num_threads = LAMA_THREADS
                         # LaMa runs on CPU to guarantee FFC DFT node numerical stability
+                        t_load = time.time()
                         _LAMA_SESSION = ort.InferenceSession(model_path, sess_options=opts, providers=['CPUExecutionProvider'])
+                        _rstat("lama_load", time.time() - t_load, n=0)
                         logger.info(f"[LaMa] Loaded LaMa ONNX session on CPU with ORT_DISABLE_ALL")
                     else:
                         logger.info(f"[LaMa] Model not found at {model_path}, using Telea diffusion fallback.")

@@ -381,9 +381,17 @@ async def translation_worker():
             )
             
             # Semaphore to restrict GPU inpainting to 1 concurrent task to guarantee 4GB VRAM safety
-            from core.renderer import LAMA_PARALLEL, reset_render_stats, get_render_stats
+            from core.renderer import LAMA_PARALLEL, reset_render_stats, get_render_stats, preload_lama
             render_sem = asyncio.Semaphore(LAMA_PARALLEL)
             reset_render_stats()
+            lama_preload = None
+
+            def start_lama_preload():
+                """Load LaMa in the background once (cold load ~seconds, stalls rendering)."""
+                nonlocal lama_preload
+                if lama_preload is None:
+                    lama_preload = asyncio.ensure_future(asyncio.to_thread(preload_lama))
+                return lama_preload
             render_tasks = {}
             src_doc = fitz.open(pdf_path)
             
@@ -525,6 +533,7 @@ async def translation_worker():
                 p_num = page["page_num"]
                 src_page = src_doc[p_num - 1]
                 cache_path = os.path.join(cache_base_dir, renderer.cache_filename(p_num))
+                await start_lama_preload()  # no-op once loaded
 
                 dest_path = await renderer.render_single_page_to_temp(
                     page_data=page,
@@ -552,6 +561,7 @@ async def translation_worker():
                 from core.extractor import unload_models as unload_ocr
                 released = await asyncio.to_thread(unload_ocr)
                 _mark("ocr_unloaded")
+                start_lama_preload()
                 logger.info(f"[Pipeline] OCR models released: {sorted(released or [])} "
                             "(GPU ones always; CPU ones only when RAM is low, see OCR_UNLOAD).")
 
@@ -567,6 +577,7 @@ async def translation_worker():
                     pages.append(p)
                 pages.sort(key=lambda x: x["page_num"])
                 await unload_ocr_models()
+                start_lama_preload()  # CPU is idle while the LLM translates
 
                 # Group whole pages so each engine call carries up to context_chunk_size lines
                 to_render, group, n_lines = [], [], 0

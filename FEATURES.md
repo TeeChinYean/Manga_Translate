@@ -136,3 +136,10 @@
 - 实现要点：每个窗口用原图像素作输入（窗口内的遮罩像素本来就全部重绘），按原顺序回写；结果与串行一致。
 - 相关测试：tests/test_lama_parallel_regions.py
 - 状态：Done
+
+### [Render] LaMa 预加载
+- 说明：提取结束（serial：翻译进行时 CPU 空闲）就在后台加载 LaMa；重绘开始前等待加载完成，避免冷加载卡住其他页的 masks（冷启动时 masks 10 页 23–33s，热启动 0.5s）。
+- 涉及文件/模块：core/renderer.py `preload_lama`、`lama_load` 计时；main.py `start_lama_preload`
+- 实现要点：只加载一次（共享 future）；render_page 先 await；stream 模式在首个渲染页触发。
+- 相关测试：tests/test_lama_preload.py
+- 状态：Done
