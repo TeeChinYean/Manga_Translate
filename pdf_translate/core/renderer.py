@@ -709,13 +709,68 @@ def _estimate_glyph_px(seg, x0: int, y0: int, x1: int, y1: int) -> int:
     return int(np.median(runs))
 
 
+# ── Outlined lettering over artwork (white rim around dark glyphs) ────────────
+# The rim of "背景文字" often extends OUTSIDE the tight text box, so the per-box stroke mask
+# never reaches it: the leftover white rim then (a) makes the ring test call the box "clean"
+# -> Telea smears white, or (b) sits on the LaMa mask border -> LaMa propagates white inward.
+# Fix: grow the glyph silhouette through connected bright pixels (the rim), judge the
+# background on a ring around that silhouette, and mask glyph + rim + AA fringe.
+RIM_LIGHT_MIN = 170        # rim pixels are at least this bright
+RIM_RING_PX = 6            # background ring width around the silhouette
+RIM_RING_MID_MIN = 0.15    # ring is art/screentone if >=15% mid-tone ...
+RIM_RING_DARK_MIN = 0.30   # ... or >=30% dark (dark scene); thin bubble lines stay below
+RIM_MIN_RATIO = 0.3        # rim area must be >=30% of glyph area (really outlined text)
+
+
+def _outlined_text_mask(gray: np.ndarray, seg: np.ndarray, x0: int, y0: int, x1: int, y1: int,
+                        glyph_px: int = 0):
+    """(X0, Y0, X1, Y1, uint8 mask) covering glyph + white rim when this box is outlined
+    lettering over artwork; None otherwise (plain bubble text, no seg, no rim)."""
+    if seg is None:
+        return None
+    H, W = gray.shape[:2]
+    rr = int(np.clip(round(0.3 * glyph_px) if glyph_px else 10, 4, 16))
+    pad = rr + RIM_RING_PX + 4
+    X0, Y0, X1, Y1 = max(0, x0 - pad), max(0, y0 - pad), min(W, x1 + pad), min(H, y1 + pad)
+    g = gray[Y0:Y1, X0:X1]
+    near_box = np.zeros(g.shape, dtype=bool)
+    near_box[max(0, y0 - Y0 - 6):y1 - Y0 + 6, max(0, x0 - X0 - 6):x1 - X0 + 6] = True
+    glyph = (seg[Y0:Y1, X0:X1] & near_box).astype(np.uint8)
+    if int(glyph.sum()) < 20:
+        return None
+    k3 = cv2.getStructuringElement(cv2.MORPH_ELLIPSE, (3, 3))
+    glyph = cv2.dilate(glyph, cv2.getStructuringElement(cv2.MORPH_ELLIPSE, (5, 5)))  # bridge AA edge
+    passable = ((g >= RIM_LIGHT_MIN) | (glyph > 0)).astype(np.uint8)
+    sil = glyph.copy()
+    for _ in range(rr):  # geodesic growth: only through bright pixels connected to the glyphs
+        grown = cv2.dilate(sil, k3) & passable
+        if np.array_equal(grown, sil):
+            break
+        sil = grown
+    sil_b = sil > 0
+    rim = int(np.count_nonzero(sil_b & (glyph == 0)))
+    if rim < RIM_MIN_RATIO * int(np.count_nonzero(glyph)):
+        return None
+    kr = cv2.getStructuringElement(cv2.MORPH_ELLIPSE, (2 * RIM_RING_PX + 1, 2 * RIM_RING_PX + 1))
+    ring = (cv2.dilate(sil, kr) > 0) & ~sil_b
+    vals = g[ring]
+    if vals.size < 16:
+        return None
+    mid = float(((vals > 60) & (vals < 200)).mean())
+    dark = float((vals <= 60).mean())
+    if mid < RIM_RING_MID_MIN and dark < RIM_RING_DARK_MIN:
+        return None  # silhouette sits in a clean area (speech bubble): keep the normal path
+    mask = cv2.dilate(sil * 255, cv2.getStructuringElement(cv2.MORPH_ELLIPSE, (5, 5)))  # + AA fringe
+    return X0, Y0, X1, Y1, mask
+
+
 def _merge_into(target: np.ndarray, x0: int, y0: int, x1: int, y1: int, mask: np.ndarray):
     target[y0:y1, x0:x1] = np.maximum(target[y0:y1, x0:x1], mask)
 
 
 # ── Main Renderer Class ────────────────────────────────────────────────────────
 # Bump whenever rendering output changes, so page JPEG caches from older logic are not reused.
-RENDER_CACHE_VERSION = "2026-09-28-lettering"
+RENDER_CACHE_VERSION = "2026-09-28-rim"
 
 
 class PDFLayoutRenderer:
@@ -793,7 +848,13 @@ class PDFLayoutRenderer:
             # Smart Routing:
             # - Clean/white bubble: Telea (<15ms, perfectly sharp, zero downsample blur)
             # - Textured/screentone/dark scene: LaMa neural inpainting
+            glyph_px = _estimate_glyph_px(seg_full, px0, py0, px1, py1)
+            outlined = _outlined_text_mask(gray_np, seg_full, px0, py0, px1, py1, glyph_px)
+            if outlined is not None:
+                is_textured = True   # rim-aware ring says artwork -> LaMa, never Telea
             target = lama_mask_np if is_textured else telea_mask_np
+            if outlined is not None:
+                _merge_into(target, *outlined)
             bm = _block_seg_mask(seg_full, px0, py0, px1, py1, seg_pad) if seg_full is not None else None
             if bm is not None:
                 # Detector text mask: whole glyphs incl. anti-aliased edges + furigana (B15).
@@ -808,7 +869,7 @@ class PDFLayoutRenderer:
                 has_telea_masks = True
 
             dx0, dy0, dx1, dy1 = _text_draw_box(seg_full, px0, py0, px1, py1)
-            style = {"glyph_px": _estimate_glyph_px(seg_full, px0, py0, px1, py1), "clean_bg": not is_textured}
+            style = {"glyph_px": glyph_px, "clean_bg": not is_textured}
             blocks_to_render.append((dx0, dy0, dx1, dy1, translated, block, style))
 
         return {
@@ -978,14 +1039,19 @@ class PDFLayoutRenderer:
             stroke_mask = mask_res[0]
             bg_val = mask_res[1]
             is_textured = mask_res[2] if len(mask_res) > 2 else (bg_val < 170)
-            
+            glyph_px = _estimate_glyph_px(seg_full, px0, py0, px1, py1)
+            outlined = _outlined_text_mask(gray_np, seg_full, px0, py0, px1, py1, glyph_px)
+            if outlined is not None:
+                is_textured = True
+                _merge_into(mask_np, *outlined)
+
             bm = _block_seg_mask(seg_full, px0, py0, px1, py1, seg_pad) if seg_full is not None else None
             if bm is not None:
                 stroke_mask = _gate_by_seg(stroke_mask, seg_full, px0, py0, px1, py1)
                 _merge_into(mask_np, *bm)
             mask_np[py0:py1, px0:px1] = np.maximum(mask_np[py0:py1, px0:px1], stroke_mask)
             dx0, dy0, dx1, dy1 = _text_draw_box(seg_full, px0, py0, px1, py1)
-            style = {"glyph_px": _estimate_glyph_px(seg_full, px0, py0, px1, py1), "clean_bg": not is_textured}
+            style = {"glyph_px": glyph_px, "clean_bg": not is_textured}
             blocks_to_render.append((dx0, dy0, dx1, dy1, translated, block, style))
 
         # 3. Create Mask Overlay visualization (Hot magenta / crimson highlight on original image)
