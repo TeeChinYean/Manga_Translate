@@ -443,7 +443,9 @@ def _flat_fill_holes(img: np.ndarray, mask_bin: np.ndarray) -> np.ndarray:
     return out
 
 
-LAMA_SANITY_DIFF = 60   # hole mean vs ring median (gray levels) beyond this = LaMa failed there
+# Measured p153 (dark halftone gradient): LaMa hole ~50 levels lighter than its ring = visible blob
+LAMA_SANITY_DIFF = 30   # hole mean vs ring median (gray levels) beyond this = LaMa failed there
+TEXTURE_BLUR = 7        # low-pass kernel separating tone texture (halftone dots) from shading
 
 
 def _implausible_holes(img: np.ndarray, mask_bin: np.ndarray) -> np.ndarray:
@@ -468,6 +470,34 @@ def _implausible_holes(img: np.ndarray, mask_bin: np.ndarray) -> np.ndarray:
             bad[Y0:Y1, X0:X1][comp] = 255
             _rstat("lama_sanity_telea", 0.0)
     return bad
+
+
+def _transfer_texture(smooth: np.ndarray, original: np.ndarray, holes: np.ndarray, all_masks: np.ndarray) -> np.ndarray:
+    """Telea gives the right shading but no screentone. Add back the tone texture (original minus
+    its low-pass) copied from an unmasked patch right next to each hole, so the fill does not
+    read as a flat smudge on halftone."""
+    out = smooth.copy()
+    n, labels, stats, _ = cv2.connectedComponentsWithStats((holes > 0).astype(np.uint8), 8)
+    if n <= 1:
+        return out
+    orig = original.astype(np.int16)
+    tex = orig - cv2.GaussianBlur(original, (TEXTURE_BLUR, TEXTURE_BLUR), 0).astype(np.int16)
+    H, W = holes.shape[:2]
+    for i in range(1, n):
+        x, y, w, h, _a = stats[i]
+        comp = labels[y:y + h, x:x + w] == i
+        for dx, dy in ((-(w + 8), 0), (w + 8, 0), (0, -(h + 8)), (0, h + 8)):
+            sx, sy = x + dx, y + dy
+            if sx < 0 or sy < 0 or sx + w > W or sy + h > H:
+                continue
+            if np.any(all_masks[sy:sy + h, sx:sx + w]):
+                continue
+            patch = tex[sy:sy + h, sx:sx + w]
+            region = out[y:y + h, x:x + w].astype(np.int16)
+            region[comp] = np.clip(region[comp] + patch[comp], 0, 255)
+            out[y:y + h, x:x + w] = region.astype(np.uint8)
+            break
+    return out
 
 
 def _lama_inpaint(img_pil: Image.Image, mask_pil: Image.Image) -> Image.Image:
@@ -524,7 +554,8 @@ def _lama_inpaint(img_pil: Image.Image, mask_pil: Image.Image) -> Image.Image:
         # on a dark tone, BUG.md B20): redo those holes with Telea (smooth, surroundings only).
         bad = _implausible_holes(result, mask_bin)
         if np.any(bad):
-            result = np.array(_fast_telea_inpaint(Image.fromarray(result), Image.fromarray(bad)))
+            smooth = np.array(_fast_telea_inpaint(Image.fromarray(result), Image.fromarray(bad)))
+            result = _transfer_texture(smooth, img_np, bad, mask_bin)
         return Image.fromarray(result)
     except Exception as e:
         logger.warning(f"[LaMa] Inference error, falling back to Telea: {e}")
@@ -940,7 +971,7 @@ def _merge_into(target: np.ndarray, x0: int, y0: int, x1: int, y1: int, mask: np
 
 # ── Main Renderer Class ────────────────────────────────────────────────────────
 # Bump whenever rendering output changes, so page JPEG caches from older logic are not reused.
-RENDER_CACHE_VERSION = "2026-09-28-rim7"
+RENDER_CACHE_VERSION = "2026-09-28-rim8"
 
 
 class PDFLayoutRenderer:
