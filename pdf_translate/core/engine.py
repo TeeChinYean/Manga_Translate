@@ -142,7 +142,56 @@ def ensure_turbovec_llm_ready(auto_launch: bool = True, max_wait_seconds: int = 
     logger.warning(f"⚠️ [Turbovec LLM] Engine did not become healthy within {max_wait_seconds}s.")
     return False
 
-def _call_turbovec_llm(payload: dict, timeout: float = 15.0):
+# ── Per-batch timing breakdown (where does translation time go?) ─────────────
+import threading as _threading
+_TLS = _threading.local()
+
+
+def _stats_begin():
+    _TLS.stats = {}
+
+
+def _stats_end() -> dict:
+    st = getattr(_TLS, "stats", None) or {}
+    _TLS.stats = None
+    return st
+
+
+def _stats_add(tag: str, seconds: float, completion_tokens: int = 0, ok: bool = True):
+    st = getattr(_TLS, "stats", None)
+    if st is None:
+        return
+    e = st.setdefault(tag, {"calls": 0, "seconds": 0.0, "completion_tokens": 0, "failed": 0})
+    e["calls"] += 1
+    e["seconds"] = round(e["seconds"] + seconds, 2)
+    e["completion_tokens"] += int(completion_tokens or 0)
+    if not ok:
+        e["failed"] += 1
+
+
+def merge_stats(total: dict, part: dict) -> dict:
+    """Sum two timing breakdowns (used by main.py across pages)."""
+    for tag, e in (part or {}).items():
+        t = total.setdefault(tag, {"calls": 0, "seconds": 0.0, "completion_tokens": 0, "failed": 0})
+        for k in ("calls", "completion_tokens", "failed"):
+            t[k] += e.get(k, 0)
+        t["seconds"] = round(t["seconds"] + e.get("seconds", 0.0), 2)
+    return total
+
+
+def _call_turbovec_llm(payload: dict, timeout: float = 15.0, tag: str = "llm"):
+    t0 = time.time()
+    data = _call_turbovec_llm_raw(payload, timeout=timeout)
+    tokens = 0
+    try:
+        tokens = int(((data or {}).get("usage") or {}).get("completion_tokens") or 0)
+    except Exception:
+        pass
+    _stats_add(tag, time.time() - t0, tokens, ok=data is not None)
+    return data
+
+
+def _call_turbovec_llm_raw(payload: dict, timeout: float = 15.0):
     """
     Calls Turbovec OpenAI-compatible API endpoint (direct llama-server 18089 or Turbovec gateway 18088).
     Automatically injects target model name, auth header, and provides connection resilience and retries.
@@ -470,7 +519,18 @@ def _is_noise(text: str) -> bool:
     return False
 
 def _google_translate_one(text: str, src: str, tgt: str = "zh-CN") -> str:
-    """Call the free Google Translate API endpoint."""
+    """Call the free Google Translate API endpoint (timed into the batch breakdown)."""
+    t0 = time.time()
+    try:
+        out = _google_translate_one_raw(text, src, tgt)
+        _stats_add("google", time.time() - t0)
+        return out
+    except Exception:
+        _stats_add("google", time.time() - t0, ok=False)
+        raise
+
+
+def _google_translate_one_raw(text: str, src: str, tgt: str = "zh-CN") -> str:
     url = "https://translate.googleapis.com/translate_a/single"
     params = {"client": "gtx", "sl": src, "tl": tgt, "dt": "t", "q": text}
     try:
@@ -560,7 +620,7 @@ def _polish_batch_dialogues_json(polish_tasks: list) -> dict:
     
     result_dict = {}
     try:
-        data = _call_turbovec_llm(payload, timeout=15.0)
+        data = _call_turbovec_llm(payload, timeout=15.0, tag="polish")
         if data and "choices" in data and len(data["choices"]) > 0:
             content = data["choices"][0]["message"]["content"].strip()
             try:
@@ -641,7 +701,7 @@ def _extract_proper_nouns_from_batch(blocks: list, results: list):
         "response_format": {"type": "json_object"}
     }
     try:
-        data = _call_turbovec_llm(payload, timeout=8.0)
+        data = _call_turbovec_llm(payload, timeout=8.0, tag="proper_nouns")
         if data and "choices" in data and len(data["choices"]) > 0:
             content = data["choices"][0]["message"]["content"].strip()
             try:
@@ -704,6 +764,7 @@ class HighPerformanceTranslationEngine:
 
         import time
         t0 = time.time()
+        _stats_begin()
         results = [""] * len(blocks)
 
         # ── Step 1: Pre-clean all blocks ─────────────────────────────────────
@@ -810,7 +871,7 @@ class HighPerformanceTranslationEngine:
                     batch_llm_success = False
                     for attempt in range(1, 3):
                         try:
-                            data = _call_turbovec_llm(payload, timeout=_batch_timeout(len(chunk_indices)))
+                            data = _call_turbovec_llm(payload, timeout=_batch_timeout(len(chunk_indices)), tag="batch")
                             if data and "choices" in data and len(data["choices"]) > 0:
                                 batch_llm_success = True
                                 reply = data["choices"][0]["message"]["content"].strip()
@@ -857,7 +918,7 @@ class HighPerformanceTranslationEngine:
                                     "max_tokens": 120,
                                 }
                                 try:
-                                    sdata = _call_turbovec_llm(single_payload, timeout=8.0)
+                                    sdata = _call_turbovec_llm(single_payload, timeout=8.0, tag="single_fallback")
                                     if sdata and "choices" in sdata and len(sdata["choices"]) > 0:
                                         sc = sdata["choices"][0]["message"]["content"].strip()
                                         if any('\u4e00' <= c <= '\u9fff' for c in sc):
@@ -976,6 +1037,7 @@ class HighPerformanceTranslationEngine:
 
         # ── Step 6: Dynamically Extract Proper Nouns ─────────────────────────
         _extract_proper_nouns_from_batch(blocks, results)
+        breakdown = _stats_end()
 
         elapsed = time.time() - t0
         total_chars = sum(len(r) for r in results)
@@ -986,11 +1048,12 @@ class HighPerformanceTranslationEngine:
             "latency_ms": round(elapsed * 1000, 2),
             "cuda_graphs_active": False,
             "tokens_generated": total_chars,
-            "model_breakdown": engine_counts
+            "model_breakdown": engine_counts,
+            "time_breakdown": breakdown
         }
         logger.info(
             f"[✓] {len(blocks)} blocks translated in {elapsed:.2f}s "
-            f"({metrics['tokens_per_sec']:.0f} chars/s) | Models: {engine_counts}"
+            f"({metrics['tokens_per_sec']:.0f} chars/s) | Models: {engine_counts} | Time: {breakdown}"
         )
         return results, metrics
 

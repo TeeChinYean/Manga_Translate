@@ -39,6 +39,8 @@ if __name__ == "__main__":
         ev, wall, data = run(a.pdf, mode, a.pages, a.chunk)
         rows.append((mode, ev, wall, data.get("stage_times"), data.get("warning") or data.get("message", "")))
         print(f"   {ev} in {wall}s  stages={data.get('stage_times')}", flush=True)
+        print(f"   translate breakdown={data.get('translate_breakdown')}", flush=True)
+        print(f"   engines={data.get('model_usage')}", flush=True)
     print("\nmode      result    wall(s)  stage_times")
     for mode, ev, wall, st, note in rows:
         print(f"{mode:<9} {ev:<9} {wall:<8} {st} {note}")
