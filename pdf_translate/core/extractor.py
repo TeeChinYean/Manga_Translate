@@ -180,10 +180,15 @@ def _get_paddle_ocr():
                         gpu_kwargs = {f"{part}_{flag}": True for part in ("det", "cls", "rec")}
                     try:
                         _PADDLE_OCR_INSTANCE = RapidOCR(text_score=0.35, **gpu_kwargs)
-                    except TypeError:
-                        # Older rapidocr without GPU switches
+                    except Exception as gpu_err:
+                        if not gpu_kwargs:
+                            raise
+                        # Some rapidocr versions reject the *_use_dml / *_use_cuda switches
+                        # (e.g. KeyError 'model_path'); never lose the OCR engine over it.
+                        logger.warning(f"[PaddleOCR] GPU options rejected ({type(gpu_err).__name__}: {gpu_err}); using CPU.")
                         _PADDLE_OCR_INSTANCE = RapidOCR(text_score=0.35)
                         gpu_kwargs = {}
+                        _PLACEMENT["paddle_ocr"] = "cpu"
                     logger.info(f"[PaddleOCR] Initialized RapidOCR ONNX engine ({'GPU ' + str(gpu_kwargs) if gpu_kwargs else 'CPU'}).")
                     if gpu_kwargs:
                         eng = _PADDLE_OCR_INSTANCE
