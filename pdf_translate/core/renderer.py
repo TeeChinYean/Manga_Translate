@@ -443,6 +443,33 @@ def _flat_fill_holes(img: np.ndarray, mask_bin: np.ndarray) -> np.ndarray:
     return out
 
 
+LAMA_SANITY_DIFF = 60   # hole mean vs ring median (gray levels) beyond this = LaMa failed there
+
+
+def _implausible_holes(img: np.ndarray, mask_bin: np.ndarray) -> np.ndarray:
+    """uint8 mask of the components whose filled result is far off the surrounding brightness."""
+    bad = np.zeros(mask_bin.shape, np.uint8)
+    n, labels, stats, _ = cv2.connectedComponentsWithStats((mask_bin > 0).astype(np.uint8), 8)
+    if n <= 1:
+        return bad
+    gray = cv2.cvtColor(img, cv2.COLOR_RGB2GRAY)
+    H, W = mask_bin.shape[:2]
+    k = cv2.getStructuringElement(cv2.MORPH_ELLIPSE, (2 * FLAT_RING_PX + 1, 2 * FLAT_RING_PX + 1))
+    for i in range(1, n):
+        x, y, w, h, _a = stats[i]
+        X0, Y0 = max(0, x - FLAT_RING_PX - 1), max(0, y - FLAT_RING_PX - 1)
+        X1, Y1 = min(W, x + w + FLAT_RING_PX + 1), min(H, y + h + FLAT_RING_PX + 1)
+        comp = labels[Y0:Y1, X0:X1] == i
+        ring = (cv2.dilate(comp.astype(np.uint8), k) > 0) & (mask_bin[Y0:Y1, X0:X1] == 0)
+        g = gray[Y0:Y1, X0:X1]
+        if ring.sum() < 20:
+            continue
+        if abs(float(g[comp].mean()) - float(np.median(g[ring]))) > LAMA_SANITY_DIFF:
+            bad[Y0:Y1, X0:X1][comp] = 255
+            _rstat("lama_sanity_telea", 0.0)
+    return bad
+
+
 def _lama_inpaint(img_pil: Image.Image, mask_pil: Image.Image) -> Image.Image:
     """
     High-fidelity neural inpainting using LaMa ONNX (Fast Fourier Convolutions).
@@ -493,6 +520,11 @@ def _lama_inpaint(img_pil: Image.Image, mask_pil: Image.Image) -> Image.Image:
             # Only replace masked pixels; everything else stays bit-exact original.
             sel = mask_bin[y0:y1, x0:x1] > 0
             result[y0:y1, x0:x1][sel] = healed[sel]
+        # LaMa sometimes fills a hole far brighter/darker than everything around it (white blob
+        # on a dark tone, BUG.md B20): redo those holes with Telea (smooth, surroundings only).
+        bad = _implausible_holes(result, mask_bin)
+        if np.any(bad):
+            result = np.array(_fast_telea_inpaint(Image.fromarray(result), Image.fromarray(bad)))
         return Image.fromarray(result)
     except Exception as e:
         logger.warning(f"[LaMa] Inference error, falling back to Telea: {e}")
@@ -770,6 +802,8 @@ RIM_RING_PX = 6            # background ring width around the silhouette
 RIM_RING_MID_MIN = 0.15    # ring is art/screentone if >=15% mid-tone ...
 RIM_RING_DARK_MIN = 0.30   # ... or >=30% dark (dark scene); thin bubble lines stay below
 RIM_MIN_RATIO = 0.3        # rim area must be >=30% of glyph area (really outlined text)
+RIM_EXTRA_STEPS = 8        # extra growth steps used to tell a thin rim from a white area
+RIM_STILL_GROWING = 0.5    # >50% more bright pixels in those steps -> not a rim
 
 
 def _outlined_text_mask(gray: np.ndarray, seg: np.ndarray, x0: int, y0: int, x1: int, y1: int,
@@ -779,9 +813,7 @@ def _outlined_text_mask(gray: np.ndarray, seg: np.ndarray, x0: int, y0: int, x1:
     if seg is None:
         return None
     H, W = gray.shape[:2]
-    # Geodesic growth stops by itself at the (non-bright) artwork, so a generous radius is safe
-    rr = int(np.clip(round(0.35 * glyph_px) if glyph_px else 12, 6, 24))
-    fringe = int(np.clip(round(0.12 * glyph_px) if glyph_px else 3, 3, 6))
+    rr = int(np.clip(round(0.3 * glyph_px) if glyph_px else 10, 4, 16))
     pad = rr + RIM_RING_PX + 4
     X0, Y0, X1, Y1 = max(0, x0 - pad), max(0, y0 - pad), min(W, x1 + pad), min(H, y1 + pad)
     g = gray[Y0:Y1, X0:X1]
@@ -812,8 +844,14 @@ def _outlined_text_mask(gray: np.ndarray, seg: np.ndarray, x0: int, y0: int, x1:
     dark = float((vals <= 60).mean())
     if mid < RIM_RING_MID_MIN and dark < RIM_RING_DARK_MIN:
         return None  # silhouette sits in a clean area (speech bubble): keep the normal path
-    # + AA fringe: any rim remnant left on the hole border is copied inward by LaMa
-    mask = cv2.dilate(sil * 255, cv2.getStructuringElement(cv2.MORPH_ELLIPSE, (2 * fringe + 1, 2 * fringe + 1)))
+    # A rim is THIN: growth must stop by itself. If the bright area keeps growing it is a white
+    # balloon or white artwork (hair, clothes), not a rim -> leave it to the normal path.
+    more = sil.copy()
+    for _ in range(RIM_EXTRA_STEPS):
+        more = cv2.dilate(more, k3) & passable
+    if int(np.count_nonzero(more)) - int(np.count_nonzero(sil)) > RIM_STILL_GROWING * rim:
+        return None
+    mask = cv2.dilate(sil * 255, cv2.getStructuringElement(cv2.MORPH_ELLIPSE, (5, 5)))  # + AA fringe
     return X0, Y0, X1, Y1, mask
 
 
@@ -823,7 +861,7 @@ def _merge_into(target: np.ndarray, x0: int, y0: int, x1: int, y1: int, mask: np
 
 # ── Main Renderer Class ────────────────────────────────────────────────────────
 # Bump whenever rendering output changes, so page JPEG caches from older logic are not reused.
-RENDER_CACHE_VERSION = "2026-09-28-rim3"
+RENDER_CACHE_VERSION = "2026-09-28-rim4"
 
 
 class PDFLayoutRenderer:
