@@ -384,8 +384,32 @@ def _split_box_by_seg(seg: np.ndarray, box) -> list:
     return out
 
 
+# ── Extraction timing breakdown ───────────────────────────────────────────────
+import time as _time
+_EXTRACT_STATS = {}
+_EXTRACT_STATS_LOCK = threading.Lock()
+
+
+def _xstat(tag: str, seconds: float, n: int = 1):
+    with _EXTRACT_STATS_LOCK:
+        e = _EXTRACT_STATS.setdefault(tag, {"calls": 0, "seconds": 0.0})
+        e["calls"] += n
+        e["seconds"] = round(e["seconds"] + seconds, 2)
+
+
+def reset_extract_stats():
+    with _EXTRACT_STATS_LOCK:
+        _EXTRACT_STATS.clear()
+
+
+def get_extract_stats() -> dict:
+    with _EXTRACT_STATS_LOCK:
+        return {k: dict(v) for k, v in _EXTRACT_STATS.items()}
+
+
 # ── Batched MangaOCR (one generate() call for many crops) ─────────────────────
-MANGA_OCR_BATCH = max(1, int(os.getenv("MANGA_OCR_BATCH", "8")))
+# Measured on 第5巻 (13 real crops, CPU): 1 -> 0.35s/crop, 8 -> 0.26, 16 -> 0.22, text identical
+MANGA_OCR_BATCH = max(1, int(os.getenv("MANGA_OCR_BATCH", "16")))
 
 
 def _manga_ocr_batch(mocr, images, batch_size: int = MANGA_OCR_BATCH) -> list:
@@ -712,6 +736,7 @@ class PDFLayoutExtractor:
         1. Fast Path: Native digital PDF text extraction via PyMuPDF (0ms, 100% precision, 0 GPU).
         2. Deep Path: EasyOCR CRAFT text region detection + MangaOCR recognition for scanned manga.
         """
+        _t_page = _time.time()
         doc = fitz.open(pdf_path)
         page = doc[page_num - 1]
         page_width = float(page.rect.width)
@@ -777,12 +802,17 @@ class PDFLayoutExtractor:
         # Optimized detection resolution: 850.0px runs ~30% faster on CPU while capturing all bubbles
         TARGET_HEIGHT = 850.0
         SCALE = TARGET_HEIGHT / max(1.0, page_height)
+        _t = _time.time()
         pix = page.get_pixmap(matrix=fitz.Matrix(SCALE, SCALE), alpha=False)
         img_np = np.frombuffer(pix.samples, dtype=np.uint8).reshape((pix.height, pix.width, 3))
         doc.close()
         
         # 2. Text Region Detection (Comic-Text-Detector ONNX with CRAFT fallback)
+        _xstat("rasterize", _time.time() - _t)
+        _t = _time.time()
         comic_session = _get_comic_detector()
+        _xstat("load_detector", _time.time() - _t, n=0)
+        _t = _time.time()
         raw_box_to_text = {}
         seg_holder = []
         
@@ -804,6 +834,7 @@ class PDFLayoutExtractor:
                     logger.info(f"[ComicTextDetector] Page {page_num}: split {len(merged_boxes)} boxes into {len(split_boxes)} text groups.")
                 merged_boxes = split_boxes
             logger.info(f"[ComicTextDetector] Page {page_num}: Detected {len(merged_boxes)} speech bubbles.")
+            _xstat("detect", _time.time() - _t)
         else:
             # Fallback to EasyOCR CRAFT
             reader = _get_ocr_reader(source_lang)
@@ -840,6 +871,7 @@ class PDFLayoutExtractor:
         #   Others   -> PaddleOCR (RapidOCR ONNX) first.
         # RapidOCR's default PP-OCR model is Chinese/English: on vertical Japanese it returns
         # non-empty but wrong text (kana dropped, columns interleaved), so it must not be primary.
+        _t = _time.time()
         paddle_ocr = _get_paddle_ocr()
         mocr = None
         if source_lang == "Japanese":
@@ -932,6 +964,8 @@ class PDFLayoutExtractor:
         else:
             ocr_chain = [(_ocr_paddle, "PaddleOCR (PP-OCRv4)")]
 
+        _xstat("load_ocr_models", _time.time() - _t, n=0)
+        _t = _time.time()
         # 2b. Batched MangaOCR: recognise all boxes of the page in a few generate() calls
         if mocr is not None and len(merged_boxes) > 1:
             keys, imgs = [], []
@@ -953,6 +987,9 @@ class PDFLayoutExtractor:
                     manga_cache.clear()
                     logger.warning(f"[MangaOCR] batched OCR failed ({be}); falling back to per-crop")
 
+        if manga_cache:
+            _xstat("manga_ocr_batch", _time.time() - _t, n=len(manga_cache))
+        _t = _time.time()
         # 3. Process each unified speech bubble box
         for (x0, y0, x1, y1) in merged_boxes:
             if x1 <= x0 or y1 <= y0:
@@ -1008,6 +1045,7 @@ class PDFLayoutExtractor:
             })
             block_id_counter += 1
 
+        _xstat("ocr_per_box", _time.time() - _t, n=len(merged_boxes))
         # Apply multi-column vertical-horizontal sorting
         sorted_blocks = self._sort_layout_blocks(blocks, page_width)
 
@@ -1021,6 +1059,7 @@ class PDFLayoutExtractor:
             "page_width": page_width,
             "page_height": page_height
         }
+        _xstat("page_total", _time.time() - _t_page)
         if seg_holder:
             # Page-level text pixel mask for the renderer (PNG bytes, ~20-60KB). Keys starting
             # with "_" are runtime-only and stripped from the JSON export.

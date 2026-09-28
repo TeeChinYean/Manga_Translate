@@ -44,6 +44,7 @@ if __name__ == "__main__":
         print(f"   {ev} in {wall}s  stages={data.get('stage_times')}", flush=True)
         print(f"   translate breakdown={data.get('translate_breakdown')}", flush=True)
         print(f"   engines={data.get('model_usage')}", flush=True)
+        print(f"   extract breakdown={data.get('extract_breakdown')}", flush=True)
         print(f"   render breakdown={data.get('render_breakdown')}", flush=True)
     print("\nmode      result    wall(s)  stage_times")
     for mode, ev, wall, st, note in rows:

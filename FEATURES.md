@@ -108,3 +108,10 @@
 - 实现要点：批量识别失败时自动退回逐个识别；某个框结果为空时照常走 PaddleOCR / EasyOCR fallback。ONNX 方案（`manga_ocr_encoder.onnx`）只导出了 encoder，在 VM 上加载 345MB 的外部数据文件就超时了，这次先不做。
 - 相关测试：`tests/test_manga_batch.py`（2 个用例），已加入 pre-commit。
 - 状态：Done（待用户用脚本实测加速倍数）
+
+### [Extract] 提取耗时分解 (extract breakdown)
+- 说明：统计每页提取各阶段耗时，找出真正瓶颈；MangaOCR batch 默认改为 16（实测 0.35→0.22s/crop，文本一致 13/13）。
+- 涉及文件/模块：core/extractor.py（_xstat / reset_extract_stats / get_extract_stats）、main.py（metrics.extract_breakdown、SSE complete）、scratch/bench_modes.py。
+- 实现要点：阶段 rasterize / load_detector / detect / load_ocr_models / manga_ocr_batch / ocr_per_box / page_total；线程安全累加。
+- 相关测试：tests/test_extract_stats.py
+- 状态：Done
