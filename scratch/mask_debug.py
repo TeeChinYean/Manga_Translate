@@ -65,6 +65,21 @@ def main():
         strip = np.concatenate([base, ov, clean, final], axis=1)
         name = f"{os.path.splitext(os.path.basename(a.pdf))[0][-12:]}_p{p}.jpg"
         Image.fromarray(strip).save(os.path.join(OUT, name), quality=88)
+        if prep["lama_mask"] is not None:
+            import cv2
+            g = cv2.cvtColor(base, cv2.COLOR_RGB2GRAY)
+            n, lab, st, _ = cv2.connectedComponentsWithStats((prep["lama_mask"] > 0).astype(np.uint8), 8)
+            k = cv2.getStructuringElement(cv2.MORPH_ELLIPSE, (11, 11))
+            for i in range(1, n):
+                comp = (lab == i).astype(np.uint8)
+                ring = (cv2.dilate(comp, k) > 0) & (prep["lama_mask"] == 0)
+                r1 = (cv2.dilate(comp, np.ones((3, 3), np.uint8)) > 0) & (comp == 0)
+                x, y, w, h, a = st[i]
+                gv, gr = g[ring], g[r1]
+                med = float(np.median(gv)) if gv.size else -1
+                share = float((np.abs(gv.astype(int) - med) <= R.FLAT_TOL).mean()) if gv.size else 0
+                print(f"   hole {i}: box=({x},{y},{w},{h}) area={a} ring5_median={med:.0f} flat_share={share:.2f} "
+                      f"border1px_bright={float((gr >= 200).mean()):.2f}", flush=True)
         nl = int(np.count_nonzero(prep["lama_mask"])) if prep["lama_mask"] is not None else 0
         nt = int(np.count_nonzero(prep["telea_mask"])) if prep["telea_mask"] is not None else 0
         print(f"page {p}: blocks={len(prep['blocks'])} lama_px={nl} telea_px={nt} -> {os.path.join(OUT, name)}", flush=True)

@@ -855,13 +855,59 @@ def _outlined_text_mask(gray: np.ndarray, seg: np.ndarray, x0: int, y0: int, x1:
     return X0, Y0, X1, Y1, mask
 
 
+PEEL_MAX_STEPS = 12      # max px a LaMa hole is grown over a bright rim remnant on its border
+PEEL_RING_DARK = 170     # only for holes whose surroundings (6px out) are darker than this
+
+
+def _peel_bright_border(gray: np.ndarray, mask: np.ndarray) -> np.ndarray:
+    """Grow each hole over the bright rim remnant still touching it (outlined lettering whose
+    rim reaches beyond every per-box estimate). Telea/LaMa copy the border colour inward, so a
+    white border on a dark tone becomes a white blob (BUG.md B20). A remnant is thin: if the
+    bright area keeps growing, it is white artwork and the hole is left as is."""
+    n, labels, stats, _ = cv2.connectedComponentsWithStats((mask > 0).astype(np.uint8), 8)
+    if n <= 1:
+        return mask
+    H, W = mask.shape[:2]
+    k3 = cv2.getStructuringElement(cv2.MORPH_ELLIPSE, (3, 3))
+    k6 = cv2.getStructuringElement(cv2.MORPH_ELLIPSE, (13, 13))
+    out = mask.copy()
+    pad = PEEL_MAX_STEPS + 8
+    for i in range(1, n):
+        x, y, w, h, area = stats[i]
+        X0, Y0, X1, Y1 = max(0, x - pad), max(0, y - pad), min(W, x + w + pad), min(H, y + h + pad)
+        comp = (labels[Y0:Y1, X0:X1] == i).astype(np.uint8)
+        g = gray[Y0:Y1, X0:X1]
+        bright = (g >= RIM_LIGHT_MIN).astype(np.uint8)
+        grown = comp.copy()
+        for _ in range(PEEL_MAX_STEPS):
+            nxt = grown | (cv2.dilate(grown, k3) & bright)
+            if np.array_equal(nxt, grown):
+                break
+            grown = nxt
+        added = int(grown.sum()) - int(comp.sum())
+        if added <= 0:
+            continue
+        still = grown | (cv2.dilate(grown, k3) & bright)
+        for _ in range(RIM_EXTRA_STEPS - 1):
+            still = still | (cv2.dilate(still, k3) & bright)
+        if int(still.sum()) - int(grown.sum()) > RIM_STILL_GROWING * added:
+            continue  # bright area continues: white artwork, not a rim remnant
+        ring = (cv2.dilate(grown, k6) > 0) & (grown == 0)
+        if ring.sum() < 20 or float(np.median(g[ring])) >= PEEL_RING_DARK:
+            continue  # surroundings are light anyway (bubble): nothing to fix
+        grown = cv2.dilate(grown, k3)
+        out[Y0:Y1, X0:X1] = np.maximum(out[Y0:Y1, X0:X1], grown * 255)
+        _rstat("peel_rim", 0.0)
+    return out
+
+
 def _merge_into(target: np.ndarray, x0: int, y0: int, x1: int, y1: int, mask: np.ndarray):
     target[y0:y1, x0:x1] = np.maximum(target[y0:y1, x0:x1], mask)
 
 
 # ── Main Renderer Class ────────────────────────────────────────────────────────
 # Bump whenever rendering output changes, so page JPEG caches from older logic are not reused.
-RENDER_CACHE_VERSION = "2026-09-28-rim4"
+RENDER_CACHE_VERSION = "2026-09-28-rim5"
 
 
 class PDFLayoutRenderer:
@@ -963,6 +1009,8 @@ class PDFLayoutRenderer:
             style = {"glyph_px": glyph_px, "clean_bg": not is_textured}
             blocks_to_render.append((dx0, dy0, dx1, dy1, translated, block, style))
 
+        if has_lama_masks:
+            lama_mask_np = _peel_bright_border(gray_np, lama_mask_np)
         return {
             "blocks": blocks_to_render,
             "telea_mask": telea_mask_np if has_telea_masks else None,
