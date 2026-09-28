@@ -101,3 +101,10 @@
   - 结论：页数一多，翻译时间（约 145s LLM）就值得藏到提取后面同时进行；只有 10 页时翻译约 10s，没什么可藏的，serial 更快（95.5s）。两种模式的重绘时间现在基本一样（渲染并发已修）。
 - 改动：`PIPELINE_MODES` 加入 `auto`，`resolve_pipeline_mode()`：少于 `AUTO_OVERLAP_MIN_PAGES`（默认 20，可用环境变量调整）页用 serial，否则用 overlap。默认 `PIPELINE_MODE=auto`，前端下拉框默认选中"自动"。完成信息里会显示成类似 `auto->overlap`。
 - 相关测试：`tests/test_low_bugs.py::test_auto_mode_*`。用 stub 依赖跑：8 页 → serial 流程；把阈值设为 5 → overlap 流程。
+
+### [全局] MangaOCR 批量识别（每页几次 generate，代替每个框一次）
+- 说明：50 页里提取约占总时间的 70%，其中 MangaOCR 在 CPU 上每个文本框约 1 秒。现在同一页的所有框先裁好图，按 `MANGA_OCR_BATCH`（默认 8）一批，堆叠后调一次 `model.generate()`。每个框仍然是单独识别的（只是一起送进模型），结果按框存进 `manga_cache`，后续的 OCR 链、写入块、重绘都用原来的框和位置（用户要求：重绘要回到原本的位置）。
+- 涉及文件/模块：`core/extractor.py`（`_manga_ocr_batch`、`_extract_single_page` 里的 2b 步骤）、`scratch/mangaocr_batch_test.py`（在真实裁图上对比逐个识别和批量识别的耗时，以及文字是否一致）。
+- 实现要点：批量识别失败时自动退回逐个识别；某个框结果为空时照常走 PaddleOCR / EasyOCR fallback。ONNX 方案（`manga_ocr_encoder.onnx`）只导出了 encoder，在 VM 上加载 345MB 的外部数据文件就超时了，这次先不做。
+- 相关测试：`tests/test_manga_batch.py`（2 个用例），已加入 pre-commit。
+- 状态：Done（待用户用脚本实测加速倍数）

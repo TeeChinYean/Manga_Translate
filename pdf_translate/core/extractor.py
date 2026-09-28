@@ -384,6 +384,29 @@ def _split_box_by_seg(seg: np.ndarray, box) -> list:
     return out
 
 
+# ── Batched MangaOCR (one generate() call for many crops) ─────────────────────
+MANGA_OCR_BATCH = max(1, int(os.getenv("MANGA_OCR_BATCH", "8")))
+
+
+def _manga_ocr_batch(mocr, images, batch_size: int = MANGA_OCR_BATCH) -> list:
+    """
+    OCR several crops with one encoder/decoder pass per batch instead of one call per crop.
+    Every crop is still recognised on its own (the batch only stacks them), so each text maps
+    back to its own box / position. Returns one string per image ("" on failure).
+    """
+    import torch
+    from manga_ocr.ocr import post_process
+    texts = []
+    for i in range(0, len(images), batch_size):
+        chunk = images[i:i + batch_size]
+        with _MANGA_OCR_LOCK, torch.inference_mode():
+            x = torch.stack([mocr._preprocess(im) for im in chunk]).to(mocr.model.device)
+            out = mocr.model.generate(x, max_new_tokens=64, max_length=None).cpu()
+        for row in out:
+            texts.append(post_process(mocr.tokenizer.decode(row, skip_special_tokens=True)).strip())
+    return texts
+
+
 def _get_ocr_reader(lang="Japanese"):
     global _OCR_READER_JA, _OCR_READER_EN
     eo = _get_easyocr()
@@ -852,10 +875,24 @@ class PDFLayoutExtractor:
                 logger.warning(f"[PaddleOCR] Recognition failed on crop: {pe}")
             return ""
 
+        manga_cache = {}
+
+        def _manga_crop_image(x0, y0, x1, y1):
+            crop_np = _crop(x0, y0, x1, y1, 8)
+            if crop_np is None or crop_np.size == 0:
+                return None
+            crop_img = Image.fromarray(crop_np)
+            if crop_img.width < 16 or crop_img.height < 16:
+                crop_img = crop_img.resize(
+                    (max(crop_img.width, 32), max(crop_img.height, 32)), Image.LANCZOS)
+            return crop_img
+
         def _ocr_manga(x0, y0, x1, y1):
             nonlocal mocr
             if mocr is None:
                 return ""
+            if (x0, y0, x1, y1) in manga_cache:
+                return manga_cache[(x0, y0, x1, y1)]
             try:
                 crop_np = _crop(x0, y0, x1, y1, 8)
                 if crop_np is None or crop_np.size == 0:
@@ -894,6 +931,27 @@ class PDFLayoutExtractor:
             ocr_chain = [(_ocr_manga, "MangaOCR (ViT)"), (_ocr_paddle, "PaddleOCR (PP-OCRv4 Fallback)")]
         else:
             ocr_chain = [(_ocr_paddle, "PaddleOCR (PP-OCRv4)")]
+
+        # 2b. Batched MangaOCR: recognise all boxes of the page in a few generate() calls
+        if mocr is not None and len(merged_boxes) > 1:
+            keys, imgs = [], []
+            for b in merged_boxes:
+                if b[2] > b[0] and b[3] > b[1]:
+                    im = _manga_crop_image(*b)
+                    if im is not None:
+                        keys.append(tuple(b))
+                        imgs.append(im)
+            if imgs:
+                try:
+                    import time as _t
+                    t0 = _t.time()
+                    for k, txt in zip(keys, _manga_ocr_batch(mocr, imgs)):
+                        manga_cache[k] = txt
+                    logger.info(f"[MangaOCR] Page {page_num}: {len(imgs)} crops in {_t.time() - t0:.2f}s (batched)")
+                except Exception as be:
+                    # Fall back to one-by-one recognition below
+                    manga_cache.clear()
+                    logger.warning(f"[MangaOCR] batched OCR failed ({be}); falling back to per-crop")
 
         # 3. Process each unified speech bubble box
         for (x0, y0, x1, y1) in merged_boxes:
