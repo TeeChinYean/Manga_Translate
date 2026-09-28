@@ -139,6 +139,37 @@ DEFAULT_CONTEXT_CHUNK = 36  # Japanese lines per LLM call in 'serial' mode
 RENDER_CONCURRENCY = max(1, int(os.getenv("RENDER_CONCURRENCY", "3")))  # pages rendered at once in 'serial' mode
 
 
+STATIC_KEEP_FILES = 20  # ~5 tasks (pdf + zip + doc + json each)
+
+
+def prune_static_outputs(static_dir: str, keep: int = STATIC_KEEP_FILES) -> int:
+    """Delete all but the newest `keep` output files in static_dir. Returns how many were removed."""
+    try:
+        entries = [os.path.join(static_dir, f) for f in os.listdir(static_dir) if not f.startswith(".git")]
+    except OSError:
+        return 0
+    files = sorted((p for p in entries if os.path.isfile(p)), key=os.path.getmtime, reverse=True)
+    removed = 0
+    for path in files[keep:]:
+        try:
+            os.unlink(path)
+            removed += 1
+        except OSError as e:
+            logger.warning(f"Failed to remove old output {path}: {e}")
+    return removed
+
+
+DOWNLOAD_MEDIA_TYPES = {
+    ".pdf": "application/pdf",
+    ".zip": "application/zip",
+    ".json": "application/json",
+    ".docx": "application/vnd.openxmlformats-officedocument.wordprocessingml.document",
+    ".doc": "application/msword",
+    ".txt": "text/plain; charset=utf-8",
+    ".html": "text/html; charset=utf-8",
+}
+
+
 def strip_runtime_keys(obj):
     """Drop runtime-only keys (leading "_", e.g. _text_mask_png bytes) before JSON export."""
     if isinstance(obj, dict):
@@ -234,25 +265,25 @@ async def translation_worker():
         }
         
         try:
+            if task_id in cancelled_tasks:
+                # Cancelled while still queued: do nothing (and do not touch earlier downloads)
+                logger.info(f"Task {task_id} was cancelled before it started; skipping.")
+                status_db[task_id] = {
+                    "percent": 0,
+                    "stage": "用户已终止本次翻译任务。",
+                    "status": "failed",
+                    "message": "Task cancelled by user."
+                }
+                continue
+
             logger.info(f"🚀 Processing Task {task_id} inside background loop...")
             
             if source_lang == "Japanese":
                 from core.engine import ensure_turbovec_llm_ready
                 await asyncio.to_thread(ensure_turbovec_llm_ready, True, 20)
             
-            # Treat STATIC_DIR as cache: keep only the latest run's files
-            try:
-                for f in os.listdir(STATIC_DIR):
-                    if f.startswith(".git"):
-                        continue
-                    file_path = os.path.join(STATIC_DIR, f)
-                    if os.path.isfile(file_path) or os.path.islink(file_path):
-                        os.unlink(file_path)
-                    elif os.path.isdir(file_path):
-                        shutil.rmtree(file_path)
-                logger.info("Cleared previous files in static directory (cache mode).")
-            except Exception as e:
-                logger.warning(f"Failed to clear old static files: {e}")
+            # Output files: keep the most recent runs so earlier download links keep working (B10)
+            prune_static_outputs(STATIC_DIR, keep=STATIC_KEEP_FILES)
             
             # Step 1: Intelligent Layout Extraction (CPU Parallel)
             status_db[task_id] = {
@@ -297,9 +328,10 @@ async def translation_worker():
             
             # Clear cache for selected pages if force_retranslate is True
             if force_retranslate:
+                import glob
                 for page_num in selected_pages:
-                    cache_path = os.path.join(cache_base_dir, f"page_{page_num}.jpg")
-                    if os.path.exists(cache_path):
+                    for cache_path in (glob.glob(os.path.join(cache_base_dir, f"page_{page_num}.jpg"))
+                                       + glob.glob(os.path.join(cache_base_dir, f"page_{page_num}_*.jpg"))):
                         try:
                             os.remove(cache_path)
                             logger.info(f"Cleared cache for page {page_num}")
@@ -395,7 +427,7 @@ async def translation_worker():
                 """Cached page: restore the rendered JPEG and skip translation + rendering."""
                 nonlocal translated_count, rendered_count
                 page_num = page["page_num"]
-                cache_path = os.path.join(cache_base_dir, f"page_{page_num}.jpg")
+                cache_path = os.path.join(cache_base_dir, renderer.cache_filename(page_num))
                 if not os.path.exists(cache_path):
                     return False
                 logger.info(f"Page {page_num} found in cache. Skipping translation.")
@@ -478,7 +510,7 @@ async def translation_worker():
                 nonlocal rendered_count
                 p_num = page["page_num"]
                 src_page = src_doc[p_num - 1]
-                cache_path = os.path.join(cache_base_dir, f"page_{p_num}.jpg")
+                cache_path = os.path.join(cache_base_dir, renderer.cache_filename(p_num))
 
                 dest_path = await renderer.render_single_page_to_temp(
                     page_data=page,
@@ -738,6 +770,7 @@ async def translation_worker():
                     os.remove(pdf_path)
                 except Exception as ex:
                     logger.warning(f"Could not clean file {pdf_path}: {ex}")
+            cancelled_tasks.discard(task_id)
             translation_queue.task_done()
 
 # ----------------------------------------------------
@@ -1041,7 +1074,7 @@ async def download_translated_file(filename: str):
     """
     filepath = os.path.join(STATIC_DIR, filename)
     if os.path.exists(filepath):
-        media_type = "application/zip" if filename.endswith(".zip") else "application/pdf"
+        media_type = DOWNLOAD_MEDIA_TYPES.get(os.path.splitext(filename)[1].lower(), "application/octet-stream")
         return FileResponse(
             path=filepath,
             filename=filename,

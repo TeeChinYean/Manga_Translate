@@ -237,6 +237,8 @@ async def _run_pipeline_async(pdf_path, page_range_str, source_lang, target_lang
         
         translation_queue = asyncio.Queue()
         
+        translation_errors = []
+
         async def translation_worker():
             while True:
                 chunk = await translation_queue.get()
@@ -246,7 +248,9 @@ async def _run_pipeline_async(pdf_path, page_range_str, source_lang, target_lang
                 try:
                     await process_page_chunk_translate(chunk)
                 except Exception as e:
+                    # Record and keep draining the queue; the task fails after extraction (B9)
                     print(f"\n[Pipeline] 🚨 后台翻译线程异常: {e}")
+                    translation_errors.append(e)
                 finally:
                     translation_queue.task_done()
 
@@ -282,6 +286,8 @@ async def _run_pipeline_async(pdf_path, page_range_str, source_lang, target_lang
         # 等待后台翻译队列全部完成收尾
         await translation_queue.put(None)
         await worker_task
+        if translation_errors:
+            raise Exception(f"翻译阶段出错（{len(translation_errors)} 批）: {translation_errors[0]}")
         print(f"\n[Pipeline] 🧹 翻译阶段已全部完成，已准备好所有页面的翻译文本映射！")
 
         # ── 阶段 3：全面启动 OpenCV Telea 极速重绘与排版 (Stage 3: OpenCV Telea Inpainting & Layout) ──
@@ -294,7 +300,7 @@ async def _run_pipeline_async(pdf_path, page_range_str, source_lang, target_lang
             import shutil
             nonlocal rendered_count
             p_num = page["page_num"]
-            cache_path = os.path.join(cache_base_dir, f"page_{p_num}.jpg")
+            cache_path = os.path.join(cache_base_dir, renderer.cache_filename(p_num))
             
             if os.path.exists(cache_path):
                 temp_dest = os.path.join(temp_dir, f"rendered_page_{p_num}.jpg")
@@ -303,7 +309,11 @@ async def _run_pipeline_async(pdf_path, page_range_str, source_lang, target_lang
             else:
                 src_page = doc[p_num - 1]
                 dest_path = await render_page_background(page, p_num, src_page)
-                if dest_path and os.path.exists(dest_path):
+                page_blocks = page.get("blocks", [])
+                has_translated = (not page_blocks) or any(
+                    translated_text_map.get((p_num, b["id"]), "").strip() for b in page_blocks)
+                if dest_path and os.path.exists(dest_path) and has_translated:
+                    # Never cache a page whose translation failed entirely (B9)
                     await asyncio.to_thread(shutil.copy, dest_path, cache_path)
                 render_tasks[p_num] = dest_path
                 
@@ -328,12 +338,16 @@ async def _run_pipeline_async(pdf_path, page_range_str, source_lang, target_lang
         out_doc = fitz.open()
         for page_num in range(1, total_doc_pages + 1):
             src_page = doc[page_num - 1]
-            out_page = out_doc.new_page(
-                width=src_page.rect.width,
-                height=src_page.rect.height
-            )
-            if page_num in rendered_images and os.path.exists(rendered_images[page_num]):
-                out_page.insert_image(out_page.rect, filename=rendered_images[page_num])
+            rendered = rendered_images.get(page_num)
+            if rendered and os.path.exists(rendered):
+                out_page = out_doc.new_page(
+                    width=src_page.rect.width,
+                    height=src_page.rect.height
+                )
+                out_page.insert_image(out_page.rect, filename=rendered)
+            else:
+                # Not selected / not rendered: keep the original page instead of a blank one (B9)
+                out_doc.insert_pdf(doc, from_page=page_num - 1, to_page=page_num - 1)
                 
         doc.close()
         out_doc.save(output_pdf_path, garbage=4, deflate=True)

@@ -621,7 +621,17 @@ def _merge_into(target: np.ndarray, x0: int, y0: int, x1: int, y1: int, mask: np
 
 
 # ── Main Renderer Class ────────────────────────────────────────────────────────
+# Bump whenever rendering output changes, so page JPEG caches from older logic are not reused.
+RENDER_CACHE_VERSION = "2026-09-28-b16"
+
+
 class PDFLayoutRenderer:
+    def cache_filename(self, page_num: int) -> str:
+        """Cache file for a rendered page; depends on tuning params + renderer version (BUG.md B9)."""
+        import hashlib
+        key = f"{RENDER_CACHE_VERSION}|{self.ink_thresh}|{self.dilate_iter}|{self.max_stroke_ratio:.3f}|{self.font_scale:.3f}"
+        return f"page_{page_num}_{hashlib.sha1(key.encode()).hexdigest()[:10]}.jpg"
+
     def __init__(self, original_pdf_path=None, output_pdf_path=None,
                  ink_thresh: int = 95, dilate_iter: int = 2,
                  max_stroke_ratio: float = 0.35, font_scale: float = 1.0):

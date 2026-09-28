@@ -788,6 +788,7 @@ def _extract_proper_nouns_from_batch(blocks: list, results: list):
 
 
 MIN_CONTEXT_CHUNK = 12
+UNTRANSLATED_ENGINE = "Untranslated (all engines failed)"
 _JSON_SCHEMA_OK = True       # flips to False if the server rejects json_schema (HTTP 400)
 
 
@@ -1044,10 +1045,11 @@ class HighPerformanceTranslationEngine:
                                 except Exception as g_err:
                                     logger.warning(f"[Google Fallback Failed] ID {idx}: {g_err}")
 
-                            # 3. Defensive fallback: if all translation fails, keep raw_text so renderer never silently drops the bubble
+                            # 3. All engines failed: leave the block UNtranslated (empty). The renderer then
+                            #    keeps the original bubble untouched instead of erasing it and redrawing the
+                            #    same Japanese in a Chinese font, and nothing wrong gets cached (BUG.md B8).
                             if not results[idx] and raw_text:
-                                results[idx] = raw_text
-                                blocks[idx]["translation_engine"] = "Original Text (Preserved)"
+                                blocks[idx]["translation_engine"] = UNTRANSLATED_ENGINE
 
             # Note: For Japanese, Qwen directly outputs localized, context-aware manga dialogues with glossary adherence.
             # Skipping the redundant 2nd polishing pass saves 5-15s per page and prevents dropping lines.
