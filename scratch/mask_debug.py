@@ -20,7 +20,25 @@ def main():
     ap = argparse.ArgumentParser()
     ap.add_argument("pdf")
     ap.add_argument("--pages", default="1")
+    ap.add_argument("--dump-lama", action="store_true",
+                    help="also save every LaMa window: input | mask | 512 output | pasted result")
     a = ap.parse_args()
+    if a.dump_lama:
+        _orig = R._lama_inpaint_crop
+        counter = {"n": 0}
+
+        def _spy(session, crop_rgb, crop_mask):
+            out = _orig(session, crop_rgb, crop_mask)
+            counter["n"] += 1
+            h, w = crop_rgb.shape[:2]
+            m3 = np.stack([crop_mask] * 3, -1)
+            pasted = np.where(m3 > 0, out, crop_rgb)
+            tile = np.concatenate([crop_rgb, m3, out, pasted], axis=1)
+            Image.fromarray(tile).save(os.path.join(OUT, f"lama_{counter['n']:02d}_{w}x{h}.jpg"), quality=90)
+            print(f"   lama window {counter['n']}: {w}x{h}, mask {int((crop_mask > 0).mean() * 100)}%", flush=True)
+            return out
+
+        R._lama_inpaint_crop = _spy
     os.makedirs(OUT, exist_ok=True)
     pages = [int(x) for x in a.pages.split(",") if x.strip()]
     ex = PDFLayoutExtractor(a.pdf)
@@ -41,7 +59,7 @@ def main():
         if prep["telea_mask"] is not None:
             healed = R._fast_telea_inpaint(healed, Image.fromarray(prep["telea_mask"]))
         if prep["lama_mask"] is not None:
-            healed = R._lama_inpaint(healed, Image.fromarray(prep["lama_mask"]))
+            healed = R._lama_inpaint(healed, Image.fromarray(prep["lama_mask"]))  # uses R._lama_inpaint_crop
         clean = np.array(healed).copy()
         final = np.array(rd._draw_translations(healed.copy(), prep["blocks"]))
         strip = np.concatenate([base, ov, clean, final], axis=1)
