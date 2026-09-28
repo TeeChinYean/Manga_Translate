@@ -139,6 +139,15 @@ DEFAULT_CONTEXT_CHUNK = 36  # Japanese lines per LLM call in 'serial' mode
 RENDER_CONCURRENCY = max(1, int(os.getenv("RENDER_CONCURRENCY", "3")))  # pages rendered at once in 'serial' mode
 
 
+def strip_runtime_keys(obj):
+    """Drop runtime-only keys (leading "_", e.g. _text_mask_png bytes) before JSON export."""
+    if isinstance(obj, dict):
+        return {k: strip_runtime_keys(v) for k, v in obj.items() if not str(k).startswith("_")}
+    if isinstance(obj, list):
+        return [strip_runtime_keys(v) for v in obj]
+    return obj
+
+
 def build_failed_pages_warning(failed_pages) -> str:
     """Human-readable warning for pages whose extraction failed (BUG.md B4). Empty if none."""
     if not failed_pages:
@@ -669,7 +678,7 @@ async def translation_worker():
             try:
                 import json
                 with open(output_json_path, 'w', encoding='utf-8') as f:
-                    json.dump(layout_data, f, ensure_ascii=False, indent=4)
+                    json.dump(strip_runtime_keys(layout_data), f, ensure_ascii=False, indent=4)
             except Exception as e:
                 logger.error(f"Failed to generate JSON output: {e}")
 

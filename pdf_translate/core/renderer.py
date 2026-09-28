@@ -534,6 +534,55 @@ def _add_outline_halo(glyph_mask: np.ndarray, gray: np.ndarray, glyph_is_dark: b
     return cv2.dilate(combined, cv2.getStructuringElement(cv2.MORPH_ELLIPSE, (3, 3)), iterations=1)
 
 
+# ── Detector text mask (BUG.md B15) ──────────────────────────────────────────
+SEG_THRESH = 96          # uint8 seg value (0-255) counted as text
+SEG_LINK_PX = 7          # join furigana / punctuation to their column before selecting
+SEG_GROW_PX = 3          # cover anti-aliased glyph edges (the grey "ghost" after Telea)
+
+
+def _page_text_mask(page_data: dict, width: int, height: int):
+    """Decode the page-level CTD segmentation (if the extractor stored one) at render size."""
+    png = page_data.get("_text_mask_png")
+    if not png:
+        return None
+    try:
+        seg = cv2.imdecode(np.frombuffer(png, np.uint8), cv2.IMREAD_GRAYSCALE)
+    except Exception:
+        return None
+    if seg is None:
+        return None
+    if seg.shape[:2] != (height, width):
+        seg = cv2.resize(seg, (width, height), interpolation=cv2.INTER_LINEAR)
+    return seg >= SEG_THRESH
+
+
+def _block_seg_mask(seg: np.ndarray, x0: int, y0: int, x1: int, y1: int, pad: int):
+    """
+    Text pixels that belong to this block: seg components (after linking nearby strokes) that
+    touch the box, searched in the box grown by `pad` so furigana just outside is included.
+    Returns (rx0, ry0, rx1, ry1, uint8 mask) or None.
+    """
+    H, W = seg.shape
+    rx0, ry0, rx1, ry1 = max(0, x0 - pad), max(0, y0 - pad), min(W, x1 + pad), min(H, y1 + pad)
+    region = seg[ry0:ry1, rx0:rx1]
+    if not region.any():
+        return None
+    k = cv2.getStructuringElement(cv2.MORPH_ELLIPSE, (2 * SEG_LINK_PX + 1, 2 * SEG_LINK_PX + 1))
+    linked = cv2.dilate(region.astype(np.uint8), k)
+    n, labels = cv2.connectedComponents(linked, connectivity=8)
+    inside = labels[y0 - ry0:y1 - ry0, x0 - rx0:x1 - rx0]
+    keep = np.unique(inside[inside > 0])
+    if keep.size == 0:
+        return None
+    sel = np.isin(labels, keep) & region
+    grow = cv2.getStructuringElement(cv2.MORPH_ELLIPSE, (2 * SEG_GROW_PX + 1, 2 * SEG_GROW_PX + 1))
+    return rx0, ry0, rx1, ry1, cv2.dilate(sel.astype(np.uint8) * 255, grow)
+
+
+def _merge_into(target: np.ndarray, x0: int, y0: int, x1: int, y1: int, mask: np.ndarray):
+    target[y0:y1, x0:x1] = np.maximum(target[y0:y1, x0:x1], mask)
+
+
 # ── Main Renderer Class ────────────────────────────────────────────────────────
 class PDFLayoutRenderer:
     def __init__(self, original_pdf_path=None, output_pdf_path=None,
@@ -565,6 +614,8 @@ class PDFLayoutRenderer:
         page_num = page_data["page_num"]
         img_np = np.array(img)
         gray_np = cv2.cvtColor(img_np, cv2.COLOR_RGB2GRAY)
+        seg_full = _page_text_mask(page_data, img.width, img.height)
+        seg_pad = max(12, int(0.02 * img.height))
         telea_mask_np = np.zeros((img.height, img.width), dtype=np.uint8)
         lama_mask_np = np.zeros((img.height, img.width), dtype=np.uint8)
         has_telea_masks = False
@@ -602,11 +653,16 @@ class PDFLayoutRenderer:
             # Smart Routing:
             # - Clean/white bubble: Telea (<15ms, perfectly sharp, zero downsample blur)
             # - Textured/screentone/dark scene: LaMa neural inpainting
+            target = lama_mask_np if is_textured else telea_mask_np
+            _merge_into(target, px0, py0, px1, py1, stroke_mask)
+            if seg_full is not None:
+                # Detector text mask: whole glyphs incl. anti-aliased edges + furigana (B15)
+                bm = _block_seg_mask(seg_full, px0, py0, px1, py1, seg_pad)
+                if bm is not None:
+                    _merge_into(target, *bm)
             if is_textured:
-                lama_mask_np[py0:py1, px0:px1] = np.maximum(lama_mask_np[py0:py1, px0:px1], stroke_mask)
                 has_lama_masks = True
             else:
-                telea_mask_np[py0:py1, px0:px1] = np.maximum(telea_mask_np[py0:py1, px0:px1], stroke_mask)
                 has_telea_masks = True
 
             blocks_to_render.append((px0, py0, px1, py1, translated, block))
@@ -733,6 +789,8 @@ class PDFLayoutRenderer:
         orig_img = Image.frombytes("RGB", [pix.width, pix.height], pix.samples)
         img_np = np.array(orig_img)
         gray_np = cv2.cvtColor(img_np, cv2.COLOR_RGB2GRAY)
+        seg_full = _page_text_mask(page_data, orig_img.width, orig_img.height)
+        seg_pad = max(12, int(0.02 * orig_img.height))
 
         # 2. Build precision mask
         mask_np = np.zeros((orig_img.height, orig_img.width), dtype=np.uint8)
@@ -772,6 +830,10 @@ class PDFLayoutRenderer:
             is_textured = mask_res[2] if len(mask_res) > 2 else (bg_val < 170)
             
             mask_np[py0:py1, px0:px1] = np.maximum(mask_np[py0:py1, px0:px1], stroke_mask)
+            if seg_full is not None:
+                bm = _block_seg_mask(seg_full, px0, py0, px1, py1, seg_pad)
+                if bm is not None:
+                    _merge_into(mask_np, *bm)
             blocks_to_render.append((px0, py0, px1, py1, translated, block))
 
         # 3. Create Mask Overlay visualization (Hot magenta / crimson highlight on original image)

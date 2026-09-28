@@ -226,10 +226,12 @@ def _get_comic_detector():
                     _COMIC_DETECTOR_SESSION = None
     return _COMIC_DETECTOR_SESSION
 
-def _detect_with_comic_detector(img_rgb: np.ndarray, session) -> list:
+def _detect_with_comic_detector(img_rgb: np.ndarray, session, out_seg=None) -> list:
     """
     Runs comic-text-detector.onnx on an RGB image.
     Uses letterbox to 1024x1024, NMS with IoU 0.35, and returns list of (x0, y0, x1, y1) bounding boxes.
+    If `out_seg` is a list, the detector's pixel-level text segmentation (uint8 0-255, same
+    size as img_rgb) is appended to it. It covers glyphs incl. furigana (BUG.md B15).
     """
     h, w = img_rgb.shape[:2]
     target_size = 1024
@@ -246,6 +248,11 @@ def _detect_with_comic_detector(img_rgb: np.ndarray, session) -> list:
     
     with _COMIC_DETECTOR_LOCK:
         blk, seg, det = session.run(None, {'images': inp})
+
+    if out_seg is not None:
+        seg_map = seg[0, 0][dy:dy + nh, dx:dx + nw]
+        seg_map = cv2.resize(seg_map, (w, h), interpolation=cv2.INTER_LINEAR)
+        out_seg.append(np.clip(seg_map * 255.0, 0, 255).astype(np.uint8))
         
     candidates = []
     for i in range(blk.shape[1]):
@@ -659,15 +666,17 @@ class PDFLayoutExtractor:
         # 2. Text Region Detection (Comic-Text-Detector ONNX with CRAFT fallback)
         comic_session = _get_comic_detector()
         raw_box_to_text = {}
+        seg_holder = []
         
         if comic_session is not None:
             # High-speed specialized YOLOv8 detection for manga dialogue bubbles
             try:
-                merged_boxes = _detect_with_comic_detector(img_np, comic_session)
+                merged_boxes = _detect_with_comic_detector(img_np, comic_session, out_seg=seg_holder)
             except Exception as det_err:
                 if not _demote_to_cpu("comic_detector", det_err):
                     raise
-                merged_boxes = _detect_with_comic_detector(img_np, _get_comic_detector())
+                seg_holder.clear()
+                merged_boxes = _detect_with_comic_detector(img_np, _get_comic_detector(), out_seg=seg_holder)
             logger.info(f"[ComicTextDetector] Page {page_num}: Detected {len(merged_boxes)} speech bubbles.")
         else:
             # Fallback to EasyOCR CRAFT
@@ -845,12 +854,19 @@ class PDFLayoutExtractor:
         for idx, block in enumerate(sorted_blocks):
             block["id"] = idx + 1
 
-        return {
+        result = {
             "page_num": page_num,
             "blocks": sorted_blocks,
             "page_width": page_width,
             "page_height": page_height
         }
+        if seg_holder:
+            # Page-level text pixel mask for the renderer (PNG bytes, ~20-60KB). Keys starting
+            # with "_" are runtime-only and stripped from the JSON export.
+            ok, png = cv2.imencode(".png", seg_holder[0])
+            if ok:
+                result["_text_mask_png"] = png.tobytes()
+        return result
 
     def _is_meaningful_text(self, text):
         """
