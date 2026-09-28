@@ -294,6 +294,7 @@ def _best_font(text: str, box_w: int, box_h: int, font_scale: float = 1.0, max_s
 # ── Typesetting helpers (BUG.md B21) ──────────────────────────────────────────
 MIN_FONT_PX = 9          # smallest lettering (was 10; text now gets more room first)
 PAGE_GLYPH_CAP = 1.6     # font <= 1.6 x the page's median original glyph size
+PAGE_GLYPH_FLOOR = 0.8   # the size cap is at least 0.8 x the page's median glyph size
 GROW_STEP = 4            # px per growth step of a draw box inside a clean bubble
 GROW_MAX = 1.8           # a draw box may grow to at most 1.8x its width / height
 GROW_WHITE = 235         # strip pixels at least this bright count as bubble interior
@@ -938,7 +939,11 @@ def _estimate_glyph_px(seg, x0: int, y0: int, x1: int, y1: int) -> int:
     runs = [r for r in runs if r >= 6]   # drop furigana / punctuation slivers
     if not runs:
         return 0
-    return int(np.median(runs))
+    # Furigana columns and partial columns pull the median down (B21: tiny text in big
+    # bubbles): keep only runs at least 60% of the widest, then take their median.
+    top = max(runs)
+    main = [r for r in runs if r >= 0.6 * top]
+    return int(np.median(main))
 
 
 # ── Outlined lettering over artwork (white rim around dark glyphs) ────────────
@@ -1079,7 +1084,7 @@ def _merge_into(target: np.ndarray, x0: int, y0: int, x1: int, y1: int, mask: np
 
 # ── Main Renderer Class ────────────────────────────────────────────────────────
 # Bump whenever rendering output changes, so page JPEG caches from older logic are not reused.
-RENDER_CACHE_VERSION = "2026-09-28-typeset"
+RENDER_CACHE_VERSION = "2026-09-28-typeset2"
 
 
 class PDFLayoutRenderer:
@@ -1213,8 +1218,11 @@ class PDFLayoutRenderer:
             glyph_px = sizes[idx]
             cap = int(glyph_px * GLYPH_SIZE_FACTOR) if glyph_px else 0
             if page_glyph:
+                # One page is lettered at one size: keep each block within 0.8x..1.6x of the
+                # page's typical size (a bad per-block estimate made text tiny or huge).
                 page_cap = int(page_glyph * PAGE_GLYPH_CAP)
-                cap = min(cap, page_cap) if cap else page_cap
+                page_floor = int(page_glyph * PAGE_GLYPH_FLOOR)
+                cap = min(max(cap, page_floor), page_cap) if cap else page_cap
             while True:
                 font, lines, fs = _best_font(translated, bw, bh, font_scale=self.font_scale,
                                              max_size=cap, min_size=MIN_FONT_PX)
