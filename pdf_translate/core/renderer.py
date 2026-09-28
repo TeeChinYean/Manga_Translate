@@ -81,23 +81,46 @@ def _get_lama_session():
     return _LAMA_SESSION
 
 # ── Font config ────────────────────────────────────────────────────────────────
+# Manga lettering is a regular/medium weight, not bold: Chinese scanlations typically use
+# 方正/汉仪 rounded or 黑体 faces at the original glyph size. Priority:
+#   1. env MANGA_FONT=<path>
+#   2. first .ttf/.otf/.ttc dropped into pdf_translate/fonts/ (e.g. 汉仪中圆, 方正准圆, 思源黑体 Medium)
+#   3. system regular-weight CJK fonts (bold faces last)
+_FONTS_DIR = os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__))), "fonts")
 _FONT_PATHS = [
-    # Linux CJK fonts (Bold/Medium first for premium manga look)
-    "/usr/share/fonts/opentype/noto/NotoSansCJK-Bold.ttc",
+    # Linux CJK fonts
     "/usr/share/fonts/opentype/noto/NotoSansCJK-Medium.ttc",
-    "/usr/share/fonts/opentype/noto/NotoSansCJK-Regular.ttc",
-    "/usr/share/fonts/truetype/noto/NotoSansCJK-Bold.ttc",
     "/usr/share/fonts/truetype/noto/NotoSansCJK-Medium.ttc",
+    "/usr/share/fonts/opentype/noto/NotoSansCJK-Regular.ttc",
     "/usr/share/fonts/truetype/noto/NotoSansCJK-Regular.ttc",
-    # Windows CJK fonts
-    "C:\\Windows\\Fonts\\msyhbd.ttc",
+    # Windows CJK fonts (regular weights first)
     "C:\\Windows\\Fonts\\msyh.ttc",
+    "C:\\Windows\\Fonts\\Deng.ttf",
     "C:\\Windows\\Fonts\\simhei.ttf",
     # macOS CJK fonts
     "/System/Library/Fonts/PingFang.ttc",
+    # Bold faces only as a last resort
+    "/usr/share/fonts/opentype/noto/NotoSansCJK-Bold.ttc",
+    "/usr/share/fonts/truetype/noto/NotoSansCJK-Bold.ttc",
+    "C:\\Windows\\Fonts\\msyhbd.ttc",
     "/Library/Fonts/Arial Unicode.ttf"
 ]
-_FONT_PATH = next((p for p in _FONT_PATHS if os.path.exists(p)), None)
+
+
+def _pick_font_path():
+    env = os.getenv("MANGA_FONT")
+    if env and os.path.exists(env):
+        return env
+    try:
+        custom = sorted(f for f in os.listdir(_FONTS_DIR) if f.lower().endswith((".ttf", ".otf", ".ttc")))
+        if custom:
+            return os.path.join(_FONTS_DIR, custom[0])
+    except OSError:
+        pass
+    return next((p for p in _FONT_PATHS if os.path.exists(p)), None)
+
+
+_FONT_PATH = _pick_font_path()
 
 # FreeType font objects are cached and shared; serialize text drawing across threads.
 _DRAW_LOCK = threading.Lock()
@@ -178,7 +201,11 @@ def _get_font(fs: int):
     except Exception:
         return ImageFont.load_default()
 
-def _best_font(text: str, box_w: int, box_h: int, font_scale: float = 1.0):
+def _best_font(text: str, box_w: int, box_h: int, font_scale: float = 1.0, max_size: int = 0):
+    """
+    Largest font that fits the box. `max_size` (original glyph size, px) caps it so the
+    translation matches the source lettering instead of filling the bubble with huge text.
+    """
     # Calculate usable area with 15% padding to prevent text from touching the borders
     pad_w = int(box_w * 0.15)
     pad_h = int(box_h * 0.15)
@@ -191,6 +218,8 @@ def _best_font(text: str, box_w: int, box_h: int, font_scale: float = 1.0):
     import math
     estimated_max_fs = int(math.sqrt((usable_w * usable_h) / (text_len * 1.25)))
     max_fs = min(int(estimated_max_fs * 1.5), usable_w, usable_h, 120)
+    if max_size and max_size > 0:
+        max_fs = min(max_fs, int(max_size))
     min_fs = 10
     
     if max_fs <= min_fs:
@@ -616,13 +645,43 @@ def _text_draw_box(seg, x0: int, y0: int, x1: int, y1: int):
     return tx0, ty0, tx1, ty1
 
 
+GLYPH_SIZE_FACTOR = 1.05   # translated font size <= 1.05 x original glyph size
+
+
+def _estimate_glyph_px(seg, x0: int, y0: int, x1: int, y1: int) -> int:
+    """
+    Original lettering size inside a box, from the detector's text mask: vertical text ->
+    median column width, horizontal -> median line height. 0 if unknown.
+    """
+    if seg is None:
+        return 0
+    region = seg[y0:y1, x0:x1]
+    if region.sum() < 30:
+        return 0
+    vertical = (y1 - y0) >= (x1 - x0)
+    profile = region.any(axis=0 if vertical else 1)
+    runs, n = [], 0
+    for v in profile:
+        if v:
+            n += 1
+        elif n:
+            runs.append(n)
+            n = 0
+    if n:
+        runs.append(n)
+    runs = [r for r in runs if r >= 6]   # drop furigana / punctuation slivers
+    if not runs:
+        return 0
+    return int(np.median(runs))
+
+
 def _merge_into(target: np.ndarray, x0: int, y0: int, x1: int, y1: int, mask: np.ndarray):
     target[y0:y1, x0:x1] = np.maximum(target[y0:y1, x0:x1], mask)
 
 
 # ── Main Renderer Class ────────────────────────────────────────────────────────
 # Bump whenever rendering output changes, so page JPEG caches from older logic are not reused.
-RENDER_CACHE_VERSION = "2026-09-28-b16"
+RENDER_CACHE_VERSION = "2026-09-28-lettering"
 
 
 class PDFLayoutRenderer:
@@ -715,7 +774,8 @@ class PDFLayoutRenderer:
                 has_telea_masks = True
 
             dx0, dy0, dx1, dy1 = _text_draw_box(seg_full, px0, py0, px1, py1)
-            blocks_to_render.append((dx0, dy0, dx1, dy1, translated, block))
+            style = {"glyph_px": _estimate_glyph_px(seg_full, px0, py0, px1, py1), "clean_bg": not is_textured}
+            blocks_to_render.append((dx0, dy0, dx1, dy1, translated, block, style))
 
         return {
             "blocks": blocks_to_render,
@@ -727,7 +787,9 @@ class PDFLayoutRenderer:
         """Draw translated CJK text into `healed` in place (shared by page render and preview)."""
         with _DRAW_LOCK:
             draw = ImageDraw.Draw(healed)
-            for (px0, py0, px1, py1, translated, block) in blocks_to_render:
+            for item in blocks_to_render:
+                px0, py0, px1, py1, translated, block = item[:6]
+                style = item[6] if len(item) > 6 else {}
                 bw = max(px1 - px0, 1)
                 bh = max(py1 - py0, 1)
 
@@ -746,7 +808,9 @@ class PDFLayoutRenderer:
                     bg = _sample_bg(healed, px0, py0, px1, py1)
                     fg = _contrast_color(bg)
 
-                font, lines, fs = _best_font(translated, bw, bh, font_scale=self.font_scale)
+                glyph_px = style.get("glyph_px") or 0
+                font, lines, fs = _best_font(translated, bw, bh, font_scale=self.font_scale,
+                                             max_size=int(glyph_px * GLYPH_SIZE_FACTOR) if glyph_px else 0)
                 lh = fs * 1.25
                 total_h = len(lines) * lh
                 curr_y = py0 + (bh - total_h) / 2
@@ -764,7 +828,9 @@ class PDFLayoutRenderer:
                         fg_lum = 255 if fg == "white" else 0
 
                     st_fill = "black" if fg_lum > 127 else "white"
-                    st_width = max(1, int(fs / 16))
+                    # Clean bubble: plain lettering like the original (an outline makes it look
+                    # bold). Over artwork / tone: keep a thin rim for legibility.
+                    st_width = 0 if style.get("clean_bg") else max(1, int(fs / 14))
 
                     draw.text(
                         (curr_x, curr_y),
@@ -884,7 +950,9 @@ class PDFLayoutRenderer:
                 stroke_mask = _gate_by_seg(stroke_mask, seg_full, px0, py0, px1, py1)
                 _merge_into(mask_np, *bm)
             mask_np[py0:py1, px0:px1] = np.maximum(mask_np[py0:py1, px0:px1], stroke_mask)
-            blocks_to_render.append((px0, py0, px1, py1, translated, block))
+            dx0, dy0, dx1, dy1 = _text_draw_box(seg_full, px0, py0, px1, py1)
+            style = {"glyph_px": _estimate_glyph_px(seg_full, px0, py0, px1, py1), "clean_bg": not is_textured}
+            blocks_to_render.append((dx0, dy0, dx1, dy1, translated, block, style))
 
         # 3. Create Mask Overlay visualization (Hot magenta / crimson highlight on original image)
         mask_vis = img_np.copy()

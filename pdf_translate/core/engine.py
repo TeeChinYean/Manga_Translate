@@ -439,6 +439,8 @@ def _clean_input(text: str) -> str:
 def _clean_output(text: str) -> str:
     if not text:
         return ""
+    # Normalise "..." / "。。。" to "……" first, so the trailing-period strip below keeps ellipses
+    text = _ELLIPSIS_RE.sub("……", text)
         
     # Strip hallucinated translation notes from the model (e.g., "注：这里的语气词...")
     import re
@@ -464,7 +466,7 @@ def _clean_output(text: str) -> str:
     for wrong, right in _PROPER_NOUNS.items():
         text = _replace_term(text, wrong, right)
     
-    return text.strip()
+    return _manga_punct(text.strip())
 
 def _detect_src_lang(text: str) -> str:
     alpha = [c for c in text if c.isalpha()]
@@ -787,6 +789,41 @@ def _extract_proper_nouns_from_batch(blocks: list, results: list):
         logger.warning(f"[Dynamo] Proper noun extraction failed: {e}")
 
 
+# Chinese scanlation (汉化组) lettering style for Japanese manga (user request 2026-09-28).
+MANGA_SYSTEM_PROMPT = (
+    "你是资深日漫汉化组的翻译兼嵌字编辑，把日文漫画台词译成中文汉化版里的台词。\n"
+    "规则：\n"
+    "1. 按同一场景的连续对话理解语境，译成符合人物身份、性格、情绪的口语化中文；旁白、说明文字可以书面一些。\n"
+    "2. 句子短而有力，和原文长度差不多，不要扩写、不要解释，能省的主语和连词就省掉。\n"
+    "3. 保留语气：用「啊、呢、吧、嘛、哦、呀、啦、诶、哈」等语气词表现原文的「ね、よ、な、ぞ、わ、かな」。\n"
+    "4. 标点用漫画习惯：不用句号「。」；省略、停顿用「……」；拖长音用「～」；惊讶用「！？」；强调可以用「！！」；句中停顿用空格或「，」。\n"
+    "5. 称呼本土化：さん→（按语境）先生/小姐/桑或省略，ちゃん→酱/小～，君→君/小～，様→大人/阁下；不得留罗马音或英文。\n"
+    "6. 拟声拟态词（ドキッ、ゴゴゴ 等）译成中文象声词（扑通、轰隆隆 等）。\n"
+    "7. 专有名词严格按对照表统一译名。\n"
+    "8. 只返回 JSON 对象，不要任何解释。\n"
+    "示例：\n"
+    "原文: 以上が所蔵から排架までの本の受け入れの流れだ → 以上就是从馆藏到上架的收书流程\n"
+    "原文: え…嘘でしょ!? → 诶……骗人的吧！？\n"
+    "原文: 今日は一番を目指す!! → 今天我要拿第一！！\n"
+    "原文: そんなことより早く行こうよ → 别管那些了，快走吧"
+)
+
+_ELLIPSIS_RE = re.compile(r"(?:\.{2,}|。{2,}|…+|・{3,}|‥+)")
+
+
+def _manga_punct(text: str) -> str:
+    """Normalise punctuation to Chinese manga lettering conventions."""
+    if not text:
+        return text
+    t = _ELLIPSIS_RE.sub("……", text)
+    t = t.replace("!?", "！？").replace("?!", "！？").replace("？！", "！？")
+    t = t.replace("!", "！").replace("?", "？").replace("~", "～").replace("〜", "～")
+    t = re.sub(r"(……){2,}", "……", t)
+    t = re.sub(r"[，、,]+$", "", t)                      # no dangling comma at the end
+    t = re.sub(r"(?<=[\u4e00-\u9fff])\s+(?=[\u4e00-\u9fff])", " ", t)  # single space between CJK
+    return t.strip()
+
+
 MIN_CONTEXT_CHUNK = 12
 UNTRANSLATED_ENGINE = "Untranslated (all engines failed)"
 _JSON_SCHEMA_OK = True       # flips to False if the server rejects json_schema (HTTP 400)
@@ -948,15 +985,7 @@ class HighPerformanceTranslationEngine:
                     prompt_lines.append("\n请严格返回一个合法的 JSON 对象，键为传入的 ID，值为对应的纯中文翻译文本。例如：{\"0\": \"你好！\", \"1\": \"今天天气真好\"}")
                     user_prompt = "\n".join(prompt_lines)
                     
-                    system_prompt = (
-                        "你是一个顶尖的日漫汉化翻译专家。\n"
-                        "规则：\n"
-                        "1. 根据同一场景的连续对话语境，将每句台词翻译为符合人物口吻与情绪的中文台词。\n"
-                        "2. 绝对不带任何标点句号（。），可以保留感叹号、问号和省略号。\n"
-                        "3. 严禁在译文中保留任何未翻译的罗马音或英文（如 chan, san, kun, sama），必须本土化为'酱'、'桑'、'君'、'大人'等或根据语境省略。\n"
-                        "4. 遇到专有名词必须严格按照对照表统一译名。\n"
-                        "5. 严禁输出任何多余的解释、前言或分析，只返回 JSON 对象。"
-                    )
+                    system_prompt = MANGA_SYSTEM_PROMPT
                     
                     payload = {
                         "model": TURBOVEC_MODEL,
