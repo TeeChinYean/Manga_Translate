@@ -866,6 +866,28 @@ def _outlined_text_mask(gray: np.ndarray, seg: np.ndarray, x0: int, y0: int, x1:
     return X0, Y0, X1, Y1, mask
 
 
+LAMA_CLOSE_PX = 4        # closing radius for LaMa holes (joins strokes of one text column)
+LAMA_POCKET_MAX = 4000   # enclosed pockets up to this area (px) are filled; bigger = real artwork
+
+
+def _solidify_holes(mask: np.ndarray) -> np.ndarray:
+    """Make each LaMa hole solid: close small gaps between strokes and fill enclosed pockets.
+    Original pixels left inside a glyph-shaped mask (counters, gaps between strokes) keep the
+    glyph structure visible to LaMa, which then redraws faint ghost strokes (BUG.md B20)."""
+    if not np.any(mask):
+        return mask
+    k = cv2.getStructuringElement(cv2.MORPH_ELLIPSE, (2 * LAMA_CLOSE_PX + 1, 2 * LAMA_CLOSE_PX + 1))
+    closed = cv2.morphologyEx((mask > 0).astype(np.uint8) * 255, cv2.MORPH_CLOSE, k)
+    # Fill pockets: background components that do not touch the image border
+    h, w = closed.shape[:2]
+    n, labels, stats, _ = cv2.connectedComponentsWithStats((closed == 0).astype(np.uint8), 4)
+    for i in range(1, n):
+        x, y, bw, bh, area = stats[i]
+        if x > 0 and y > 0 and x + bw < w and y + bh < h and area <= LAMA_POCKET_MAX:
+            closed[labels == i] = 255
+    return closed
+
+
 PEEL_MAX_STEPS = 12      # max px a LaMa hole is grown over a bright rim remnant on its border
 PEEL_RING_DARK = 170     # only for holes whose surroundings (6px out) are darker than this
 
@@ -918,7 +940,7 @@ def _merge_into(target: np.ndarray, x0: int, y0: int, x1: int, y1: int, mask: np
 
 # ── Main Renderer Class ────────────────────────────────────────────────────────
 # Bump whenever rendering output changes, so page JPEG caches from older logic are not reused.
-RENDER_CACHE_VERSION = "2026-09-28-rim6"
+RENDER_CACHE_VERSION = "2026-09-28-rim7"
 
 
 class PDFLayoutRenderer:
@@ -1021,7 +1043,7 @@ class PDFLayoutRenderer:
             blocks_to_render.append((dx0, dy0, dx1, dy1, translated, block, style))
 
         if has_lama_masks:
-            lama_mask_np = _peel_bright_border(gray_np, lama_mask_np)
+            lama_mask_np = _solidify_holes(_peel_bright_border(gray_np, lama_mask_np))
         return {
             "blocks": blocks_to_render,
             "telea_mask": telea_mask_np if has_telea_masks else None,
