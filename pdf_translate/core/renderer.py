@@ -14,6 +14,7 @@ import os
 import sys
 import asyncio
 import threading
+import time
 import cv2
 import numpy as np
 import logging
@@ -24,6 +25,37 @@ logger = logging.getLogger(__name__)
 
 _LAMA_SESSION_LOCK = threading.Lock()
 _LAMA_SESSION = None
+
+# ── LaMa CPU parallelism ──────────────────────────────────────────────────────
+# ORT InferenceSession.run is thread-safe. Running 2 crops at once with half the threads
+# each usually beats 1 crop with all threads on 8+ logical cores (better core utilisation).
+_CPU = os.cpu_count() or 4
+LAMA_PARALLEL = max(1, int(os.getenv("LAMA_PARALLEL", "2" if _CPU >= 8 else "1")))
+LAMA_THREADS = max(1, int(os.getenv("LAMA_THREADS", str(max(2, (_CPU // 2) // LAMA_PARALLEL)))))
+_LAMA_RUN_SEM = threading.BoundedSemaphore(LAMA_PARALLEL)
+
+# ── Render timing breakdown (where does rendering time go?) ───────────────────
+_RENDER_STATS = {}
+_RENDER_STATS_LOCK = threading.Lock()
+
+
+def _rstat(tag: str, seconds: float, n: int = 1):
+    with _RENDER_STATS_LOCK:
+        e = _RENDER_STATS.setdefault(tag, {"calls": 0, "seconds": 0.0})
+        e["calls"] += n
+        e["seconds"] = round(e["seconds"] + seconds, 2)
+
+
+def reset_render_stats():
+    with _RENDER_STATS_LOCK:
+        _RENDER_STATS.clear()
+
+
+def get_render_stats() -> dict:
+    with _RENDER_STATS_LOCK:
+        out = {k: dict(v) for k, v in _RENDER_STATS.items()}
+    out["_config"] = {"cpu": _CPU, "lama_parallel": LAMA_PARALLEL, "lama_threads": LAMA_THREADS}
+    return out
 
 def _get_lama_session():
     """Singleton session for lama.onnx with CPU execution and ORT_DISABLE_ALL for FFC stability."""
@@ -37,7 +69,7 @@ def _get_lama_session():
                     if os.path.exists(model_path):
                         opts = ort.SessionOptions()
                         opts.graph_optimization_level = ort.GraphOptimizationLevel.ORT_DISABLE_ALL
-                        opts.intra_op_num_threads = 4
+                        opts.intra_op_num_threads = LAMA_THREADS
                         # LaMa runs on CPU to guarantee FFC DFT node numerical stability
                         _LAMA_SESSION = ort.InferenceSession(model_path, sess_options=opts, providers=['CPUExecutionProvider'])
                         logger.info(f"[LaMa] Loaded LaMa ONNX session on CPU with ORT_DISABLE_ALL")
@@ -304,8 +336,12 @@ def _lama_inpaint_crop(session, crop_rgb: np.ndarray, crop_mask: np.ndarray) -> 
 
     lama_img_in = (img_in.astype(np.float32) / 255.0).transpose((2, 0, 1))[None, ...]
     lama_mask_in = (mask_in > 0).astype(np.float32)[None, None, ...]
-    with _LAMA_SESSION_LOCK:
+    t_wait = time.time()
+    with _LAMA_RUN_SEM:
+        t_run = time.time()
         lama_out = session.run(None, {'l_image_': lama_img_in, 'l_mask_': lama_mask_in})[0]
+        _rstat("lama_run", time.time() - t_run)
+    _rstat("lama_wait", t_run - t_wait, n=0)
     out = np.clip(lama_out[0].transpose((1, 2, 0)), 0, 255).astype(np.uint8)
 
     if side != LAMA_SIZE:
@@ -609,27 +645,40 @@ class PDFLayoutRenderer:
         Returns the path to the temp JPEG file.
         """
         page_num = page_data["page_num"]
+        t_page = time.time()
+        t = time.time()
         img, scale = self._rasterize(src_page)
+        _rstat("rasterize", time.time() - t)
+        t = time.time()
         prep = await asyncio.to_thread(self._build_masks, img, scale, page_data, translated_text_map)
+        _rstat("masks", time.time() - t)
         temp_path = os.path.join(temp_dir, f"page_{page_num}.jpg")
 
         if not prep["blocks"]:
             await asyncio.to_thread(_save_jpeg, img, temp_path)
+            _rstat("page_total", time.time() - t_page)
             return temp_path
 
         healed = img
         if prep["telea_mask"] is not None:
+            t = time.time()
             healed = await asyncio.to_thread(_fast_telea_inpaint, healed, Image.fromarray(prep["telea_mask"]))
+            _rstat("telea", time.time() - t)
         if prep["lama_mask"] is not None:
             # Neural LaMa inpainting only for textured / dark regions (bounded by sem)
+            t = time.time()
             async with sem:
                 healed = await asyncio.to_thread(_lama_inpaint, healed, Image.fromarray(prep["lama_mask"]))
+            _rstat("lama_page", time.time() - t)
 
         def _finish():
             self._draw_translations(healed, prep["blocks"])
             _save_jpeg(healed, temp_path)
 
+        t = time.time()
         await asyncio.to_thread(_finish)
+        _rstat("draw_save", time.time() - t)
+        _rstat("page_total", time.time() - t_page)
         return temp_path
 
     def render_preview_images(self, page_data, src_page, translated_text_map):

@@ -40,3 +40,10 @@
   - 行为变化：以前只要装了 DirectML，CTD 就一律上 GPU。现在如果探测不到剩余显存，会留在 CPU（保守默认）。
 - 相关测试：`tests/test_gpu_budget.py`（13 个用例），已加入 pre-commit。
 - 状态：Done（待用户在 Windows 上跑 `scratch/gpu_diag.py` 确认探测方式）
+
+### [全局] 重绘并行 + 重绘耗时分解
+- 说明：serial 模式下重绘不再一页一页串行跑，同时开 `RENDER_CONCURRENCY` 页（默认 3）。LaMa 允许 `LAMA_PARALLEL` 个 crop 同时推理（逻辑核数 ≥8 时默认 2，否则 1），每个推理用 `LAMA_THREADS` 线程（默认 逻辑核数/2/LAMA_PARALLEL，至少 2）。完成时报告 `render_breakdown`：rasterize / masks / telea / lama_page / lama_run / lama_wait / draw_save / page_total 各自的调用次数和秒数。
+- 涉及文件/模块：`core/renderer.py`（`_LAMA_RUN_SEM`、`_rstat`、`get_render_stats`）、`main.py`（`run_serial` 并发重绘、`render_breakdown`）、`scratch/bench_modes.py`。
+- 实现要点：ORT 的 `InferenceSession.run` 本身线程安全，原来的全局锁换成了 BoundedSemaphore。背景：用户实测 serial 模式重绘 106s（10 页）是瓶颈。在 VM（2 核）上 4 个 crop 的测试：LAMA_PARALLEL 1 → 28.2s，2 → 19.8s。
+- 相关测试：`tests/test_render_async.py` 新增 2 个用例（耗时分解、多页 CPU 阶段确实重叠）。
+- 状态：Done（待用户实测）

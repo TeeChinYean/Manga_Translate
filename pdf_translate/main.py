@@ -133,6 +133,7 @@ def parse_page_range(range_str: str, max_pages: int) -> set:
 
 PIPELINE_MODES = ("stream", "overlap", "serial")
 DEFAULT_CONTEXT_CHUNK = 36  # Japanese lines per LLM call in 'serial' mode
+RENDER_CONCURRENCY = max(1, int(os.getenv("RENDER_CONCURRENCY", "3")))  # pages rendered at once in 'serial' mode
 
 
 def build_failed_pages_warning(failed_pages) -> str:
@@ -322,7 +323,9 @@ async def translation_worker():
             )
             
             # Semaphore to restrict GPU inpainting to 1 concurrent task to guarantee 4GB VRAM safety
-            render_sem = asyncio.Semaphore(1)
+            from core.renderer import LAMA_PARALLEL, reset_render_stats, get_render_stats
+            render_sem = asyncio.Semaphore(LAMA_PARALLEL)
+            reset_render_stats()
             render_tasks = {}
             src_doc = fitz.open(pdf_path)
             
@@ -520,9 +523,16 @@ async def translation_worker():
                     _check_cancel()
                     to_render += await translate_pages(group, context_chunk_size)
 
-                for p in to_render:
-                    _check_cancel()
-                    await render_page(p)
+                # Nothing else runs now, so render several pages at once: while one page waits
+                # for LaMa, others do masks / Telea / text drawing / JPEG encoding.
+                page_sem = asyncio.Semaphore(RENDER_CONCURRENCY)
+
+                async def _render_one(p):
+                    async with page_sem:
+                        _check_cancel()
+                        await render_page(p)
+
+                await asyncio.gather(*[_render_one(p) for p in to_render])
 
             pipeline_mode = task.get("pipeline_mode", "stream")
             if pipeline_mode not in PIPELINE_MODES:
@@ -556,6 +566,7 @@ async def translation_worker():
             total_metrics["pipeline_mode"] = pipeline_mode
             total_metrics["extract_devices"] = {k: v for k, v in extract_devices.items() if not k.startswith("_")}
             total_metrics["stage_times"] = stage_times
+            total_metrics["render_breakdown"] = get_render_stats()
             logger.info(f"[Timing] mode={pipeline_mode} pages={total_selected_pages} {stage_times}")
 
 
@@ -999,7 +1010,7 @@ async def get_translation_status_stream(task_id: str):
                 last_percent = percent
                 
                 if status == "complete":
-                    yield f"event: complete\ndata: {json.dumps({'download_url': task_status.get('download_url'), 'download_zip_url': task_status.get('download_zip_url'), 'download_doc_url': task_status.get('download_doc_url'), 'download_json_url': task_status.get('download_json_url'), 'warning': task_status.get('warning', ''), 'failed_pages': task_status.get('failed_pages', []), 'stage_times': (task_status.get('metrics') or {}).get('stage_times'), 'pipeline_mode': (task_status.get('metrics') or {}).get('pipeline_mode'), 'extract_devices': (task_status.get('metrics') or {}).get('extract_devices'), 'translate_breakdown': (task_status.get('metrics') or {}).get('translate_breakdown'), 'model_usage': (task_status.get('metrics') or {}).get('model_usage')}, ensure_ascii=False)}\n\n"
+                    yield f"event: complete\ndata: {json.dumps({'download_url': task_status.get('download_url'), 'download_zip_url': task_status.get('download_zip_url'), 'download_doc_url': task_status.get('download_doc_url'), 'download_json_url': task_status.get('download_json_url'), 'warning': task_status.get('warning', ''), 'failed_pages': task_status.get('failed_pages', []), 'stage_times': (task_status.get('metrics') or {}).get('stage_times'), 'pipeline_mode': (task_status.get('metrics') or {}).get('pipeline_mode'), 'extract_devices': (task_status.get('metrics') or {}).get('extract_devices'), 'translate_breakdown': (task_status.get('metrics') or {}).get('translate_breakdown'), 'render_breakdown': (task_status.get('metrics') or {}).get('render_breakdown'), 'model_usage': (task_status.get('metrics') or {}).get('model_usage')}, ensure_ascii=False)}\n\n"
                     break
                 elif status == "failed":
                     yield f"event: error\ndata: {json.dumps({'message': task_status.get('message', 'Processing pipeline crashed.')})}\n\n"
