@@ -150,3 +150,10 @@
 - 实现要点：每步单独 try/计时日志；ORT 建 session 时持有 GIL，放在启动期不会卡住任务（冷启动时翻译阶段被 LaMa 加载拖长 11s 的现象由此消除）。
 - 相关测试：tests/test_lama_preload.py `test_startup_preloader_covers_primary_models`
 - 状态：Done
+
+### [Render] 气泡检测 + 字号尽量放大（B25）
+- 说明：检测文字所在的对话气泡，在气泡内部可用范围里让译文尽量大且不超出；没有闭合气泡（字写在画上、开放白底）则跳过，沿用原字号逻辑。
+- 涉及文件/模块：core/renderer.py `_bubble_rects`、`_layout_translations`
+- 实现要点：去字后的文字框 ≥85% 为白（≥225）→ 取其所在白色连通区；区域碰到搜索窗口边界或面积 >40 倍文字框 → 视为开放区域跳过；填洞后按气泡尺寸 7% 内缩；以文字中心为轴生成 8 种高度的最大内接矩形（避开同页其他块），逐个试 `_best_font`，取字号最大者；气泡内字号上限 72px；仍保留与已排文字重叠时缩小的保护。单次检测约 60ms。
+- 相关测试：tests/test_bubble_fit.py
+- 状态：Done

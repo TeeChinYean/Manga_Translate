@@ -327,6 +327,99 @@ def _nested_duplicates(boxes, thresh: float = 0.6) -> set:
     return out
 
 
+BUBBLE_WHITE = 225       # bubble interior after inpainting (text removed) is at least this bright
+BUBBLE_BOX_WHITE = 0.85  # >=85% of the (inpainted) text box must be interior -> text sits in a bubble
+BUBBLE_SEARCH = 1.5      # search window = text box grown by 1.5x its longer side on each side
+BUBBLE_MAX_AREA = 40.0   # interior larger than 40x the text box = open white area, not a bubble
+BUBBLE_MARGIN = 0.07     # keep text 7% of the bubble size away from its outline
+BUBBLE_MAX_FONT_PX = 72  # hard ceiling for bubble text
+
+
+def _bubble_rects(gray: np.ndarray, box, others=()):
+    """Candidate typesetting rectangles inside the speech bubble around `box`, or None when
+    the text is not inside a closed bubble (artwork, open white panel) -> caller keeps the
+    old logic (BUG.md B25).
+
+    1. the text box (already inpainted) must be almost all bubble-white;
+    2. the white connected region under it must be closed: it may not touch the search
+       window border or be huge compared with the text (open page / white panel);
+    3. the region (holes filled) is eroded by a margin; rectangles of several heights around
+       the text centre are fitted inside it, avoiding other blocks."""
+    H, W = gray.shape[:2]
+    x0, y0, x1, y1 = [int(v) for v in box]
+    if x1 - x0 < 4 or y1 - y0 < 4:
+        return None
+    if float((gray[y0:y1, x0:x1] >= BUBBLE_WHITE).mean()) < BUBBLE_BOX_WHITE:
+        return None
+    bw, bh = x1 - x0, y1 - y0
+    reach = int(BUBBLE_SEARCH * max(bw, bh))   # a narrow column still needs a wide window
+    X0, Y0 = max(0, x0 - reach), max(0, y0 - reach)
+    X1, Y1 = min(W, x1 + reach), min(H, y1 + reach)
+    white = (gray[Y0:Y1, X0:X1] >= BUBBLE_WHITE).astype(np.uint8)
+    # the (inpainted) text box itself counts as interior even where a few grey pixels remain
+    white[y0 - Y0:y1 - Y0, x0 - X0:x1 - X0] = 1
+    n, labels, stats, _ = cv2.connectedComponentsWithStats(white, 4)
+    lab = int(np.bincount(labels[y0 - Y0:y1 - Y0, x0 - X0:x1 - X0].ravel()).argmax())
+    if lab == 0:
+        return None
+    rx, ry, rw, rh, area = stats[lab]
+    wh, ww = white.shape[:2]
+    touches = (rx == 0 and X0 > 0) or (ry == 0 and Y0 > 0) or (rx + rw == ww and X1 < W) or (ry + rh == wh and Y1 < H)
+    if touches or area > BUBBLE_MAX_AREA * bw * bh:
+        return None  # open white area (no outline around the text): not a bubble
+    region = (labels == lab).astype(np.uint8) * 255
+    # fill holes (leftover specks inside the bubble)
+    inv = cv2.bitwise_not(region)
+    n2, lab2, st2, _ = cv2.connectedComponentsWithStats((inv > 0).astype(np.uint8), 4)
+    for i in range(1, n2):
+        x, y, w, h, _a = st2[i]
+        if x > 0 and y > 0 and x + w < ww and y + h < wh:
+            region[lab2 == i] = 255
+    m = max(3, int(BUBBLE_MARGIN * min(rw, rh)))
+    inner = cv2.erode(region, cv2.getStructuringElement(cv2.MORPH_ELLIPSE, (2 * m + 1, 2 * m + 1))) > 0
+    # Candidate rectangles centred on the text: for each height, the widest rectangle whose
+    # every row stays inside the eroded interior. The caller keeps the one giving the
+    # largest font (a tall column and a wide ellipse want different shapes).
+    others_local = [(o[0] - X0, o[1] - Y0, o[2] - X0, o[3] - Y0) for o in others]
+    cx = (x0 + x1) // 2 - X0
+    cy = (y0 + y1) // 2 - Y0
+    if not inner[cy, cx]:
+        ys, xs = np.nonzero(inner)
+        if ys.size == 0:
+            return None
+        k = int(np.argmin((ys - cy) ** 2 + (xs - cx) ** 2))
+        cy, cx = int(ys[k]), int(xs[k])
+    col = inner[:, cx]
+    # per row: the inside run through column cx (vectorised)
+    left_part = ~inner[:, :cx][:, ::-1]            # False = inside, walking left from cx-1
+    has_l = left_part.any(axis=1)
+    row_l = np.where(has_l, cx - np.argmax(left_part, axis=1), 0).astype(np.int32)
+    right_part = ~inner[:, cx:]                    # walking right from cx
+    has_r = right_part.any(axis=1)
+    row_r = np.where(has_r, cx + np.argmax(right_part, axis=1), ww).astype(np.int32)
+    top, bot = cy, cy
+    while top > 0 and col[top - 1]:
+        top -= 1
+    while bot + 1 < wh and col[bot + 1]:
+        bot += 1
+    cands = []
+    full = bot - top + 1
+    for frac in (0.25, 0.35, 0.45, 0.55, 0.65, 0.75, 0.85, 1.0):
+        h = max(8, int(full * frac))
+        a0 = max(top, cy - h // 2)
+        a1 = min(bot + 1, a0 + h)
+        if a1 - a0 < 8:
+            continue
+        l, r = int(row_l[a0:a1].max()), int(row_r[a0:a1].min())
+        if r - l < 8:
+            continue
+        rect = (l, a0, r, a1)
+        if any(_rects_overlap(rect, o, gap=0) for o in others_local):
+            continue
+        cands.append((l + X0, a0 + Y0, r + X0, a1 + Y0))
+    return cands or None
+
+
 def _grow_box_in_clean(gray: np.ndarray, box, others, max_factor: float = GROW_MAX):
     """Grow a draw box side by side over the white interior of its bubble (after inpainting),
     stopping at the bubble outline, the growth limit, or another block's box."""
@@ -1106,7 +1199,7 @@ def _merge_into(target: np.ndarray, x0: int, y0: int, x1: int, y1: int, mask: np
 
 # ── Main Renderer Class ────────────────────────────────────────────────────────
 # Bump whenever rendering output changes, so page JPEG caches from older logic are not reused.
-RENDER_CACHE_VERSION = "2026-09-28-typeset3"
+RENDER_CACHE_VERSION = "2026-09-28-bubble"
 
 
 class PDFLayoutRenderer:
@@ -1237,13 +1330,26 @@ class PDFLayoutRenderer:
                 continue  # same text read twice (small box inside a bigger one): draw once (B22)
             px0, py0, px1, py1, translated, block = item[:6]
             style = item[6] if len(item) > 6 else {}
-            if style.get("clean_bg"):
-                others = [bx for j, bx in enumerate(boxes) if j != idx]
-                px0, py0, px1, py1 = _grow_box_in_clean(gray, (px0, py0, px1, py1), others)
+            others = [bx for j, bx in enumerate(boxes) if j != idx and j not in dup]
+            cands = _bubble_rects(gray, (px0, py0, px1, py1), others) if style.get("clean_bg") else None
+            bubble = None
+            if cands:
+                # Speech bubble found: typeset in the bubble interior and let the font grow as
+                # large as fits (B25). No bubble (text on artwork): unchanged.
+                best_fs = -1
+                for c in cands:
+                    _f, _l, fs_c = _best_font(translated, c[2] - c[0], c[3] - c[1], font_scale=self.font_scale,
+                                              max_size=BUBBLE_MAX_FONT_PX, min_size=MIN_FONT_PX)
+                    if fs_c > best_fs:
+                        best_fs, bubble = fs_c, c
+                px0, py0, px1, py1 = bubble
+                _rstat("typeset_bubble", 0.0)
             bw, bh = max(px1 - px0, 1), max(py1 - py0, 1)
             glyph_px = sizes[idx]
             cap = int(glyph_px * GLYPH_SIZE_FACTOR) if glyph_px else 0
-            if page_glyph:
+            if bubble is not None:
+                cap = BUBBLE_MAX_FONT_PX
+            elif page_glyph:
                 # One page is lettered at one size: keep each block within 0.8x..1.6x of the
                 # page's typical size (a bad per-block estimate made text tiny or huge).
                 page_cap = int(page_glyph * PAGE_GLYPH_CAP)
