@@ -137,6 +137,8 @@ PIPELINE_MODES = ("stream", "overlap", "serial")
 DEFAULT_PIPELINE_MODE = os.getenv("PIPELINE_MODE", "serial")
 DEFAULT_CONTEXT_CHUNK = 36  # Japanese lines per LLM call in 'serial' mode
 RENDER_CONCURRENCY = max(1, int(os.getenv("RENDER_CONCURRENCY", "3")))  # pages rendered at once in 'serial' mode
+# stream/overlap: translate once this many lines are buffered (0 = old per-page behaviour)
+DEFAULT_STREAM_BATCH_LINES = max(0, int(os.getenv("TRANSLATE_BATCH_LINES", str(DEFAULT_CONTEXT_CHUNK))))
 
 
 STATIC_KEEP_FILES = 20  # ~5 tasks (pdf + zip + doc + json each)
@@ -582,7 +584,10 @@ async def translation_worker():
             if pipeline_mode not in PIPELINE_MODES:
                 pipeline_mode = DEFAULT_PIPELINE_MODE
             context_chunk_size = max(1, int(task.get("context_chunk_size", DEFAULT_CONTEXT_CHUNK)))
-            logger.info(f"[Pipeline] mode={pipeline_mode} context_chunk_size={context_chunk_size if pipeline_mode == 'serial' else 12}")
+            # stream / overlap: buffer pages until this many lines, then translate them together
+            stream_batch_lines = max(0, int(task.get("translate_batch_lines", DEFAULT_STREAM_BATCH_LINES)))
+            logger.info(f"[Pipeline] mode={pipeline_mode} context_chunk_size={context_chunk_size} "
+                        f"stream_batch_lines={stream_batch_lines if pipeline_mode != 'serial' else '-'}")
 
             try:
                 if pipeline_mode == "serial":
@@ -599,6 +604,12 @@ async def translation_worker():
                         queue_size=3,
                         hold_render_until_source_done=(pipeline_mode == "overlap"),
                         on_source_done=unload_ocr_models if pipeline_mode == "overlap" else None,
+                        # Wait until ~context_chunk_size lines are extracted, then translate them
+                        # in one LLM call (more dialogue context, fewer calls). 0 = per page.
+                        translate_batch=(lambda pages: translate_pages(pages, context_chunk_size))
+                        if stream_batch_lines > 0 else None,
+                        batch_lines=stream_batch_lines,
+                        page_lines=lambda page: len(page.get("blocks", [])),
                     )
             except PipelineCancelled:
                 raise Exception("Task cancelled by user.")
@@ -964,7 +975,8 @@ async def upload_pdf_file(
     max_stroke_ratio: float = Form(0.35),
     font_scale: float = Form(1.0),
     pipeline_mode: str = Form(DEFAULT_PIPELINE_MODE),
-    context_chunk_size: int = Form(DEFAULT_CONTEXT_CHUNK)
+    context_chunk_size: int = Form(DEFAULT_CONTEXT_CHUNK),
+    translate_batch_lines: int = Form(DEFAULT_STREAM_BATCH_LINES)
 ):
     """
     Uploads the raw PDF file, assigns uuid, applies custom tuning parameters, and queues the task.
@@ -996,7 +1008,8 @@ async def upload_pdf_file(
         "max_stroke_ratio": max_stroke_ratio,
         "font_scale": font_scale,
         "pipeline_mode": pipeline_mode if pipeline_mode in PIPELINE_MODES else DEFAULT_PIPELINE_MODE,
-        "context_chunk_size": context_chunk_size
+        "context_chunk_size": context_chunk_size,
+        "translate_batch_lines": translate_batch_lines
     }
     
     status_db[task_id] = {

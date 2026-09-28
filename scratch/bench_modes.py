@@ -8,12 +8,13 @@ import httpx
 API = "http://127.0.0.1:8000"
 
 
-def run(pdf, mode, pages, chunk):
+def run(pdf, mode, pages, chunk, batch_lines):
     with open(pdf, "rb") as f:
         r = httpx.post(f"{API}/api/v1/translate/upload", timeout=120,
                        files={"file": (os.path.basename(pdf), f, "application/pdf")},
                        data={"source_lang": "Japanese", "page_range": pages, "force_retranslate": "true",
-                             "pipeline_mode": mode, "context_chunk_size": str(chunk)})
+                             "pipeline_mode": mode, "context_chunk_size": str(chunk),
+                             "translate_batch_lines": str(batch_lines)})
     task_id = r.json()["task_id"]
     t0, event = time.time(), None
     with httpx.stream("GET", f"{API}/api/v1/translate/status/{task_id}", timeout=None) as s:
@@ -32,11 +33,13 @@ if __name__ == "__main__":
     ap.add_argument("--pages", default="1-20")
     ap.add_argument("--modes", default="stream,overlap,serial")
     ap.add_argument("--chunk", type=int, default=36)
+    ap.add_argument("--batch-lines", type=int, default=36,
+                    help="stream/overlap: translate once N lines are buffered (0 = per page)")
     a = ap.parse_args()
     rows = []
     for mode in a.modes.split(","):
         print(f"== {mode} ...", flush=True)
-        ev, wall, data = run(a.pdf, mode, a.pages, a.chunk)
+        ev, wall, data = run(a.pdf, mode, a.pages, a.chunk, a.batch_lines)
         rows.append((mode, ev, wall, data.get("stage_times"), data.get("warning") or data.get("message", "")))
         print(f"   {ev} in {wall}s  stages={data.get('stage_times')}", flush=True)
         print(f"   translate breakdown={data.get('translate_breakdown')}", flush=True)

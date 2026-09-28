@@ -66,3 +66,10 @@
 - 结果（用户实测，第5巻 1-20 页，在 B15 修复之前）：LaMa 调用从 20 次减到 16 次，耗时从 143.9s 降到 117.9s（快 1.22 倍）。但拼图结果和原方式的差异较大：mask 内 PSNR 在 10.8-31.8 dB 之间，12 页里有 9 页低于 25 dB。原因是 FFC 的感受野覆盖整张图，同一张图里的其他小块会影响补出来的内容。
 - 结论：只省下约 18% 的 LaMa 时间（10 页约 10s），画质却变得不可预测，所以不采用。脚本保留在 `scratch/lama_pack_test.py`。
 - B14 + B15 修复后的实测（第5巻 1-10 页，serial 模式）：总耗时 109.2s（与之前持平）；LaMa 调用 14 → 12 次，CPU 计算时间 115s → 101s；提取阶段 28.1s → 35.6s，属于测量波动或模型冷启动；消字质量明显改善。
+
+### [全局] stream / overlap 模式按行数攒批翻译
+- 说明：stream / overlap 模式原来每提取完一页就单独翻译一页（每批最多 12 行，上下文很小）。现在先把提取好的页攒起来，累计到 `translate_batch_lines` 行（默认 36，和 serial 的每批行数一致）或者提取全部结束时，才一次性翻译这些页。LLM 能看到跨页的对话，调用次数也更少。
+- 涉及文件/模块：`core/async_stages.py`（`translate_batch` / `batch_lines` / `page_lines` 参数、`batched_translator`）、`main.py`（`DEFAULT_STREAM_BATCH_LINES`，环境变量 `TRANSLATE_BATCH_LINES`，上传参数 `translate_batch_lines`；设为 0 就回到原来每页翻译一次）、`scratch/bench_modes.py --batch-lines`。
+- 实现要点：只攒整页，不把一页拆到两批里。已有缓存的页照常跳过。出错时仍然走 abort，不会死锁。代价是重绘要等第一批（约 36 行，大约 4-8 页）翻译完才能开始。
+- 相关测试：`tests/test_async_stages.py` 新增 2 个用例（按行数分批、跳过缓存页并正确传出错误）。用 stub 依赖跑 main：每页 10 行、阈值 36 时，stream 和 overlap 都是每 4 页翻译一次（t1234 / t5678），serial 不受影响。
+- 状态：Done（待实测）

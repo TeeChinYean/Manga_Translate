@@ -49,6 +49,9 @@ async def run_three_stage_pipeline(
     queue_size: int = 3,
     hold_render_until_source_done: bool = False,
     on_source_done: Optional[Callable[[], Awaitable[None]]] = None,
+    translate_batch: Optional[Callable[[list], Awaitable[list]]] = None,
+    batch_lines: int = 0,
+    page_lines: Callable[[Any], int] = lambda page: 1,
 ) -> None:
     """
     Run producer -> translator -> renderer concurrently with bounded queues.
@@ -62,6 +65,10 @@ async def run_three_stage_pipeline(
       producer is exhausted and `on_source_done()` (e.g. unload OCR models) has finished;
       translation keeps running the whole time. The translated queue is unbounded in this
       mode so translation never waits for the (not yet started) renderer.
+
+    - `translate_batch(pages) -> pages_to_render` + `batch_lines`: buffer extracted pages until
+      they hold >= batch_lines lines (page_lines(page) each) or extraction ends, then translate
+      them in ONE call, so the LLM sees dialogue across pages. Used instead of translate_page.
 
     Raises the first stage exception, or PipelineCancelled if cancelled.
     """
@@ -122,6 +129,9 @@ async def run_three_stage_pipeline(
 
     async def translator():
         try:
+            if translate_batch is not None and batch_lines > 0:
+                await batched_translator()
+                return
             while True:
                 page = await get(q_extracted)
                 if page is _DONE or check_cancel():
@@ -135,6 +145,24 @@ async def run_three_stage_pipeline(
             fail(ex)
         finally:
             await put(q_translated, _DONE)
+
+    async def batched_translator():
+        buf, lines = [], 0
+        while True:
+            page = await get(q_extracted)
+            done = page is _DONE
+            if check_cancel():
+                return
+            if not done:
+                buf.append(page)
+                lines += max(0, int(page_lines(page)))
+            if buf and (done or lines >= batch_lines):
+                for out in await translate_batch(buf):
+                    if not await put(q_translated, out):
+                        return
+                buf, lines = [], 0
+            if done:
+                return
 
     async def renderer():
         try:
