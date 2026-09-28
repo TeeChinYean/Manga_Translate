@@ -294,6 +294,96 @@ def _detect_with_comic_detector(img_rgb: np.ndarray, session, out_seg=None) -> l
             
     return keep
 
+# ── Split one detector box into separate text groups (title vs body etc.) ─────
+SPLIT_SEG_THRESH = 96
+
+
+def _runs(profile):
+    """[(start, end_exclusive)] of True runs in a 1-D bool profile."""
+    runs, start = [], None
+    for i, v in enumerate(profile):
+        if v and start is None:
+            start = i
+        elif not v and start is not None:
+            runs.append((start, i))
+            start = None
+    if start is not None:
+        runs.append((start, len(profile)))
+    return runs
+
+
+def _split_box_by_seg(seg: np.ndarray, box) -> list:
+    """
+    CTD sometimes returns ONE box for two separate text groups, e.g. a narration title
+    column ("見習い司書") next to the body columns. Split it when, along the reading
+    direction, a column/line (a) is separated from the previous one by a clearly larger gap
+    than the normal line spacing, or (b) barely overlaps it in the other direction (title
+    starts higher / ends earlier). Furigana slivers never cause a split.
+    Returns [box] unchanged when there is nothing to split.
+    """
+    x0, y0, x1, y1 = box
+    if seg is None:
+        return [box]
+    region = seg[y0:y1, x0:x1] >= SPLIT_SEG_THRESH
+    if region.sum() < 50:
+        return [box]
+    vertical = (y1 - y0) >= (x1 - x0)
+    across = region.any(axis=0) if vertical else region.any(axis=1)   # profile across columns/lines
+    runs = _runs(across)
+    if len(runs) < 2:
+        return [box]
+    widths = [e - s for s, e in runs]
+    main_w = float(np.median([w for w in widths if w >= 0.45 * max(widths)]))
+
+    # Extent of each run along the reading direction
+    def extent(s, e):
+        band = region[:, s:e] if vertical else region[s:e, :]
+        along = band.any(axis=1) if vertical else band.any(axis=0)
+        idx = np.nonzero(along)[0]
+        return int(idx.min()), int(idx.max()) + 1
+
+    cols = []
+    for s, e in runs:
+        a0, a1 = extent(s, e)
+        cols.append({"s": s, "e": e, "a0": a0, "a1": a1, "furi": (e - s) < 0.45 * main_w})
+    main = [c for c in cols if not c["furi"]]
+    if len(main) < 2:
+        return [box]
+    gaps = [main[i + 1]["s"] - main[i]["e"] for i in range(len(main) - 1)]
+    normal_gap = float(np.median(gaps)) if gaps else 0.0
+
+    groups = [[main[0]]]
+    for prev, cur, gap in zip(main, main[1:], gaps):
+        ov = min(prev["a1"], cur["a1"]) - max(prev["a0"], cur["a0"])
+        shorter = min(prev["a1"] - prev["a0"], cur["a1"] - cur["a0"])
+        big_gap = gap > max(1.8 * normal_gap, 0.6 * main_w) and gap > normal_gap + 4
+        low_overlap = shorter > 0 and ov < 0.5 * shorter
+        if big_gap or low_overlap:
+            groups.append([cur])
+        else:
+            groups[-1].append(cur)
+    if len(groups) < 2:
+        return [box]
+    # furigana joins the nearest group
+    for c in cols:
+        if c["furi"]:
+            mid = (c["s"] + c["e"]) / 2
+            best = min(groups, key=lambda g: min(abs(mid - g[0]["s"]), abs(mid - g[-1]["e"])))
+            best.append(c)
+
+    out, pad = [], 3
+    for g in groups:
+        s = min(c["s"] for c in g); e = max(c["e"] for c in g)
+        a0 = min(c["a0"] for c in g); a1 = max(c["a1"] for c in g)
+        if vertical:
+            bx = (x0 + s - pad, y0 + a0 - pad, x0 + e + pad, y0 + a1 + pad)
+        else:
+            bx = (x0 + a0 - pad, y0 + s - pad, x0 + a1 + pad, y0 + e + pad)
+        H, W = seg.shape[:2]
+        out.append((max(0, bx[0]), max(0, bx[1]), min(W, bx[2]), min(H, bx[3])))
+    return out
+
+
 def _get_ocr_reader(lang="Japanese"):
     global _OCR_READER_JA, _OCR_READER_EN
     eo = _get_easyocr()
@@ -682,6 +772,14 @@ class PDFLayoutExtractor:
                     raise
                 seg_holder.clear()
                 merged_boxes = _detect_with_comic_detector(img_np, _get_comic_detector(), out_seg=seg_holder)
+            if seg_holder:
+                # One detector box can hold two text groups (title + body): split them (B18)
+                split_boxes = []
+                for b in merged_boxes:
+                    split_boxes.extend(_split_box_by_seg(seg_holder[0], b))
+                if len(split_boxes) != len(merged_boxes):
+                    logger.info(f"[ComicTextDetector] Page {page_num}: split {len(merged_boxes)} boxes into {len(split_boxes)} text groups.")
+                merged_boxes = split_boxes
             logger.info(f"[ComicTextDetector] Page {page_num}: Detected {len(merged_boxes)} speech bubbles.")
         else:
             # Fallback to EasyOCR CRAFT
