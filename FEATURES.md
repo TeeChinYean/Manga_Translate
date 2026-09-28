@@ -53,3 +53,10 @@
 ### [实验] LaMa 用 DirectML 跑 GPU —— 不可行
 - 结果（2026-09-28，RTX 3050 Laptop，已停 LLM）：DML session 能创建，但第一次推理时，FFC 的 `FourierUnit ... Transpose_56` 节点报 `887A0005 The GPU device instance has been suspended`（GPU 设备被挂起）。这与 renderer 里"LaMa 在 CPU 上跑以保证 FFC DFT 稳定"的原注释一致。
 - 处理：生产代码保持 LaMa 只走 CPU（原本就如此，没有改动）。测试脚本 `scratch/lama_gpu_test.py` 保留，以后换 CUDA EP 时可以复用。
+
+### [实验] LaMa 用 CUDA EP（onnxruntime-gpu）跑 GPU —— 不可行
+- 结果（2026-09-28，RTX 3050 Laptop 4GB，已停 LLM，隔离环境 `.venv-cuda`）：
+  - 默认图优化下，session 创建直接失败：`DFT ... one-sided DFT requires real input`。
+  - 改成 `ORT_DISABLE_ALL` 后能创建 session，但第 1 块区域的预热就花了 280.8 秒（CPU 每块约 6-8 秒）。预热期间显存一路涨到 3955MB（显存满了），GPU 使用率只有 10-44%，之后单块推理也超过 20 秒。
+- 结论：这个 LaMa ONNX 导出在 4GB 显卡的 CUDA 上跑，比 CPU 慢 30 倍以上，放弃。生产代码不受影响（LaMa 一直都在 CPU 上）。
+- 可以清理：`.venv-cuda\` 文件夹（约 2GB，已加入 gitignore）可以手动删掉。
