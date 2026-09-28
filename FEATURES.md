@@ -129,3 +129,10 @@
 - 实现要点：OCR_UNLOAD=auto（默认）/always（旧行为）/never；OCR_KEEP_MIN_FREE_MB 调阈值；无 psutil 时退回全部释放。
 - 相关测试：tests/test_ocr_unload.py
 - 状态：Done
+
+### [Render] 同页 LaMa 区域并行
+- 说明：一页有多个 LaMa 区域时并发执行（全局仍受 LAMA_PARALLEL 限制），避免"最后一页 3 个区域串行、其他核空闲"的长尾。
+- 涉及文件/模块：core/renderer.py `_lama_inpaint`
+- 实现要点：每个窗口用原图像素作输入（窗口内的遮罩像素本来就全部重绘），按原顺序回写；结果与串行一致。
+- 相关测试：tests/test_lama_parallel_regions.py
+- 状态：Done

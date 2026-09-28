@@ -411,14 +411,29 @@ def _lama_inpaint(img_pil: Image.Image, mask_pil: Image.Image) -> Image.Image:
 
         h, w = img_np.shape[:2]
         result = img_np.copy()
+        windows = []
         for (x0, y0, x1, y1) in _lama_regions(mask_bin, w, h):
             x0, y0, x1, y1 = _expand_to_window(x0, y0, x1, y1, w, h)
-            crop_mask = mask_bin[y0:y1, x0:x1]
-            if not np.any(crop_mask):
-                continue
-            healed = _lama_inpaint_crop(session, result[y0:y1, x0:x1], crop_mask)
+            if np.any(mask_bin[y0:y1, x0:x1]):
+                windows.append((x0, y0, x1, y1))
+
+        def _heal(win):
+            x0, y0, x1, y1 = win
+            # Input = original pixels; every masked pixel in the window is inpainted anyway.
+            return _lama_inpaint_crop(session, img_np[y0:y1, x0:x1], mask_bin[y0:y1, x0:x1])
+
+        # Regions of one page run concurrently (bounded globally by _LAMA_RUN_SEM), so a page
+        # with 3 regions no longer takes 3 sequential LaMa calls while other cores sit idle.
+        if len(windows) > 1 and LAMA_PARALLEL > 1:
+            from concurrent.futures import ThreadPoolExecutor
+            with ThreadPoolExecutor(max_workers=min(len(windows), LAMA_PARALLEL)) as ex:
+                healed_all = list(ex.map(_heal, windows))
+        else:
+            healed_all = [_heal(win) for win in windows]
+
+        for (x0, y0, x1, y1), healed in zip(windows, healed_all):
             # Only replace masked pixels; everything else stays bit-exact original.
-            sel = crop_mask > 0
+            sel = mask_bin[y0:y1, x0:x1] > 0
             result[y0:y1, x0:x1][sel] = healed[sel]
         return Image.fromarray(result)
     except Exception as e:
