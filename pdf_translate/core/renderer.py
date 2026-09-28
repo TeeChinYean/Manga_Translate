@@ -448,7 +448,9 @@ LAMA_SANITY_DIFF = 30   # hole mean vs ring median (gray levels) beyond this = L
 TEXTURE_BLUR = 7        # low-pass kernel separating tone texture (halftone dots) from shading
 TEXTURE_CLIP = 2.0      # clip copied texture to 2x the ring's texture std (drops art line edges)
 FILL_PICK_MARGIN = 4.0  # the alternative fill must beat LaMa's score by this much
-FILL_PICK = os.getenv("FILL_PICK", "1") != "0"
+# Off by default: on real pages (第３巻 p150/p153) the Telea+texture fill copied hair / art
+# strips into holes more often than it fixed LaMa's noisy fills. Opt in with FILL_PICK=1.
+FILL_PICK = os.getenv("FILL_PICK", "0") == "1"
 
 
 def _implausible_holes(img: np.ndarray, mask_bin: np.ndarray) -> np.ndarray:
@@ -1029,7 +1031,7 @@ def _merge_into(target: np.ndarray, x0: int, y0: int, x1: int, y1: int, mask: np
 
 # ── Main Renderer Class ────────────────────────────────────────────────────────
 # Bump whenever rendering output changes, so page JPEG caches from older logic are not reused.
-RENDER_CACHE_VERSION = "2026-09-28-rim10"
+RENDER_CACHE_VERSION = "2026-09-28-rim11"
 
 
 class PDFLayoutRenderer:
