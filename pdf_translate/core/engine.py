@@ -212,12 +212,22 @@ def _call_turbovec_llm_raw(payload: dict, timeout: float = 15.0):
         for url in endpoints:
             try:
                 r = httpx.post(url, json=payload, headers=headers, timeout=timeout)
+                _TLS.last_status = r.status_code
                 if r.status_code == 200:
                     return r.json()
                 else:
                     logger.warning(f"[Turbovec LLM] HTTP {r.status_code} from {url}: {r.text[:100]}")
+                    if r.status_code == 400:
+                        # Bad request (e.g. unsupported response_format): retrying will not help
+                        return None
             except Exception as e:
                 last_err = e
+                if isinstance(e, getattr(httpx, "TimeoutException", ())):
+                    # llama-server has a single slot (-np 1) and keeps generating after we give up;
+                    # re-sending (to either endpoint) would just queue behind the runaway request.
+                    _TLS.last_status = "timeout"
+                    logger.warning(f"[Turbovec LLM] timeout after {timeout:.0f}s on {url}; not retrying")
+                    return None
                 continue
                 
         # If connection refused on attempt 1, auto-heal and boot the LLM server
@@ -249,7 +259,8 @@ _PROPER_NOUNS_PATH = os.path.join(_DATA_DIR, "proper_nouns.json")
 _AUTO_TERMS_PATH = os.path.join(_DATA_DIR, "proper_nouns_auto.json")
 _GLOSSARY_PATH = os.path.join(_DATA_DIR, "glossary.json")
 _TERMS_LOCK = threading.Lock()
-AUTO_PROPER_NOUNS_ENABLED = os.getenv("AUTO_PROPER_NOUNS", "1") != "0"
+# Off by default: measured ~10s per page (31% of translation time) for ~11 tokens of output.
+AUTO_PROPER_NOUNS_ENABLED = os.getenv("AUTO_PROPER_NOUNS", "0") == "1"
 
 _CJK_RE = re.compile(r"[\u3040-\u30ff\u3400-\u9fff\uf900-\ufaff]")
 
@@ -724,11 +735,45 @@ def _extract_proper_nouns_from_batch(blocks: list, results: list):
 
 
 MIN_CONTEXT_CHUNK = 12
+LINE_MAX_CHARS = 80          # schema cap per translated line (manga lines are short)
+_JSON_SCHEMA_OK = True       # flips to False if the server rejects json_schema (HTTP 400)
 
 
 def _batch_max_tokens(n_lines: int) -> int:
-    """Output budget for an n-line JSON batch (~60 tokens per translated line + JSON overhead)."""
-    return int(min(4096, max(2048, 64 * n_lines + 256)))
+    """
+    Output budget for an n-line JSON batch: <=80 CJK chars (~60 tokens) + key/quotes per line.
+    Kept tight on purpose: with json_object mode a model can emit endless whitespace until
+    max_tokens, and on a single-slot server that runaway blocks every later request.
+    """
+    return int(min(4096, 64 + 72 * n_lines))
+
+
+def _disable_json_schema():
+    global _JSON_SCHEMA_OK
+    _JSON_SCHEMA_OK = False
+
+
+def _batch_response_format(ids) -> dict:
+    """
+    Grammar-bounded JSON: exactly these keys, string values capped at LINE_MAX_CHARS.
+    llama.cpp's schema grammar also bounds whitespace, so the reply cannot run away.
+    """
+    if not _JSON_SCHEMA_OK:
+        return {"type": "json_object"}
+    keys = [str(i) for i in ids]
+    return {
+        "type": "json_schema",
+        "json_schema": {
+            "name": "translations",
+            "strict": True,
+            "schema": {
+                "type": "object",
+                "properties": {k: {"type": "string", "maxLength": LINE_MAX_CHARS} for k in keys},
+                "required": keys,
+                "additionalProperties": False,
+            },
+        },
+    }
 
 
 def _batch_timeout(n_lines: int) -> float:
@@ -865,13 +910,19 @@ class HighPerformanceTranslationEngine:
                         ],
                         "temperature": 0.2,
                         "max_tokens": _batch_max_tokens(len(chunk_indices)),
-                        "response_format": {"type": "json_object"}
+                        "response_format": _batch_response_format(chunk_indices)
                     }
                     
                     batch_llm_success = False
                     for attempt in range(1, 3):
                         try:
                             data = _call_turbovec_llm(payload, timeout=_batch_timeout(len(chunk_indices)), tag="batch")
+                            if (data is None and getattr(_TLS, "last_status", None) == 400
+                                    and payload["response_format"].get("type") == "json_schema"):
+                                _disable_json_schema()
+                                logger.warning("[Qwen Batch] server rejected json_schema; falling back to json_object")
+                                payload["response_format"] = {"type": "json_object"}
+                                data = _call_turbovec_llm(payload, timeout=_batch_timeout(len(chunk_indices)), tag="batch")
                             if data and "choices" in data and len(data["choices"]) > 0:
                                 batch_llm_success = True
                                 reply = data["choices"][0]["message"]["content"].strip()
