@@ -44,6 +44,7 @@ LAMA_PARALLEL = max(1, int(os.getenv("LAMA_PARALLEL", str(_DEF_PAR))))
 LAMA_THREADS = max(1, int(os.getenv("LAMA_THREADS", str(_DEF_THR if "LAMA_PARALLEL" not in os.environ
                                                          else max(1, _CPU // LAMA_PARALLEL)))))
 _LAMA_RUN_SEM = threading.BoundedSemaphore(LAMA_PARALLEL)
+LAMA_PREMASK = os.getenv("LAMA_PREMASK", "1") != "0"
 
 # ── Render timing breakdown (where does rendering time go?) ───────────────────
 _RENDER_STATS = {}
@@ -382,8 +383,13 @@ def _lama_inpaint_crop(session, crop_rgb: np.ndarray, crop_mask: np.ndarray) -> 
         img_in, mask_in = sq_img, sq_mask
     mask_in = cv2.dilate(mask_in, cv2.getStructuringElement(cv2.MORPH_RECT, (2, 2)), iterations=1)
 
-    lama_img_in = (img_in.astype(np.float32) / 255.0).transpose((2, 0, 1))[None, ...]
     lama_mask_in = (mask_in > 0).astype(np.float32)[None, None, ...]
+    lama_img_in = (img_in.astype(np.float32) / 255.0).transpose((2, 0, 1))[None, ...]
+    if LAMA_PREMASK:
+        # LaMa is trained on img * (1 - mask). If the exported graph does not blank the hole
+        # itself, the original glyphs / white rim under the mask leak into the output
+        # (ghost strokes, white blobs: BUG.md B20). No-op if the graph already does it.
+        lama_img_in = lama_img_in * (1.0 - lama_mask_in)
     t_wait = time.time()
     with _LAMA_RUN_SEM:
         t_run = time.time()
@@ -770,7 +776,7 @@ def _merge_into(target: np.ndarray, x0: int, y0: int, x1: int, y1: int, mask: np
 
 # ── Main Renderer Class ────────────────────────────────────────────────────────
 # Bump whenever rendering output changes, so page JPEG caches from older logic are not reused.
-RENDER_CACHE_VERSION = "2026-09-28-rim"
+RENDER_CACHE_VERSION = "2026-09-28-rim2"
 
 
 class PDFLayoutRenderer:
