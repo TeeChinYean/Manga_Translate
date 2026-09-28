@@ -606,6 +606,36 @@ def detect_text_regions(img_bgr: np.ndarray) -> list[tuple[int, int, int, int]]:
     boxes.sort(key=lambda b: (b[1] // 30, b[0]))
     return boxes
 
+CONTAINED_DROP = 0.7   # a box with >=70% of its area inside a larger box is a duplicate read
+
+
+def _drop_contained_boxes(boxes, thresh: float = CONTAINED_DROP) -> list:
+    """Drop detector boxes that lie (mostly) inside a larger box (BUG.md B22).
+    CTD's NMS keeps a small box nested in a big one (IoU is low), both get OCR'd, and the
+    page then shows the sentence twice: once in full, once as a small fragment on top."""
+    items = [tuple(int(v) for v in b) for b in boxes]
+    area = lambda b: max(0, b[2] - b[0]) * max(0, b[3] - b[1])
+    order = sorted(range(len(items)), key=lambda i: -area(items[i]))
+    kept = []
+    for i in order:
+        b = items[i]
+        ab = area(b)
+        if ab == 0:
+            continue
+        dup = False
+        for k in kept:
+            ix = max(0, min(b[2], k[2]) - max(b[0], k[0]))
+            iy = max(0, min(b[3], k[3]) - max(b[1], k[1]))
+            if ix * iy >= thresh * ab:
+                dup = True
+                break
+        if not dup:
+            kept.append(b)
+    # keep the original order (reading order is decided later)
+    kept_set = set(kept)
+    return [list(b) if isinstance(boxes[0], list) else b for b in items if b in kept_set]
+
+
 def _merge_overlapping_boxes(raw_boxes, iou_thresh=0.20, containment_thresh=0.55):
     """
     Non-Maximum Suppression & Bounding Box Fusion for Manga Speech Bubbles:
@@ -865,6 +895,11 @@ class PDFLayoutExtractor:
                 if len(split_boxes) != len(merged_boxes):
                     logger.info(f"[ComicTextDetector] Page {page_num}: split {len(merged_boxes)} boxes into {len(split_boxes)} text groups.")
                 merged_boxes = split_boxes
+            kept = _drop_contained_boxes(merged_boxes)
+            if len(kept) != len(merged_boxes):
+                logger.info(f"[ComicTextDetector] Page {page_num}: dropped {len(merged_boxes) - len(kept)} "
+                            f"box(es) lying inside another box (duplicate text, B22).")
+            merged_boxes = kept
             logger.info(f"[ComicTextDetector] Page {page_num}: Detected {len(merged_boxes)} speech bubbles.")
             _xstat("detect", _time.time() - _t)
         else:

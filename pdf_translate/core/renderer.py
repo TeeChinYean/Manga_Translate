@@ -305,6 +305,25 @@ def _rects_overlap(a, b, gap: float = 2.0) -> bool:
     return not (a[2] + gap <= b[0] or b[2] + gap <= a[0] or a[3] + gap <= b[1] or b[3] + gap <= a[1])
 
 
+def _nested_duplicates(boxes, thresh: float = 0.6) -> set:
+    """Indexes of boxes lying >= `thresh` of their area inside a larger box of the same page."""
+    area = lambda b: max(0, b[2] - b[0]) * max(0, b[3] - b[1])
+    out = set()
+    for i, b in enumerate(boxes):
+        ab = area(b)
+        if ab == 0:
+            continue
+        for j, o in enumerate(boxes):
+            if i == j or area(o) <= ab:
+                continue
+            ix = max(0, min(b[2], o[2]) - max(b[0], o[0]))
+            iy = max(0, min(b[3], o[3]) - max(b[1], o[1]))
+            if ix * iy >= thresh * ab:
+                out.add(i)
+                break
+    return out
+
+
 def _grow_box_in_clean(gray: np.ndarray, box, others, max_factor: float = GROW_MAX):
     """Grow a draw box side by side over the white interior of its bubble (after inpainting),
     stopping at the bubble outline, the growth limit, or another block's box."""
@@ -1084,7 +1103,7 @@ def _merge_into(target: np.ndarray, x0: int, y0: int, x1: int, y1: int, mask: np
 
 # ── Main Renderer Class ────────────────────────────────────────────────────────
 # Bump whenever rendering output changes, so page JPEG caches from older logic are not reused.
-RENDER_CACHE_VERSION = "2026-09-28-typeset2"
+RENDER_CACHE_VERSION = "2026-09-28-typeset3"
 
 
 class PDFLayoutRenderer:
@@ -1208,7 +1227,11 @@ class PDFLayoutRenderer:
         known = [g for g in sizes if g > 0]
         page_glyph = int(np.median(known)) if known else 0
         plans, placed = [], []
+        dup = _nested_duplicates(boxes)
         for idx, item in enumerate(blocks_to_render):
+            if idx in dup:
+                _rstat("typeset_skipped_nested", 0.0)
+                continue  # same text read twice (small box inside a bigger one): draw once (B22)
             px0, py0, px1, py1, translated, block = item[:6]
             style = item[6] if len(item) > 6 else {}
             if style.get("clean_bg"):
