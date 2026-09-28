@@ -212,29 +212,32 @@ async def preload_all_models():
     loop = asyncio.get_running_loop()
     await loop.run_in_executor(None, ensure_turbovec_llm_ready, True, 25)
     
-    # 2. Preload EasyOCR and MangaOCR
-    def _warm_ocr():
-        try:
-            from core.extractor import _get_ocr_reader, _get_manga_ocr, prepare_extract_devices
-            prepare_extract_devices()
-            import numpy as np
-            from PIL import Image
-            
-            # Warm EasyOCR detector
-            reader = _get_ocr_reader("Japanese")
-            dummy_img = np.full((128, 128, 3), 255, dtype=np.uint8)
-            reader.readtext(dummy_img, paragraph=True)
-            
-            # Warm MangaOCR ViT model
-            mocr = _get_manga_ocr()
-            if mocr is not None:
-                dummy_pil = Image.fromarray(dummy_img)
-                mocr(dummy_pil)
-            logger.info("✔ [Preloader] OCR models (EasyOCR + MangaOCR) 100% preloaded!")
-        except Exception as ex:
-            logger.warning(f"⚠️ [Preloader] OCR preloading warning: {ex}")
-            
-    await loop.run_in_executor(None, _warm_ocr)
+    # 2. Preload the models the first job actually uses (primary chain first, so a job that
+    #    starts right after boot finds them ready). Measured cold loads: OCR ~23s, LaMa ~12s.
+    #    EasyOCR is only a fallback and is left lazy.
+    def _warm_models():
+        import numpy as np
+        from PIL import Image
+        from core import extractor as ex
+        from core.renderer import preload_lama
+        steps = [
+            ("placement", ex.prepare_extract_devices),
+            ("comic_detector", ex._get_comic_detector),
+            ("manga_ocr", ex._get_manga_ocr),
+            ("paddle_ocr", ex._get_paddle_ocr),
+            ("lama", preload_lama),
+        ]
+        for name, fn in steps:
+            t = time.time()
+            try:
+                obj = fn()
+                if name == "manga_ocr" and obj is not None:
+                    obj(Image.fromarray(np.full((64, 64, 3), 255, dtype=np.uint8)))  # warm-up pass
+                logger.info(f"✔ [Preloader] {name} ready in {time.time() - t:.1f}s")
+            except Exception as ex_err:
+                logger.warning(f"⚠️ [Preloader] {name} preload failed: {ex_err}")
+
+    await loop.run_in_executor(None, _warm_models)
     logger.info("✔ [Preloader] All pipeline models preloaded and warm in memory!")
 
 

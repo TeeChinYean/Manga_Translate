@@ -143,3 +143,10 @@
 - 实现要点：只加载一次（共享 future）；render_page 先 await；stream 模式在首个渲染页触发。
 - 相关测试：tests/test_lama_preload.py
 - 状态：Done
+
+### [Startup] 启动预加载覆盖首个任务实际用到的模型
+- 说明：启动时后台依次加载 GPU 布局、CTD、MangaOCR（含一次热身）、PaddleOCR、LaMa；EasyOCR 只是 fallback，改为按需加载。首个任务不再付 ~23s OCR + ~12s LaMa 冷加载。
+- 涉及文件/模块：main.py `preload_all_models`
+- 实现要点：每步单独 try/计时日志；ORT 建 session 时持有 GIL，放在启动期不会卡住任务（冷启动时翻译阶段被 LaMa 加载拖长 11s 的现象由此消除）。
+- 相关测试：tests/test_lama_preload.py `test_startup_preloader_covers_primary_models`
+- 状态：Done
