@@ -2,7 +2,7 @@
 # 1) STOP the LLM first (close the "Turbovec LLM Engine" window / llama-server), so VRAM is free.
 # 2) Run from repo root:  python scratch\lama_gpu_test.py  (defaults: 第5巻.pdf, pages 1-10)
 # Outputs a summary table and side-by-side images in scratch\lama_gpu_compare\ (original | CPU | GPU).
-import argparse, os, sys, time, subprocess, logging
+import argparse, os, sys, time, subprocess, logging, threading
 logging.disable(logging.WARNING)
 ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 sys.path.insert(0, os.path.join(ROOT, "pdf_translate"))
@@ -36,6 +36,7 @@ OPT_LEVELS = {
     "all": ort.GraphOptimizationLevel.ORT_ENABLE_ALL,
 }
 GPU_OPT = "disable"
+VERBOSE = False
 
 
 def make_session(provider):
@@ -48,6 +49,8 @@ def make_session(provider):
     # fails DFT shape inference ("one-sided DFT requires real input"). Production CPU uses
     # ORT_DISABLE_ALL for the same reason, so default the GPU session to that as well.
     opts.graph_optimization_level = OPT_LEVELS[GPU_OPT]
+    if VERBOSE:
+        opts.log_severity_level = 1  # INFO: prints node placement per execution provider
     if provider == "DmlExecutionProvider":
         opts.enable_mem_pattern = False  # required by DirectML
         opts.execution_mode = ort.ExecutionMode.ORT_SEQUENTIAL
@@ -98,14 +101,47 @@ def collect_crops(pdf, pages, limit):
     return jobs
 
 
-def run_all(session, jobs):
-    R._lama_inpaint_crop(session, jobs[0][1], jobs[0][2])  # warm-up (kernel compile / allocs)
-    outs, times = [], []
-    for _, crop, m in jobs:
+def gpu_status():
+    try:
+        out = subprocess.run(["nvidia-smi", "--query-gpu=utilization.gpu,memory.used", "--format=csv,noheader"],
+                             capture_output=True, text=True, timeout=5).stdout.strip()
+        return out.splitlines()[0]
+    except Exception:
+        return "n/a"
+
+
+class Heartbeat:
+    """Print elapsed time + GPU util every 10s so a hang vs. slow run is visible; hard-exit on timeout."""
+    def __init__(self, label, timeout):
+        self.label, self.timeout, self.stop = label, timeout, threading.Event()
+        self.t0 = time.perf_counter()
+        threading.Thread(target=self._run, daemon=True).start()
+
+    def _run(self):
+        while not self.stop.wait(10):
+            el = time.perf_counter() - self.t0
+            print(f"   [{self.label}] {el:5.0f}s elapsed | GPU util, mem used: {gpu_status()}", flush=True)
+            if self.timeout and el > self.timeout:
+                print(f"   [{self.label}] exceeded {self.timeout}s -> giving up (treat as FAILED).", flush=True)
+                os._exit(2)
+
+
+def run_all(session, jobs, label="", timeout=0):
+    hb = Heartbeat(label, timeout)
+    try:
         t = time.perf_counter()
-        outs.append(R._lama_inpaint_crop(session, crop, m))
-        times.append(time.perf_counter() - t)
-    return outs, times
+        print(f"   [{label}] warm-up ...", flush=True)
+        R._lama_inpaint_crop(session, jobs[0][1], jobs[0][2])  # warm-up (kernel compile / allocs)
+        print(f"   [{label}] warm-up done in {time.perf_counter() - t:.1f}s", flush=True)
+        outs, times = [], []
+        for i, (_, crop, m) in enumerate(jobs):
+            t = time.perf_counter()
+            outs.append(R._lama_inpaint_crop(session, crop, m))
+            times.append(time.perf_counter() - t)
+            print(f"   [{label}] crop {i + 1}/{len(jobs)}: {times[-1]:.2f}s", flush=True)
+        return outs, times
+    finally:
+        hb.stop.set()
 
 
 def compare(a, b, m):
@@ -123,8 +159,11 @@ if __name__ == "__main__":
     ap.add_argument("--limit", type=int, default=12, help="max crops to test")
     ap.add_argument("--gpu-provider", default=None, help="force DmlExecutionProvider / CUDAExecutionProvider")
     ap.add_argument("--opt", default="disable", choices=sorted(OPT_LEVELS), help="GPU graph optimization level")
+    ap.add_argument("--gpu-timeout", type=int, default=300, help="give up on the GPU run after N seconds")
+    ap.add_argument("--verbose", action="store_true", help="ORT info logs: shows which nodes fall back to CPU")
     a = ap.parse_args()
     GPU_OPT = a.opt
+    VERBOSE = a.verbose
 
     avail = ort.get_available_providers()
     gpu = a.gpu_provider or next((p for p in ("CUDAExecutionProvider", "DmlExecutionProvider") if p in avail), None)
@@ -139,7 +178,7 @@ if __name__ == "__main__":
     if not jobs:
         sys.exit("No textured regions found on these pages; try other --pages.")
 
-    cpu_out, cpu_t = run_all(make_session("CPUExecutionProvider"), jobs)
+    cpu_out, cpu_t = run_all(make_session("CPUExecutionProvider"), jobs, "CPU")
     free0 = nvidia_free_mb()
     try:
         gsess = make_session(gpu)
@@ -147,7 +186,7 @@ if __name__ == "__main__":
         if gsess.get_providers()[0] != gpu:
             sys.exit(f"{gpu} could not be initialised (session fell back to CPU). "
                      "Check CUDA/cuDNN install messages above.")
-        gpu_out, gpu_t = run_all(gsess, jobs)
+        gpu_out, gpu_t = run_all(gsess, jobs, "GPU", timeout=a.gpu_timeout)
     except Exception as e:
         sys.exit(f"GPU LaMa FAILED (opt={GPU_OPT}): {type(e).__name__}: {e}")
     free1 = nvidia_free_mb()
