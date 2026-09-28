@@ -312,6 +312,50 @@ def _runs(profile):
     return runs
 
 
+def _split_staggered_groups(region: np.ndarray, box, vertical: bool) -> list:
+    """Split a box whose text forms two big 2-D groups that are staggered along the reading
+    direction (they overlap less than half of the shorter one). Glyphs of one column are
+    linked first so a column is one group."""
+    x0, y0, x1, y1 = box
+    k = np.ones((9, 3), np.uint8) if vertical else np.ones((3, 9), np.uint8)
+    linked = cv2.dilate(region.astype(np.uint8), k)
+    n, labels, stats, _ = cv2.connectedComponentsWithStats(linked, 8)
+    if n <= 2:
+        return [box]
+    total = float(stats[1:, cv2.CC_STAT_AREA].sum())
+    big = [i for i in range(1, n) if stats[i, cv2.CC_STAT_AREA] >= 0.2 * total]
+    if len(big) != 2:
+        return [box]
+    a, b = (stats[i] for i in big)
+    if vertical:
+        a0, a1, b0, b1 = a[1], a[1] + a[3], b[1], b[1] + b[3]
+    else:
+        a0, a1, b0, b1 = a[0], a[0] + a[2], b[0], b[0] + b[2]
+    ov = min(a1, b1) - max(a0, b0)
+    shorter = min(a1 - a0, b1 - b0)
+    if shorter <= 0 or ov >= 0.5 * shorter:
+        return [box]
+    out, pad = [], 3
+    rh, rw = region.shape[:2]
+    for i in big:
+        # every small component (punctuation, furigana) joins the nearest big group
+        m = labels == i
+        for j in range(1, n):
+            if j in big:
+                continue
+            cy = stats[j, 1] + stats[j, 3] / 2
+            cx = stats[j, 0] + stats[j, 2] / 2
+            d = [np.hypot(cx - (stats[q, 0] + stats[q, 2] / 2), cy - (stats[q, 1] + stats[q, 3] / 2)) for q in big]
+            if big[int(np.argmin(d))] == i:
+                m = m | (labels == j)
+        ys, xs = np.nonzero(m & region)
+        if ys.size == 0:
+            continue
+        out.append([max(x0, x0 + int(xs.min()) - pad), max(y0, y0 + int(ys.min()) - pad),
+                    min(x1, x0 + int(xs.max()) + 1 + pad), min(y1, y0 + int(ys.max()) + 1 + pad)])
+    return out if len(out) == 2 else [box]
+
+
 def _split_box_by_seg(seg: np.ndarray, box) -> list:
     """
     CTD sometimes returns ONE box for two separate text groups, e.g. a narration title
@@ -331,7 +375,9 @@ def _split_box_by_seg(seg: np.ndarray, box) -> list:
     across = region.any(axis=0) if vertical else region.any(axis=1)   # profile across columns/lines
     runs = _runs(across)
     if len(runs) < 2:
-        return [box]
+        # Columns of two overlapping bubbles can touch in the profile (no gap), e.g. a
+        # diagonal pair "友達いない？" / "お金もないッ" (B24). Look at 2-D text groups instead.
+        return _split_staggered_groups(region, box, vertical)
     widths = [e - s for s, e in runs]
     main_w = float(np.median([w for w in widths if w >= 0.45 * max(widths)]))
 

@@ -299,7 +299,8 @@ TYPESET_MAX_TRIES = 30   # overlap-shrink attempts per block
 PAGE_GLYPH_CAP = 1.6     # font <= 1.6 x the page's median original glyph size
 PAGE_GLYPH_FLOOR = 0.8   # the size cap is at least 0.8 x the page's median glyph size
 GROW_STEP = 4            # px per growth step of a draw box inside a clean bubble
-GROW_MAX = 1.8           # a draw box may grow to at most 1.8x its width / height
+GROW_MAX = 1.8           # a draw box may grow to at most 1.8x its width / height ...
+GROW_SQUARE = 1.2        # ... or up to 1.2x its other side (narrow columns may become square)
 GROW_WHITE = 235         # strip pixels at least this bright count as bubble interior
 GROW_SHARE = 0.97        # a strip is taken if >=97% of it is bubble interior
 
@@ -332,8 +333,11 @@ def _grow_box_in_clean(gray: np.ndarray, box, others, max_factor: float = GROW_M
     stopping at the bubble outline, the growth limit, or another block's box."""
     H, W = gray.shape[:2]
     x0, y0, x1, y1 = box
-    max_w = int((x1 - x0) * max_factor)
-    max_h = int((y1 - y0) * max_factor)
+    # A narrow Japanese column (e.g. 26x88 "ドロボー！！") must be allowed to become roughly
+    # square for horizontal Chinese: the bubble outline, not the column width, is the limit (B24).
+    w0, h0 = x1 - x0, y1 - y0
+    max_w = int(max(w0 * max_factor, h0 * GROW_SQUARE))
+    max_h = int(max(h0 * max_factor, w0 * GROW_SQUARE))
     s = GROW_STEP
     grew = True
     while grew:
@@ -1106,7 +1110,7 @@ def _merge_into(target: np.ndarray, x0: int, y0: int, x1: int, y1: int, mask: np
 
 # ── Main Renderer Class ────────────────────────────────────────────────────────
 # Bump whenever rendering output changes, so page JPEG caches from older logic are not reused.
-RENDER_CACHE_VERSION = "2026-09-28-typeset3"
+RENDER_CACHE_VERSION = "2026-09-28-typeset4"
 
 
 class PDFLayoutRenderer:
