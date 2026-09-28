@@ -446,6 +446,7 @@ def _flat_fill_holes(img: np.ndarray, mask_bin: np.ndarray) -> np.ndarray:
 # Measured p153 (dark halftone gradient): LaMa hole ~50 levels lighter than its ring = visible blob
 LAMA_SANITY_DIFF = 30   # hole mean vs ring median (gray levels) beyond this = LaMa failed there
 TEXTURE_BLUR = 7        # low-pass kernel separating tone texture (halftone dots) from shading
+TEXTURE_CLIP = 2.0      # clip copied texture to 2x the ring's texture std (drops art line edges)
 FILL_PICK_MARGIN = 4.0  # the alternative fill must beat LaMa's score by this much
 FILL_PICK = os.getenv("FILL_PICK", "1") != "0"
 
@@ -476,29 +477,49 @@ def _implausible_holes(img: np.ndarray, mask_bin: np.ndarray) -> np.ndarray:
 
 def _transfer_texture(smooth: np.ndarray, original: np.ndarray, holes: np.ndarray, all_masks: np.ndarray) -> np.ndarray:
     """Telea gives the right shading but no screentone. Add back the tone texture (original minus
-    its low-pass) copied from an unmasked patch right next to each hole, so the fill does not
-    read as a flat smudge on halftone."""
+    its low-pass) copied from an unmasked patch next to each hole, so the fill does not read as a
+    flat smudge on halftone. The patch with the texture strength closest to the hole's ring is
+    used, and the texture is clipped to that strength so art lines are not copied in."""
     out = smooth.copy()
     n, labels, stats, _ = cv2.connectedComponentsWithStats((holes > 0).astype(np.uint8), 8)
     if n <= 1:
         return out
     orig = original.astype(np.int16)
     tex = orig - cv2.GaussianBlur(original, (TEXTURE_BLUR, TEXTURE_BLUR), 0).astype(np.int16)
+    tex_g = tex.mean(axis=2) if tex.ndim == 3 else tex
     H, W = holes.shape[:2]
+    kr = cv2.getStructuringElement(cv2.MORPH_ELLIPSE, (2 * FLAT_RING_PX + 7, 2 * FLAT_RING_PX + 7))
     for i in range(1, n):
         x, y, w, h, _a = stats[i]
         comp = labels[y:y + h, x:x + w] == i
-        for dx, dy in ((-(w + 8), 0), (w + 8, 0), (0, -(h + 8)), (0, h + 8)):
+        pad = FLAT_RING_PX + 4
+        X0, Y0, X1, Y1 = max(0, x - pad), max(0, y - pad), min(W, x + w + pad), min(H, y + h + pad)
+        cz = labels[Y0:Y1, X0:X1] == i
+        ring = (cv2.dilate(cz.astype(np.uint8), kr) > 0) & (all_masks[Y0:Y1, X0:X1] == 0)
+        if ring.sum() < 20:
+            continue
+        ring_std = float(tex_g[Y0:Y1, X0:X1][ring].std())
+        if ring_std < 2.0:
+            continue  # flat surroundings: nothing to add
+        best, best_d = None, None
+        for dx, dy in ((-(w + 8), 0), (w + 8, 0), (0, -(h + 8)), (0, h + 8),
+                       (-(w // 2 + 8), 0), (w // 2 + 8, 0), (0, -(h // 2 + 8)), (0, h // 2 + 8)):
             sx, sy = x + dx, y + dy
             if sx < 0 or sy < 0 or sx + w > W or sy + h > H:
                 continue
-            if np.any(all_masks[sy:sy + h, sx:sx + w]):
+            if np.any(all_masks[sy:sy + h, sx:sx + w][comp]):
                 continue
-            patch = tex[sy:sy + h, sx:sx + w]
-            region = out[y:y + h, x:x + w].astype(np.int16)
-            region[comp] = np.clip(region[comp] + patch[comp], 0, 255)
-            out[y:y + h, x:x + w] = region.astype(np.uint8)
-            break
+            d = abs(float(tex_g[sy:sy + h, sx:sx + w][comp].std()) - ring_std)
+            if best is None or d < best_d:
+                best, best_d = (sx, sy), d
+        if best is None:
+            continue
+        sx, sy = best
+        lim = int(round(TEXTURE_CLIP * ring_std))
+        patch = np.clip(tex[sy:sy + h, sx:sx + w], -lim, lim)
+        region = out[y:y + h, x:x + w].astype(np.int16)
+        region[comp] = np.clip(region[comp] + patch[comp], 0, 255)
+        out[y:y + h, x:x + w] = region.astype(np.uint8)
     return out
 
 
@@ -1008,7 +1029,7 @@ def _merge_into(target: np.ndarray, x0: int, y0: int, x1: int, y1: int, mask: np
 
 # ── Main Renderer Class ────────────────────────────────────────────────────────
 # Bump whenever rendering output changes, so page JPEG caches from older logic are not reused.
-RENDER_CACHE_VERSION = "2026-09-28-rim9"
+RENDER_CACHE_VERSION = "2026-09-28-rim10"
 
 
 class PDFLayoutRenderer:
