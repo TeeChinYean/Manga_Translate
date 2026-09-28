@@ -596,11 +596,32 @@ def _google_translate_one(text: str, src: str, tgt: str = "zh-CN") -> str:
         raise
 
 
+_GOOGLE_FAILS = {"n": 0, "until": 0.0}
+GOOGLE_BREAK_AFTER = 2      # consecutive failures before Google is skipped for a while
+GOOGLE_BREAK_SECONDS = 300  # ... this long (no network / blocked: each try costs the full timeout)
+
+
 def _google_translate_one_raw(text: str, src: str, tgt: str = "zh-CN") -> str:
+    if time.time() < _GOOGLE_FAILS["until"]:
+        raise RuntimeError("Google API skipped (recent consecutive failures)")
+    try:
+        out = _google_translate_request(text, src, tgt)
+        _GOOGLE_FAILS["n"] = 0
+        return out
+    except Exception:
+        _GOOGLE_FAILS["n"] += 1
+        if _GOOGLE_FAILS["n"] >= GOOGLE_BREAK_AFTER:
+            _GOOGLE_FAILS["until"] = time.time() + GOOGLE_BREAK_SECONDS
+            logger.warning(f"[Google] {_GOOGLE_FAILS['n']} failures in a row: skipping Google for "
+                           f"{GOOGLE_BREAK_SECONDS}s (every try costs the full timeout).")
+        raise
+
+
+def _google_translate_request(text: str, src: str, tgt: str = "zh-CN") -> str:
     url = "https://translate.googleapis.com/translate_a/single"
     params = {"client": "gtx", "sl": src, "tl": tgt, "dt": "t", "q": text}
     try:
-        r = httpx.get(url, params=params, timeout=10.0)
+        r = httpx.get(url, params=params, timeout=6.0)
         r.raise_for_status()
         data = r.json()
         parts = [seg[0] for seg in data[0] if seg[0]]
@@ -869,9 +890,14 @@ def _batch_response_format(ids) -> dict:
     }
 
 
+BATCH_MIN_TOK_S = 30.0   # slowest generation speed we still wait for (measured normal: ~40 tok/s)
+
+
 def _batch_timeout(n_lines: int) -> float:
-    """Generation at ~35-50 tok/s needs longer timeouts for bigger batches."""
-    return float(max(18.0, 1.2 * n_lines + 10.0))
+    """Long enough to generate the whole max_tokens budget at BATCH_MIN_TOK_S plus prompt time.
+    The old 1.2 s/line (8 lines -> 19.6 s) was shorter than a full 640-token answer at 30-40
+    tok/s, so a slightly slow GPU timed every chunk out and fell back line by line (B23)."""
+    return float(max(20.0, 10.0 + _batch_max_tokens(n_lines) / BATCH_MIN_TOK_S))
 
 
 class HighPerformanceTranslationEngine:
