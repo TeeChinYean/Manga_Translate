@@ -30,12 +30,24 @@ def nvidia_free_mb():
         return None
 
 
+OPT_LEVELS = {
+    "disable": ort.GraphOptimizationLevel.ORT_DISABLE_ALL,
+    "basic": ort.GraphOptimizationLevel.ORT_ENABLE_BASIC,
+    "all": ort.GraphOptimizationLevel.ORT_ENABLE_ALL,
+}
+GPU_OPT = "disable"
+
+
 def make_session(provider):
     opts = ort.SessionOptions()
     if provider == "CPUExecutionProvider":
         opts.graph_optimization_level = ort.GraphOptimizationLevel.ORT_DISABLE_ALL  # same as production
         opts.intra_op_num_threads = R.LAMA_THREADS
         return ort.InferenceSession(MODEL, sess_options=opts, providers=["CPUExecutionProvider"])
+    # Graph optimizations rewrite the FFC's DFT nodes (one-sided rfft) into a shape that
+    # fails DFT shape inference ("one-sided DFT requires real input"). Production CPU uses
+    # ORT_DISABLE_ALL for the same reason, so default the GPU session to that as well.
+    opts.graph_optimization_level = OPT_LEVELS[GPU_OPT]
     if provider == "DmlExecutionProvider":
         opts.enable_mem_pattern = False  # required by DirectML
         opts.execution_mode = ort.ExecutionMode.ORT_SEQUENTIAL
@@ -110,11 +122,13 @@ if __name__ == "__main__":
     ap.add_argument("--pages", default="1-10")
     ap.add_argument("--limit", type=int, default=12, help="max crops to test")
     ap.add_argument("--gpu-provider", default=None, help="force DmlExecutionProvider / CUDAExecutionProvider")
+    ap.add_argument("--opt", default="disable", choices=sorted(OPT_LEVELS), help="GPU graph optimization level")
     a = ap.parse_args()
+    GPU_OPT = a.opt
 
     avail = ort.get_available_providers()
     gpu = a.gpu_provider or next((p for p in ("CUDAExecutionProvider", "DmlExecutionProvider") if p in avail), None)
-    print("ORT providers:", avail)
+    print("ORT", ort.__version__, "providers:", avail)
     print("free VRAM before:", nvidia_free_mb(), "MB  (should be ~3900 with the LLM stopped)")
     if gpu is None:
         sys.exit("No GPU execution provider available in onnxruntime.")
@@ -135,7 +149,7 @@ if __name__ == "__main__":
                      "Check CUDA/cuDNN install messages above.")
         gpu_out, gpu_t = run_all(gsess, jobs)
     except Exception as e:
-        sys.exit(f"GPU LaMa FAILED: {type(e).__name__}: {e}")
+        sys.exit(f"GPU LaMa FAILED (opt={GPU_OPT}): {type(e).__name__}: {e}")
     free1 = nvidia_free_mb()
 
     os.makedirs(OUT, exist_ok=True)
