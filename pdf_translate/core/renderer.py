@@ -446,6 +446,8 @@ def _flat_fill_holes(img: np.ndarray, mask_bin: np.ndarray) -> np.ndarray:
 # Measured p153 (dark halftone gradient): LaMa hole ~50 levels lighter than its ring = visible blob
 LAMA_SANITY_DIFF = 30   # hole mean vs ring median (gray levels) beyond this = LaMa failed there
 TEXTURE_BLUR = 7        # low-pass kernel separating tone texture (halftone dots) from shading
+FILL_PICK_MARGIN = 4.0  # the alternative fill must beat LaMa's score by this much
+FILL_PICK = os.getenv("FILL_PICK", "1") != "0"
 
 
 def _implausible_holes(img: np.ndarray, mask_bin: np.ndarray) -> np.ndarray:
@@ -497,6 +499,39 @@ def _transfer_texture(smooth: np.ndarray, original: np.ndarray, holes: np.ndarra
             region[comp] = np.clip(region[comp] + patch[comp], 0, 255)
             out[y:y + h, x:x + w] = region.astype(np.uint8)
             break
+    return out
+
+
+def _fill_score(gray: np.ndarray, hp: np.ndarray, comp: np.ndarray, ring: np.ndarray) -> float:
+    """How far a filled hole is from its surroundings: brightness + texture-strength mismatch."""
+    return abs(float(gray[comp].mean()) - float(np.median(gray[ring]))) + \
+        abs(float(hp[comp].std()) - float(hp[ring].std()))
+
+
+def _pick_better_fill(lama: np.ndarray, alt: np.ndarray, mask_bin: np.ndarray) -> np.ndarray:
+    """Per hole, keep the LaMa fill unless the alternative fill scores clearly better."""
+    n, labels, stats, _ = cv2.connectedComponentsWithStats((mask_bin > 0).astype(np.uint8), 8)
+    if n <= 1:
+        return lama
+    out = lama.copy()
+    H, W = mask_bin.shape[:2]
+    k = cv2.getStructuringElement(cv2.MORPH_ELLIPSE, (2 * FLAT_RING_PX + 7, 2 * FLAT_RING_PX + 7))
+    gl, ga = (cv2.cvtColor(im, cv2.COLOR_RGB2GRAY).astype(np.float32) for im in (lama, alt))
+    hpl = gl - cv2.GaussianBlur(gl, (TEXTURE_BLUR, TEXTURE_BLUR), 0)
+    hpa = ga - cv2.GaussianBlur(ga, (TEXTURE_BLUR, TEXTURE_BLUR), 0)
+    for i in range(1, n):
+        x, y, w, h, _a = stats[i]
+        pad = FLAT_RING_PX + 4
+        X0, Y0, X1, Y1 = max(0, x - pad), max(0, y - pad), min(W, x + w + pad), min(H, y + h + pad)
+        comp = labels[Y0:Y1, X0:X1] == i
+        ring = (cv2.dilate(comp.astype(np.uint8), k) > 0) & (mask_bin[Y0:Y1, X0:X1] == 0)
+        if ring.sum() < 20:
+            continue
+        sl = _fill_score(gl[Y0:Y1, X0:X1], hpl[Y0:Y1, X0:X1], comp, ring)
+        sa = _fill_score(ga[Y0:Y1, X0:X1], hpa[Y0:Y1, X0:X1], comp, ring)
+        if sa + FILL_PICK_MARGIN < sl:
+            out[Y0:Y1, X0:X1][comp] = alt[Y0:Y1, X0:X1][comp]
+            _rstat("fill_alt_texture", 0.0)
     return out
 
 
@@ -552,10 +587,12 @@ def _lama_inpaint(img_pil: Image.Image, mask_pil: Image.Image) -> Image.Image:
             result[y0:y1, x0:x1][sel] = healed[sel]
         # LaMa sometimes fills a hole far brighter/darker than everything around it (white blob
         # on a dark tone, BUG.md B20): redo those holes with Telea (smooth, surroundings only).
-        bad = _implausible_holes(result, mask_bin)
-        if np.any(bad):
-            smooth = np.array(_fast_telea_inpaint(Image.fromarray(result), Image.fromarray(bad)))
-            result = _transfer_texture(smooth, img_np, bad, mask_bin)
+        # Second candidate per hole: Telea shading + neighbouring tone texture. Keep whichever
+        # matches the hole's surroundings better (LaMa fails on dark halftone gradients: B20).
+        if FILL_PICK and np.any(mask_bin):
+            smooth = np.array(_fast_telea_inpaint(Image.fromarray(img_np), Image.fromarray(mask_bin)))
+            alt = _transfer_texture(smooth, img_np, mask_bin, mask_bin)
+            result = _pick_better_fill(result, alt, mask_bin)
         return Image.fromarray(result)
     except Exception as e:
         logger.warning(f"[LaMa] Inference error, falling back to Telea: {e}")
@@ -971,7 +1008,7 @@ def _merge_into(target: np.ndarray, x0: int, y0: int, x1: int, y1: int, mask: np
 
 # ── Main Renderer Class ────────────────────────────────────────────────────────
 # Bump whenever rendering output changes, so page JPEG caches from older logic are not reused.
-RENDER_CACHE_VERSION = "2026-09-28-rim8"
+RENDER_CACHE_VERSION = "2026-09-28-rim9"
 
 
 class PDFLayoutRenderer:
