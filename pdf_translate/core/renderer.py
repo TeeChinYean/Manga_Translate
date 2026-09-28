@@ -221,7 +221,8 @@ def _get_font(fs: int):
     except Exception:
         return ImageFont.load_default()
 
-def _best_font(text: str, box_w: int, box_h: int, font_scale: float = 1.0, max_size: int = 0):
+def _best_font(text: str, box_w: int, box_h: int, font_scale: float = 1.0, max_size: int = 0,
+               min_size: int = 10):
     """
     Largest font that fits the box. `max_size` (original glyph size, px) caps it so the
     translation matches the source lettering instead of filling the bubble with huge text.
@@ -240,7 +241,7 @@ def _best_font(text: str, box_w: int, box_h: int, font_scale: float = 1.0, max_s
     max_fs = min(int(estimated_max_fs * 1.5), usable_w, usable_h, 120)
     if max_size and max_size > 0:
         max_fs = min(max_fs, int(max_size))
-    min_fs = 10
+    min_fs = max(6, int(min_size))
     
     if max_fs <= min_fs:
         font = _get_font(min_fs)
@@ -288,6 +289,53 @@ def _best_font(text: str, box_w: int, box_h: int, font_scale: float = 1.0, max_s
         return scaled_font, scaled_lines, scaled_fs
 
     return best_font, best_lines, best_fs
+
+
+# ── Typesetting helpers (BUG.md B21) ──────────────────────────────────────────
+MIN_FONT_PX = 9          # smallest lettering (was 10; text now gets more room first)
+PAGE_GLYPH_CAP = 1.6     # font <= 1.6 x the page's median original glyph size
+GROW_STEP = 4            # px per growth step of a draw box inside a clean bubble
+GROW_MAX = 1.8           # a draw box may grow to at most 1.8x its width / height
+GROW_WHITE = 235         # strip pixels at least this bright count as bubble interior
+GROW_SHARE = 0.97        # a strip is taken if >=97% of it is bubble interior
+
+
+def _rects_overlap(a, b, gap: float = 2.0) -> bool:
+    return not (a[2] + gap <= b[0] or b[2] + gap <= a[0] or a[3] + gap <= b[1] or b[3] + gap <= a[1])
+
+
+def _grow_box_in_clean(gray: np.ndarray, box, others, max_factor: float = GROW_MAX):
+    """Grow a draw box side by side over the white interior of its bubble (after inpainting),
+    stopping at the bubble outline, the growth limit, or another block's box."""
+    H, W = gray.shape[:2]
+    x0, y0, x1, y1 = box
+    max_w = int((x1 - x0) * max_factor)
+    max_h = int((y1 - y0) * max_factor)
+    s = GROW_STEP
+    grew = True
+    while grew:
+        grew = False
+        for side in ("l", "r", "t", "b"):
+            nx0, ny0, nx1, ny1 = x0, y0, x1, y1
+            if side == "l":
+                nx0 = x0 - s; strip = gray[y0:y1, max(0, nx0):x0]
+            elif side == "r":
+                nx1 = x1 + s; strip = gray[y0:y1, x1:min(W, nx1)]
+            elif side == "t":
+                ny0 = y0 - s; strip = gray[max(0, ny0):y0, x0:x1]
+            else:
+                ny1 = y1 + s; strip = gray[y1:min(H, ny1), x0:x1]
+            if nx0 < 0 or ny0 < 0 or nx1 > W or ny1 > H or strip.size == 0:
+                continue
+            if nx1 - nx0 > max_w or ny1 - ny0 > max_h:
+                continue
+            if float((strip >= GROW_WHITE).mean()) < GROW_SHARE:
+                continue
+            if any(_rects_overlap((nx0, ny0, nx1, ny1), o, gap=0) for o in others):
+                continue
+            x0, y0, x1, y1 = nx0, ny0, nx1, ny1
+            grew = True
+    return x0, y0, x1, y1
 
 
 def _fast_telea_inpaint(img_pil: Image.Image, mask_pil: Image.Image) -> Image.Image:
@@ -1031,7 +1079,7 @@ def _merge_into(target: np.ndarray, x0: int, y0: int, x1: int, y1: int, mask: np
 
 # ── Main Renderer Class ────────────────────────────────────────────────────────
 # Bump whenever rendering output changes, so page JPEG caches from older logic are not reused.
-RENDER_CACHE_VERSION = "2026-09-28-rim11"
+RENDER_CACHE_VERSION = "2026-09-28-typeset"
 
 
 class PDFLayoutRenderer:
@@ -1141,16 +1189,63 @@ class PDFLayoutRenderer:
             "lama_mask": lama_mask_np if has_lama_masks else None,
         }
 
+    def _layout_translations(self, healed, blocks_to_render):
+        """Plan font size + position for every block of a page (BUG.md B21):
+        1. clean bubbles: grow the draw box over the white bubble interior (Chinese is written
+           horizontally and usually needs more room than the Japanese column box);
+        2. cap every size by the original glyph size and by the page's typical size, so a
+           block with an unknown glyph size cannot come out huge;
+        3. shrink blocks whose text would overlap text already placed on the page."""
+        gray = np.array(healed.convert("L"))
+        H, W = gray.shape[:2]
+        boxes = [tuple(int(v) for v in it[:4]) for it in blocks_to_render]
+        sizes = [int((it[6] if len(it) > 6 else {}).get("glyph_px") or 0) for it in blocks_to_render]
+        known = [g for g in sizes if g > 0]
+        page_glyph = int(np.median(known)) if known else 0
+        plans, placed = [], []
+        for idx, item in enumerate(blocks_to_render):
+            px0, py0, px1, py1, translated, block = item[:6]
+            style = item[6] if len(item) > 6 else {}
+            if style.get("clean_bg"):
+                others = [bx for j, bx in enumerate(boxes) if j != idx]
+                px0, py0, px1, py1 = _grow_box_in_clean(gray, (px0, py0, px1, py1), others)
+            bw, bh = max(px1 - px0, 1), max(py1 - py0, 1)
+            glyph_px = sizes[idx]
+            cap = int(glyph_px * GLYPH_SIZE_FACTOR) if glyph_px else 0
+            if page_glyph:
+                page_cap = int(page_glyph * PAGE_GLYPH_CAP)
+                cap = min(cap, page_cap) if cap else page_cap
+            while True:
+                font, lines, fs = _best_font(translated, bw, bh, font_scale=self.font_scale,
+                                             max_size=cap, min_size=MIN_FONT_PX)
+                lh = fs * 1.25
+                total_h = len(lines) * lh
+                widths = []
+                for line in lines:
+                    try:
+                        widths.append(font.getbbox(line)[2] - font.getbbox(line)[0])
+                    except Exception:
+                        widths.append(len(line) * fs * 0.9)
+                top = py0 + (bh - total_h) / 2
+                if total_h > bh:
+                    top = py0  # overflowing text grows downward, never above the bubble
+                rect = (px0 + (bw - max(widths)) / 2, top, px0 + (bw + max(widths)) / 2, top + total_h)
+                clash = any(_rects_overlap(rect, r) for r in placed)
+                if not clash or fs <= MIN_FONT_PX:
+                    break
+                cap = fs - 2
+                _rstat("typeset_shrunk_for_overlap", 0.0)
+            placed.append(rect)
+            plans.append((px0, py0, bw, bh, translated, block, style, font, lines, fs, widths, top))
+        return plans
+
     def _draw_translations(self, healed, blocks_to_render):
         """Draw translated CJK text into `healed` in place (shared by page render and preview)."""
         with _DRAW_LOCK:
+            plans = self._layout_translations(healed, blocks_to_render)
             draw = ImageDraw.Draw(healed)
-            for item in blocks_to_render:
-                px0, py0, px1, py1, translated, block = item[:6]
-                style = item[6] if len(item) > 6 else {}
-                bw = max(px1 - px0, 1)
-                bh = max(py1 - py0, 1)
-
+            for (px0, py0, bw, bh, translated, block, style, font, lines, fs, widths, top) in plans:
+                px1, py1 = px0 + bw, py0 + bh
                 orig_color = block.get("color", None)
                 if orig_color and isinstance(orig_color, (list, tuple)) and len(orig_color) == 3:
                     r = int(orig_color[0] * 255)
@@ -1166,38 +1261,21 @@ class PDFLayoutRenderer:
                     bg = _sample_bg(healed, px0, py0, px1, py1)
                     fg = _contrast_color(bg)
 
-                glyph_px = style.get("glyph_px") or 0
-                font, lines, fs = _best_font(translated, bw, bh, font_scale=self.font_scale,
-                                             max_size=int(glyph_px * GLYPH_SIZE_FACTOR) if glyph_px else 0)
+                if isinstance(fg, tuple) and len(fg) == 3:
+                    fg_lum = 0.299 * fg[0] + 0.587 * fg[1] + 0.114 * fg[2]
+                else:
+                    fg_lum = 255 if fg == "white" else 0
+                st_fill = "black" if fg_lum > 127 else "white"
+                # Clean bubble: plain lettering like the original (an outline makes it look
+                # bold). Over artwork / tone: keep a thin rim for legibility.
+                st_width = 0 if style.get("clean_bg") else max(1, int(fs / 14))
+
                 lh = fs * 1.25
-                total_h = len(lines) * lh
-                curr_y = py0 + (bh - total_h) / 2
-
-                for line in lines:
-                    try:
-                        lw = font.getbbox(line)[2] - font.getbbox(line)[0]
-                    except Exception:
-                        lw = len(line) * fs * 0.9
+                curr_y = top
+                for line, lw in zip(lines, widths):
                     curr_x = px0 + (bw - lw) / 2
-
-                    if isinstance(fg, tuple) and len(fg) == 3:
-                        fg_lum = 0.299 * fg[0] + 0.587 * fg[1] + 0.114 * fg[2]
-                    else:
-                        fg_lum = 255 if fg == "white" else 0
-
-                    st_fill = "black" if fg_lum > 127 else "white"
-                    # Clean bubble: plain lettering like the original (an outline makes it look
-                    # bold). Over artwork / tone: keep a thin rim for legibility.
-                    st_width = 0 if style.get("clean_bg") else max(1, int(fs / 14))
-
-                    draw.text(
-                        (curr_x, curr_y),
-                        line,
-                        fill=fg,
-                        font=font,
-                        stroke_width=st_width,
-                        stroke_fill=st_fill
-                    )
+                    draw.text((curr_x, curr_y), line, fill=fg, font=font,
+                              stroke_width=st_width, stroke_fill=st_fill)
                     curr_y += lh
         return healed
 
