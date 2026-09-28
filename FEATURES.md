@@ -21,7 +21,9 @@
   - `tests/test_context_batch.py`：4 个用例。
   - stub 版依赖跑 `main.translation_worker`，三种模式的事件顺序都符合设计，取消也正常。
   - 真实速度对比：`scratch/bench_modes.py`（需在 Windows 上跑）。
-- 状态：Done（待用户实测对比结果）
+- 实测（2026-09-28，第5巻 1-10 页，RTX 3050 4GB + 12 线程）：serial 109.2s / stream 129.7s。两者都已修复 B13，翻译 0 失败；serial 只用 1 次 LLM 调用翻完 26 句。
+- 默认模式：serial（`DEFAULT_PIPELINE_MODE`，可用环境变量 `PIPELINE_MODE` 覆盖；前端下拉框默认选中 serial）。
+- 状态：Done
 
 ### [全局] 提取模型按剩余显存自动上 GPU
 - 说明：每个任务开始时探测剩余显存（LLM 已占用的部分不算在内）。放得下的提取模型放到 GPU，放不下的留在 CPU。运行中遇到 GPU OOM / 设备错误时，该模型自动降级到 CPU 并重试当前这一步。

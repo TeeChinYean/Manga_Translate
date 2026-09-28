@@ -132,6 +132,9 @@ def parse_page_range(range_str: str, max_pages: int) -> set:
 
 
 PIPELINE_MODES = ("stream", "overlap", "serial")
+# Measured 2026-09-28 (第5巻 p1-10, RTX 3050 4GB + 12 threads): serial 109.2s vs stream 129.7s,
+# and serial translates the whole range with one large-context LLM call.
+DEFAULT_PIPELINE_MODE = os.getenv("PIPELINE_MODE", "serial")
 DEFAULT_CONTEXT_CHUNK = 36  # Japanese lines per LLM call in 'serial' mode
 RENDER_CONCURRENCY = max(1, int(os.getenv("RENDER_CONCURRENCY", "3")))  # pages rendered at once in 'serial' mode
 
@@ -534,9 +537,9 @@ async def translation_worker():
 
                 await asyncio.gather(*[_render_one(p) for p in to_render])
 
-            pipeline_mode = task.get("pipeline_mode", "stream")
+            pipeline_mode = task.get("pipeline_mode", DEFAULT_PIPELINE_MODE)
             if pipeline_mode not in PIPELINE_MODES:
-                pipeline_mode = "stream"
+                pipeline_mode = DEFAULT_PIPELINE_MODE
             context_chunk_size = max(1, int(task.get("context_chunk_size", DEFAULT_CONTEXT_CHUNK)))
             logger.info(f"[Pipeline] mode={pipeline_mode} context_chunk_size={context_chunk_size if pipeline_mode == 'serial' else 12}")
 
@@ -918,7 +921,7 @@ async def upload_pdf_file(
     dilate_iter: int = Form(2),
     max_stroke_ratio: float = Form(0.35),
     font_scale: float = Form(1.0),
-    pipeline_mode: str = Form("stream"),
+    pipeline_mode: str = Form(DEFAULT_PIPELINE_MODE),
     context_chunk_size: int = Form(DEFAULT_CONTEXT_CHUNK)
 ):
     """
@@ -950,7 +953,7 @@ async def upload_pdf_file(
         "dilate_iter": dilate_iter,
         "max_stroke_ratio": max_stroke_ratio,
         "font_scale": font_scale,
-        "pipeline_mode": pipeline_mode if pipeline_mode in PIPELINE_MODES else "stream",
+        "pipeline_mode": pipeline_mode if pipeline_mode in PIPELINE_MODES else DEFAULT_PIPELINE_MODE,
         "context_chunk_size": context_chunk_size
     }
     
