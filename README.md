@@ -34,21 +34,25 @@
 - **智能消字**：普通的白底气泡直接极速修掉；有网点背景的复杂对白框才裁剪出来丢给修复模型处理，既保留网点质感又省显存。
 
 ---
+
 ### 效果
 
-**漫画例子：图书馆的大魔法师** #这漫画不错但出的慢
-
-前： |  后： 翻译约75-85%对
+**漫画例子：图书馆的大魔法师**（这漫画不错，但出得慢）
 
 <table>
   <tr>
-    <td><img width="1125" height="1600" alt="page_58_944999c6a5" src="https://github.com/user-attachments/assets/17f2e9a0-4b0c-477d-9050-dabba4123438"/></td>
-    <td><img width="1653" height="2351" alt="図書館の大魔術師 第１巻 conv 58" src="https://github.com/user-attachments/assets/262e0b53-1c8d-4d26-b0ef-9041e25a3bd3" /></td>
+    <td align="center" valign="top" width="50%">
+      <div><strong>Before</strong></div>
+      <img src="https://github.com/user-attachments/assets/17f2e9a0-4b0c-477d-9050-dabba4123438" alt="page_58_944999c6a5" style="max-width:100%; height:auto; border-radius:8px;" />
+    </td>
+    <td align="center" valign="top" width="50%">
+      <div><strong>After</strong></div>
+      <img src="https://github.com/user-attachments/assets/262e0b53-1c8d-4d26-b0ef-9041e25a3bd3" alt="図書館の大魔術師 第１巻 conv 58" style="max-width:100%; height:auto; border-radius:8px;" />
+    </td>
   </tr>
 </table>
 
-**注意**
-部分字体会过小， 过大， 或重叠
+> 翻译效果约 75–85% 对，部分字体可能会偏小、偏大或发生重叠。
 
 ---
 
