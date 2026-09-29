@@ -185,3 +185,9 @@
 - 实现要点：hold 时已翻译队列不限长度，翻译不会被还没开始的重绘卡住；翻译出错时重绘不会死等；AUTO_GPU_MODE=serial 恢复旧行为；CPU LaMa 时 auto 规则不变（<20 页 serial，≥20 页 overlap）；手动选 overlap 且 LaMa 在 GPU 时同样等翻译完成再重绘
 - 相关测试：tests/test_async_stages.py（重绘在所有翻译之后、翻译与提取重叠、出错不死锁）、tests/test_low_bugs.py（GPU 时 auto → overlap）
 - 状态：Done。实测第5巻（scratch/bench_modes.py）：1-10 页 overlap 46.3s / serial 46.9s（只有 24 句 < 一批 36 句，翻译只能等提取完才开始）；1-30 页 overlap 173.2s / serial 244.3s（x1.41，约 90s 翻译藏进 128s 提取里，提取结束后只多等 15.5s）
+
+### [Extract] MangaOCR CPU 参数矩阵（结论：维持现状，不改）
+- 说明：scratch/mocr_matrix.py 一次测完（第5巻 1-30 页真实框，取 96 个，6 线程）：现行 torch batch16 = 0.302 s/框；batch 8 / 32 = 0.286 / 0.316；线程 4 / 8 = 0.383 / 0.351（6 最好）；ONNX encoder（导出固定 batch=1）+ torch decoder = 0.313；int8 decoder 0.278 但文字只 83/96 相同（「６月」→「８月」）→ 否决；两批同时跑 0.287
+- 实现要点：所有方案差距 ±5%（测量噪声内），不值得改；encoder 占 62%（0.186 s/框），固定 224×224 输入，无法缩小。流水线里实际约 0.5 s/框，比单独测慢 1.65 倍，原因是和 CTD 同时抢 CPU（总 CPU 工作量不变，并行帮不上）
+- 相关测试：无（未改代码）
+- 状态：Done（测量完成，保持 batch 16 / 默认线程）
