@@ -298,6 +298,8 @@ def _detect_with_comic_detector(img_rgb: np.ndarray, session, out_seg=None) -> l
 
 # ── Split one detector box into separate text groups (title vs body etc.) ─────
 SPLIT_SEG_THRESH = 96
+EXTENT_STRAY_SHARE = float(os.getenv("EXTENT_STRAY_SHARE", "0.05"))  # B24; 0 = old behaviour
+FURI_LEN_CHECK = os.getenv("FURI_LEN_CHECK", "1") != "0"                # B24
 
 
 def _runs(profile):
@@ -337,17 +339,38 @@ def _split_box_by_seg(seg: np.ndarray, box) -> list:
     widths = [e - s for s, e in runs]
     main_w = float(np.median([w for w in widths if w >= 0.45 * max(widths)]))
 
-    # Extent of each run along the reading direction
+    # Extent of each run along the reading direction. Stray seg pixels far from the column
+    # (bubble outline, a speck, B24: 3-11 px at 60-70 px away) must not stretch it: they made
+    # two diagonal bubbles' columns look fully overlapping, so they were never split.
     def extent(s, e):
         band = region[:, s:e] if vertical else region[s:e, :]
-        along = band.any(axis=1) if vertical else band.any(axis=0)
-        idx = np.nonzero(along)[0]
-        return int(idx.min()), int(idx.max()) + 1
+        cnt = band.sum(axis=1) if vertical else band.sum(axis=0)
+        segs = []
+        for a, b in _runs(cnt > 0):
+            if segs and a - segs[-1][1] <= max(3.0, main_w):
+                segs[-1][1] = b
+            else:
+                segs.append([a, b])
+        total = float(cnt.sum())
+        keep = [g for g in segs if cnt[g[0]:g[1]].sum() >= EXTENT_STRAY_SHARE * total] or segs
+        return int(keep[0][0]), int(keep[-1][1])
 
     cols = []
+    total_px = float(region.sum())
     for s, e in runs:
+        band_px = region[:, s:e].sum() if vertical else region[s:e, :].sum()
+        if EXTENT_STRAY_SHARE > 0 and band_px < 0.01 * total_px:
+            continue    # a speck, not text (B24)
         a0, a1 = extent(s, e)
         cols.append({"s": s, "e": e, "a0": a0, "a1": a1, "furi": (e - s) < 0.45 * main_w})
+    if FURI_LEN_CHECK:
+        # A narrow run is furigana only if it is also short: furigana sits beside a few kanji.
+        # A narrow but long run is a real column whose neighbours merged into one wide run
+        # (furigana between two columns bridges the profile gap), B24 "逃げろー".
+        longest = max((c["a1"] - c["a0"]) for c in cols if not c["furi"]) if any(not c["furi"] for c in cols) else 0
+        for c in cols:
+            if c["furi"] and (c["a1"] - c["a0"]) >= 0.6 * longest and (c["e"] - c["s"]) >= 0.3 * max(widths):
+                c["furi"] = False
     main = [c for c in cols if not c["furi"]]
     if len(main) < 2:
         return [box]
