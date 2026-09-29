@@ -482,8 +482,11 @@ def _manga_model_ref():
 
 def start_manga_gpu_worker() -> bool:
     """Start the GPU MangaOCR child (non-blocking). Called by the serial pipeline before
-    extraction. MANGA_OCR_GPU_WORKER=0 disables it."""
-    if os.getenv("MANGA_OCR_GPU_WORKER", "1") == "0":
+    extraction. OFF by default: measured (第5巻 p1-10 serial) OCR 11.3 s -> 2.2 s, but the child
+    start (torch + transformers + CUDA, every job) made extraction 19.6 s -> 28.8 s and the
+    job 42.8 s -> 54.1 s. MANGA_OCR_GPU_WORKER=1 turns it on (worth it for long books only if
+    the start cost is amortised)."""
+    if os.getenv("MANGA_OCR_GPU_WORKER", "0") != "1":
         return False
     with _MANGA_GPU_LOCK:
         if _MANGA_GPU["proxy"] is not None or _MANGA_GPU["failed"]:

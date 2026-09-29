@@ -48,7 +48,7 @@
 - 涉及文件/模块：`core/renderer.py`（`_LAMA_RUN_SEM`、`_rstat`、`get_render_stats`）、`main.py`（`run_serial` 并发重绘、`render_breakdown`）、`scratch/bench_modes.py`。
 - 实现要点：ORT 的 `InferenceSession.run` 本身线程安全，原来的全局锁换成了 BoundedSemaphore。背景：用户实测 serial 模式重绘 106s（10 页）是瓶颈。在 VM（2 核）上 4 个 crop 的测试：LAMA_PARALLEL 1 → 28.2s，2 → 19.8s。
 - 相关测试：`tests/test_render_async.py` 新增 2 个用例（耗时分解、多页 CPU 阶段确实重叠）。
-- 状态：Done（待用户实测）
+- 状态：Done，默认关闭（实测：OCR 11.3s→2.2s，但每个任务启动子进程的开销让提取 19.6s→28.8s、全程 42.8s→54.1s；MANGA_OCR_GPU_WORKER=1 开启）
 
 ### [实验] LaMa 用 DirectML 跑 GPU —— 不可行
 - 结果（2026-09-28，RTX 3050 Laptop，已停 LLM）：DML session 能创建，但第一次推理时，FFC 的 `FourierUnit ... Transpose_56` 节点报 `887A0005 The GPU device instance has been suspended`（GPU 设备被挂起）。这与 renderer 里"LaMa 在 CPU 上跑以保证 FFC DFT 稳定"的原注释一致。
@@ -82,7 +82,7 @@
 - 描边：干净气泡里不再给字加白边（以前加了会显得很粗）；画面、网点上的字保留细描边（fs/14），保证看得清。
 - `RENDER_CACHE_VERSION` 已更新，旧的页面缓存不会被复用。
 - 相关测试：`tests/test_manga_style.py`（5 个用例），已加入 pre-commit。示意图：`scratch/style_p11.jpg`（原图 | 新排版；图中译文是随便放的示例句）。
-- 状态：Done（待用户实测）
+- 状态：Done，默认关闭（实测：OCR 11.3s→2.2s，但每个任务启动子进程的开销让提取 19.6s→28.8s、全程 42.8s→54.1s；MANGA_OCR_GPU_WORKER=1 开启）
 
 ### [全局] 三种模式实测对比（2026-09-28，第5巻 1-10 页，B14-B17 与攒批翻译之后）
 | 模式 | 总耗时 | 提取完成 | 翻译完成 | 说明 |
@@ -170,4 +170,4 @@
 - 涉及文件/模块：core/manga_worker.py、core/extractor.py（`_MangaGpuProxy`、start/stop_manga_gpu_worker、`_manga_gpu_worker`）、main.py（run_serial）
 - 实现要点：接口与 MangaOcr 一致（batch / __call__），`_manga_ocr_batch` 直接转发；子进程启动失败或超时 → 本任务回退 CPU MangaOCR；MANGA_OCR_GPU_WORKER=0 关闭；overlap/stream 模式不启用（提取与翻译同时进行，会和 LLM 抢显存）
 - 相关测试：tests/test_manga_gpu_worker.py
-- 状态：Done（待用户实测）
+- 状态：Done，默认关闭（实测：OCR 11.3s→2.2s，但每个任务启动子进程的开销让提取 19.6s→28.8s、全程 42.8s→54.1s；MANGA_OCR_GPU_WORKER=1 开启）
