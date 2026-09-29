@@ -34,6 +34,16 @@
 - **智能消字**：普通的白底气泡直接极速修掉；有网点背景的复杂对白框才裁剪出来丢给修复模型处理，既保留网点质感又省显存。
 
 ---
+### 效果
+前：
+<img width="1653" height="2351" alt="図書館の大魔術師 第１巻 conv 58" src="https://github.com/user-attachments/assets/324476bb-7c8c-47da-a504-452880bff635" />
+后：
+<img width="1125" height="1600" alt="page_58_944999c6a5" src="https://github.com/user-attachments/assets/e6567802-b8c9-47da-85be-3411ea48a7f5" />
+
+
+**注意**
+部分字体会过小， 过大， 或重叠
+---
 
 ## 🏗️ 核心流程
 
