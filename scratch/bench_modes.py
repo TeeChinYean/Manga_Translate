@@ -1,6 +1,6 @@
 # Benchmark the three pipeline modes against the running server (start_web_app.bat first).
 # Usage (repo root):
-#   pdf_translate\.venv\Scripts\python scratch\bench_modes.py "C:\path\to\manga.pdf" --pages 1-20
+#   python scratch\bench_modes.py "C:\path\to\manga.pdf" --pages 1-20
 #   add --modes serial,overlap to pick modes; --chunk 36 sets serial-mode lines per LLM call.
 import argparse, json, os, time
 import httpx
