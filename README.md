@@ -1,107 +1,100 @@
 # ⚡ Manga PDF Translator (v2 Async Pipeline)
-### 高保真漫画 / 文档 PDF 极速排版翻译引擎
+### 漫画 / PDF 自动翻译与排版引擎
 
 [![Python 3.10+](https://img.shields.io/badge/Python-3.10%2B-blue.svg)](https://www.python.org/)
 [![FastAPI](https://img.shields.io/badge/Framework-FastAPI-009688.svg)](https://fastapi.tiangolo.com/)
-[![License](https://img.shields.io/badge/License-MIT-green.svg)](LICENSE)
-[![Tested On](https://img.shields.io/badge/Hardware-RTX%203050%20Laptop%20(4GB)-orange.svg)]()
+[![Tested On](https://img.shields.io/badge/Tested%20On-RTX%203050%20Laptop%20(4GB)-orange.svg)]()
 
-基于 **FastAPI + 异步并发调度队列 + SSE 实时流式推送** 的全本地化漫画/文档 PDF 翻译与排版重绘引擎。针对日漫竖排文字排版、网点纸底纹与复杂对白框场景深度优化。
-
----
-
-## 📖 项目初心与开发故事 (Background & Motivation)
-
-- **为什么做这个项目？**
-  本项目的诞生非常简单直接 —— **给购买了正版日文漫画，但因为看不懂日语而苦恼的读者使用**。
-  作者（我）购买了心爱的日文原版漫画，但每次阅读时都要掏出手机用翻译软件逐句逐页拍照查词，体验极其繁琐、割裂且严重破坏沉浸感。为了能够像读中文母语漫画一样一口气畅快读完整本，作者决定打造这套全自动、高保真重绘的漫画 PDF 翻译流水线。
-
-- **构思与开发方式**：
-  从整体功能架构、气泡流式流水线机制、4GB 笔记本显存极限预算调度、到自适应字号排版与 Web 界面交互，均由**作者（我）根据实际漫画阅读痛点自主构思与设计**；研发过程中深度结合 **AI 辅助 / 协同编码 (AI Copilot & Agentic Coding)** 协助攻坚工程细节与调试落地。
+一个全本地运行、保留原图画质的漫画 PDF 自动翻译与排版重绘工具。主要针对日文漫画的竖排排版、网点纸底纹以及各种对白气泡做优化。
 
 ---
 
-## 💻 测试硬件与 4GB 显存极限调优 (Tested Hardware Specs)
+## 📖 为什么会有这个项目？（作者的话）
 
-本项目的所有性能基准与全本漫画压力测试，均在以下**入门级主流轻薄/游戏本**实机上调优并测试通过：
+这个项目其实初衷很简单，**就是做给买了正版日文漫画、但日文又看不懂的人用的**。
 
-| 组件 | 配置规格 |
-| :--- | :--- |
-| **GPU (显卡)** | **NVIDIA GeForce RTX 3050 Laptop GPU (4GB VRAM)** (移动端笔记本版) |
-| **CPU (处理器)** | **AMD Ryzen 5 7535HS** (6 核 12 线程) |
-| **RAM (内存)** | **16 GB DDR5** |
+我自己也是买了喜欢的日文漫画回来，结果边看边拿手机开翻译软件逐句扫描，真的很麻烦、很扫兴，看几页就觉得很累，完全没有办法好好享受看漫画的过程。
 
-### 4GB 笔记本有限显存优化亮点
-- **动态显存预算调度 (VRAM Budget Scheduling)**：精细化控制 LLM 大模型、OCR 识别引擎与 LaMa 修复模型的内存生命周期与换入换出，在 4GB VRAM 的严苛约束下全速运转，**杜绝 CUDA Out of Memory (OOM)**。
-- **并发重叠流水线 (Async Overlap Pipeline)**：页面提取（GPU/CPU 子进程 OCR）与 LLM 翻译重叠并发推进，将 30 页全本漫画处理时间压缩至约 144 秒。
-- **混合消字策略 (Hybrid Inpainting)**：白底纯色气泡走微秒级 Telea 修复；复杂网点与暗底区域采用按框裁剪的 LaMa ONNX 频域生成，兼顾原生网点画质与计算速度。
+为了能像看中文漫画那样一口气顺顺读完，我就自己想了这套自动翻译和排版的流水线方案，然后再通过 **AI 补助 / 协同编写代码** 把整个项目做出来并完成各种调优。
 
 ---
 
-## 🏗️ 核心架构流水线 (Architecture Pipeline)
+## 💻 跑在什么配置的电脑上？（实测硬件）
+
+我的电脑不是什么顶配工作站，就是一台很普通的笔记本：
+
+- **显卡 (GPU)**：NVIDIA GeForce RTX 3050 Laptop GPU（**4GB 显存** 笔记本版）
+- **处理器 (CPU)**：AMD Ryzen 5 7535HS
+- **内存 (RAM)**：16 GB
+
+### 针对 4GB 笔记本小显存的调优
+因为 4GB 显存非常有限，平时跑大模型或图像修复很容易直接爆显存（CUDA Out of Memory）。所以整个项目特别针对这点做了很多细节调优：
+- **动态显存调度**：把大模型翻译、OCR 识别和消字修复在内存和显存之间合理安排，错开高峰，确保 4GB VRAM 不会崩。
+- **并发流水线**：页面提取和翻译重叠进行，省去傻傻等待的时间，实测 30 页漫画大概 2 分多钟就能搞定。
+- **智能消字**：普通的白底气泡直接极速修掉；有网点背景的复杂对白框才裁剪出来丢给修复模型处理，既保留网点质感又省显存。
+
+---
+
+## 🏗️ 核心流程
 
 ```mermaid
 flowchart TD
-    A["源 PDF 漫画文档"] --> B["PyMuPDF 高清光栅化 (150-200 DPI)"]
-    B --> C["文字检测 (Comic-Text-Detector)"]
-    C --> D["对白气泡聚类与文本行提取"]
-    D --> E["OCR 文字识别 (MangaOCR / EasyOCR)"]
-    E --> F["AI 翻译中枢 (Turbovec 本地 LLM / API)"]
-    F --> G["背景频域消字与重绘 (LaMa ONNX)"]
-    G --> H["中文自适应排版 (PDFLayoutRenderer)<br>二分查找字号 / 标点避头尾 / 智能居中"]
-    H --> I["导出保留原画质的高清双语/汉化 PDF & ZIP"]
+    A["日文漫画 PDF"] --> B["PyMuPDF 高清提取页面"]
+    B --> C["Comic-Text-Detector 抓取对白气泡"]
+    C --> D["气泡聚类与文本行整理"]
+    D --> E["MangaOCR / EasyOCR 识别日文文字"]
+    E --> F["AI 翻译（本地大模型 / API / Google）"]
+    F --> G["LaMa 频域消字与背景修补"]
+    G --> H["中文自适应排版（自动调字号 / 避头尾 / 居中）"]
+    H --> I["导出翻译好的高清 PDF & 图片 ZIP"]
 ```
 
 ---
 
-## 🧠 使用的模型来源与致谢 (Model Sources & Credits)
+## 🧠 使用的模型来源（开源致谢）
 
-本项目集成了开源社区优秀的 AI 模型与技术方案，核心模型来源如下：
+项目的核心架构、流程机制与排版逻辑是作者自己构想并通过 AI 协同实现的；底层的核心模型均来自开源社区的优秀成果，这里列出模型出处与致敬：
 
-1. **文字检测 (Text Detection) - [Comic-Text-Detector](https://github.com/dmMaze/comic-text-detector)**
-   - 专为漫画对白框与文字气泡训练的高精度 YOLO 架构检测模型，支持密集排版与竖排文本块精准切割。
-2. **文字识别 (OCR) - [MangaOCR](https://github.com/kha-white/manga-ocr)**
-   - 专为日漫手写体、印刷体、拟声词与网点纸背景设计的端到端 Vision-Encoder-Decoder 模型。
-   - *(多语种/英文备选: [EasyOCR](https://github.com/JaidedAI/EasyOCR))*
-3. **背景消字 (Inpainting) - [LaMa (Large Mask Inpainting)](https://github.com/advimman/lama)**
-   - 基于快速傅里叶卷积 (Fast Fourier Convolutions, FFC) 的高分辨率图像修复模型，完美延续复杂背景与网点纸底纹。
-4. **翻译中枢 (Translation Engine) - Turbovec 本地大模型 / Sakura**
-   - **通义千问 Qwen 系列**: 来自阿里开源的 [QwenLM/Qwen](https://github.com/QwenLM) 大语言模型，结合 Turbovec 4-bit 量化引擎实现极速离线推理。
-   - **Sakura ACG 模型**: 来自二次元轻小说/漫画专有微调项目 [SakuraLLM/Sakura-13B](https://github.com/SakuraLLM/Sakura-13B)。
-5. **排版与渲染思路参考 - [Manga-Image-Translator](https://github.com/zyddnys/manga-image-translator)**
-   - 参考并借鉴了开源漫画翻译社区优秀的气泡分析与排版重绘流水线思路。
-6. **文档底层解析 - [PyMuPDF (fitz)](https://github.com/pymupdf/PyMuPDF)**
-   - 毫秒级多线程页面解析与高质量光栅化渲染引擎。
-
----
-
-## 🌐 翻译引擎替代方案 (Translation Alternatives)
-
-系统设计了松耦合的翻译中枢接口，支持根据您的设备条件灵活切换：
-
-- **更大参数量本地模型**：若您的电脑具备更大显存（如 8GB / 12GB / 16GB 或桌面端独立显卡），可直接切换至 7B、14B 等更高参数量的大模型（如 Sakura-14B-Qwen2.5），获得更加文学化、风格化的汉化质感。
-- **Google 翻译 (内置免配置)**：轻量无负担，无需本地大模型与显存占用，适合配置较低或注重极速翻译的场景。
-- **外部 AI API 接入**：原生兼容标准接口，可自由接入各类云端大模型服务：
-  - OpenAI (GPT-4o / GPT-4o-mini)
-  - DeepSeek (DeepSeek-V3 / DeepSeek-R1)
-  - Google Gemini (Gemini 2.5 Flash / Pro)
-  - Groq (超高并发低延迟推理)
+1. **文字检测 (Text Detection)**：[Comic-Text-Detector](https://github.com/dmMaze/comic-text-detector)
+   - 专门训练用来识别漫画对白框与气泡的模型，抓气泡很准。
+2. **日文识别 (OCR)**：[MangaOCR](https://github.com/kha-white/manga-ocr)
+   - 专针对日漫字体、手写体和竖排排版训练的文字识别模型。
+   - *(英文/其他备用：[EasyOCR](https://github.com/JaidedAI/EasyOCR))*
+3. **背景消字 (Inpainting)**：[LaMa (Large Mask Inpainting)](https://github.com/advimman/lama)
+   - 基于快速傅里叶卷积的图像修复模型，擦掉日文后可以很好保留网点底纹。
+4. **翻译中枢 (Translation)**：
+   - 本地通义千问 Qwen 大模型：[QwenLM/Qwen](https://github.com/QwenLM)
+   - ACG 领域微调的二次元翻译模型：[SakuraLLM/Sakura-13B](https://github.com/SakuraLLM/Sakura-13B)
+5. **排版参考**：[manga-image-translator](https://github.com/zyddnys/manga-image-translator)
+   - 启发了气泡文本框处理和排版重绘的部分思路。
+6. **PDF 解析底座**：[PyMuPDF (fitz)](https://github.com/pymupdf/PyMuPDF)
+   - 快速高效地把 PDF 解析成高清页面。
 
 ---
 
-## ✨ 核心功能亮点 (Key Features)
+## 🌐 翻译方式选择（支持灵活替换）
 
-- **日文竖排自动转横排排版**：内置字号自适应二分查找算法、中日标点避头尾（Kinsoku Shori）规则与气泡几何中心对齐。
-- **专属漫画专有名词表 (Glossary)**：支持针对不同漫画系列独立维护角色名、地名与技能术语库（`data/terms/<作品名>.json`），自动识别并保证整本漫画人名译法前后一致。
-- **现代化实时 WebUI**：基于 SSE (Server-Sent Events) 实时推送提取、翻译、重绘各阶段进度与性能指标；支持单页交互式热微调与对比预览。
-- **多样化输出**：一键生成全高清保留原尺寸的汉化 PDF 文档，并支持打包下载逐页高清图片 ZIP 压缩包。
+虽然默认配置是为了适配 4GB 显存的本地轻量大模型，但系统保留了灵活的切换支持：
+
+- **配置更好的电脑**：如果你用的是桌面端显卡或者显存比较大（比如 8GB / 12GB / 16GB 以上），完全可以换成参数量更大的本地模型（比如 7B 或 14B 版的 Qwen / Sakura），翻译出来的语句和语感会更丰富细腻。
+- **免显存的 Google 翻译**：系统内置了 Google 翻译选项，完全不吃显存，随点随翻。
+- **外接 AI API**：如果你不想给电脑负担，也可以直接接入各大主流的在线 AI 接口（比如 OpenAI ChatGPT、DeepSeek、Google Gemini、Groq 等），走云端翻译。
 
 ---
 
-## 🚀 快速上手 (Quick Start)
+## ✨ 主要功能
 
-### 1. 环境准备
-确保已安装 Python 3.10+，克隆本仓库并安装核心依赖：
+- **日文竖排自动转横排中文**：自动根据气泡大小通过二分法计算最合适的字号，文字自动居中，并处理标点避头尾，排版看起来自然。
+- **支持专有漫画词典**：可以针对不同漫画分别建立术语表（`data/terms/<漫画名>.json`），角色名、招式名、世界观名词前后一致，不会每一页翻出来的名字都不一样。
+- **Web 界面与实时进度**：基于 FastAPI 搭建的网页界面，有实时的进度条和控制台日志，也能直接查看预览图和排版微调。
+- **直接导出**：一键生成翻译后的高清 PDF，或者把每页图片打包成 ZIP 下载。
+
+---
+
+## 🚀 快速上手使用
+
+### 1. 安装环境
+电脑需要先装好 Python 3.10+，拉取项目并安装依赖：
 ```bash
 git clone https://github.com/TeeChinYean/pdf_translate_v2_async_pipeline.git
 cd pdf_translate_v2_async_pipeline
@@ -109,21 +102,21 @@ pip install -r pdf_translate/requirements.txt
 ```
 
 ### 2. 一键启动
-在 Windows 环境下，直接双击运行根目录下的脚本：
+在 Windows 里直接双击运行根目录下的脚本：
 ```bash
 start_web_app.bat
 ```
-*(脚本会自动初始化环境、检测并拉起本地推理引擎，随后启动 FastAPI Web 服务。)*
+*(会自动拉起后台推理服务并打开 Web 服务)*
 
-### 3. 访问与使用
-打开浏览器访问：
+### 3. 打开网页使用
+打开浏览器进入：
 ```text
 http://127.0.0.1:8000
 ```
-上传日文漫画 PDF，选择页码范围即可开始自动化极速翻译与排版。
+把日文漫画 PDF 拖进去，选好要翻译的页数，点击开始即可。
 
 ---
 
-## ⚖️ 免责声明 (Disclaimer)
+## ⚖️ 免责声明
 
-本项目仅供个人对正版购买的漫画进行学习研究与无障碍辅助阅读使用。使用者请严格遵守当地版权法，尊重原作者与出版方的合法知识产权，请勿将翻译衍生文件用于任何商业传播或非法途径。
+本项目仅供个人对自己购买的正版漫画进行学习、研究与个人辅助阅读使用。请尊重原作者与出版社的版权，切勿用于商业用途或二次非法传播。
