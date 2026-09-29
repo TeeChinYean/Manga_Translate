@@ -53,6 +53,7 @@ async def run_three_stage_pipeline(
     batch_lines: int = 0,
     page_lines: Callable[[Any], int] = lambda page: 1,
     render_concurrency: int = 1,
+    hold_render_until_translate_done: bool = False,
 ) -> None:
     """
     Run producer -> translator -> renderer concurrently with bounded queues.
@@ -73,15 +74,23 @@ async def run_three_stage_pipeline(
 
     - `render_concurrency`: number of pages rendered at the same time (renderer workers).
 
+    - `hold_render_until_translate_done`: rendering starts only after ALL translation finished
+      (extract + translate still overlap). For GPU LaMa: it must not share the 4 GB card with
+      the LLM while the LLM is still translating (B28). The translated queue is unbounded.
+
     Raises the first stage exception, or PipelineCancelled if cancelled.
     """
     abort = asyncio.Event()
     errors: list = []
     q_extracted: asyncio.Queue = asyncio.Queue(maxsize=queue_size)
-    q_translated: asyncio.Queue = asyncio.Queue(maxsize=0 if hold_render_until_source_done else queue_size)
+    hold_any = hold_render_until_source_done or hold_render_until_translate_done
+    q_translated: asyncio.Queue = asyncio.Queue(maxsize=0 if hold_any else queue_size)
     render_gate = asyncio.Event()
     if not hold_render_until_source_done:
         render_gate.set()
+    translate_gate = asyncio.Event()
+    if not hold_render_until_translate_done:
+        translate_gate.set()
     state = {"cancelled": False}
 
     def fail(exc: BaseException):
@@ -148,6 +157,7 @@ async def run_three_stage_pipeline(
             fail(ex)
         finally:
             await put(q_translated, _DONE)
+            translate_gate.set()
 
     async def batched_translator():
         buf, lines = [], 0
@@ -170,6 +180,7 @@ async def run_three_stage_pipeline(
     async def renderer():
         try:
             await _race(render_gate.wait(), abort)
+            await _race(translate_gate.wait(), abort)
             while True:
                 page = await get(q_translated)
                 if page is _DONE:

@@ -178,3 +178,10 @@
 - 实现要点：优先 lama_fp32.onnx，没有则 lama.onnx；LAMA_ONNX_MODEL=lama-manga.onnx 可切换漫画训练版；包装层把 l_image_/l_mask_ 映射到模型实际输入名（image/mask），0..1 输出自动 ×255
 - 相关测试：tests/test_lama_backend.py（名称映射 + 缩放、模型选择与 env 覆盖）
 - 状态：Done
+
+### [Pipeline] GPU LaMa 时 auto 改为 overlap：提取与翻译同时进行，重绘在翻译完成后
+- 说明：用户实测「提取和翻译一起」比 serial 快。提取在 CPU，不占显存，可以和 LLM 翻译同时跑；只有 GPU LaMa 不能和正在翻译的 LLM 共用 4GB 显存（B28），所以重绘等全部翻译完成后才开始
+- 涉及文件/模块：core/async_stages.py（`hold_render_until_translate_done`）、main.py（`resolve_pipeline_mode` → AUTO_GPU_MODE，overlap 开始前检查 LLM 是否被挤出显存并重启）
+- 实现要点：hold 时已翻译队列不限长度，翻译不会被还没开始的重绘卡住；翻译出错时重绘不会死等；AUTO_GPU_MODE=serial 恢复旧行为；CPU LaMa 时 auto 规则不变（<20 页 serial，≥20 页 overlap）；手动选 overlap 且 LaMa 在 GPU 时同样等翻译完成再重绘
+- 相关测试：tests/test_async_stages.py（重绘在所有翻译之后、翻译与提取重叠、出错不死锁）、tests/test_low_bugs.py（GPU 时 auto → overlap）
+- 状态：Done（待用户 bench 确认时间）
