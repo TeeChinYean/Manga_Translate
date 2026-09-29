@@ -62,6 +62,44 @@ def _get_llama_api_key():
                         pass
     return _LLAMA_KEY
 
+_LAST_LAUNCH = {"t": 0.0}
+LAUNCH_COOLDOWN_S = 180.0   # after a launch, never launch again for this long (model load ~10-60 s)
+
+
+def _port_open(port: int, host: str = "127.0.0.1") -> bool:
+    import socket
+    try:
+        with socket.create_connection((host, port), timeout=0.5):
+            return True
+    except OSError:
+        return False
+
+
+def _llama_server_running() -> bool:
+    """True if any llama-server process exists (Windows tasklist; other OS: pgrep)."""
+    import subprocess
+    try:
+        if os.name == "nt":
+            out = subprocess.run(["tasklist", "/FO", "CSV", "/NH"], capture_output=True, text=True, timeout=5).stdout
+        else:
+            out = subprocess.run(["ps", "-eo", "comm"], capture_output=True, text=True, timeout=5).stdout
+        return "llama-server" in out.lower()
+    except Exception:
+        return False
+
+
+def _wait_health(max_wait_seconds: float) -> bool:
+    t0 = time.time()
+    while time.time() - t0 < max_wait_seconds:
+        try:
+            if httpx.get("http://127.0.0.1:18089/health", timeout=2.0).status_code == 200:
+                return True
+        except Exception:
+            pass
+        time.sleep(1.0)
+    return False
+
+
 def ensure_turbovec_llm_ready(auto_launch: bool = True, max_wait_seconds: int = 25) -> bool:
     """
     Checks if Turbovec LLM (port 18089 direct or 18088 gateway) is active and pre-warmed.
@@ -79,6 +117,14 @@ def ensure_turbovec_llm_ready(auto_launch: bool = True, max_wait_seconds: int = 
 
     if not auto_launch:
         return False
+
+    # 1b. Never start a SECOND llama-server (B26: two servers with the same model were found
+    # running, ~3.3 GB RAM each). A busy or still-loading server can miss the 1.5 s /health
+    # probe but still owns the port -> wait for it instead of launching another one.
+    if _port_open(18089) or _llama_server_running() or time.time() - _LAST_LAUNCH["t"] < LAUNCH_COOLDOWN_S:
+        logger.info("⚡ [Turbovec LLM] llama-server already present (port bound / process / recent launch): "
+                    "waiting for it instead of launching another.")
+        return _wait_health(max_wait_seconds)
 
     # 2. Find llm_launcher.py in qwen_turbovec_rag
     candidate_dirs = [
@@ -98,6 +144,7 @@ def ensure_turbovec_llm_ready(auto_launch: bool = True, max_wait_seconds: int = 
         return False
 
     logger.info(f"⚡ [Turbovec LLM] Starting local Qwen 3.5 4B model via {rag_dir}...")
+    _LAST_LAUNCH["t"] = time.time()
     import subprocess
     cmd = [sys.executable, os.path.join("app", "llm_launcher.py"), "--model", "1"]
     try:
