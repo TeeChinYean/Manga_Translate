@@ -121,7 +121,7 @@ def prepare_extract_devices(force_probe: bool = True) -> dict:
 def _free_torch_cache():
     try:
         import torch
-        if torch.cuda.is_available():
+        if torch.cuda.is_available() and torch.cuda.is_initialized():  # never create a CUDA context here (B29)
             torch.cuda.empty_cache()
     except Exception:
         pass
@@ -562,7 +562,7 @@ def unload_models(force: bool = False):
         gc.collect()
         try:
             import torch
-            if torch.cuda.is_available():
+            if torch.cuda.is_available() and torch.cuda.is_initialized():  # never create a CUDA context here (B29)
                 torch.cuda.empty_cache()
         except Exception:
             pass

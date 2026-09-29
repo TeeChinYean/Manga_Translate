@@ -116,7 +116,7 @@ def lama_uses_gpu() -> bool:
     during translation (measured: LLM 11 s -> 45.6 s when they were, B28)."""
     if LAMA_BACKEND not in ("torch", "auto"):
         return False
-    if isinstance(_LAMA_SESSION, _TorchLamaSession):
+    if isinstance(_LAMA_SESSION, (_TorchLamaSession, _SubprocLamaSession)):
         return True
     try:
         import torch
@@ -125,6 +125,51 @@ def lama_uses_gpu() -> bool:
     except Exception:
         return False
     return any(p and os.path.exists(p) for p in _LAMA_TORCH_PATHS)
+
+
+class _SubprocLamaSession:
+    """big-lama on CUDA in a child process (core/lama_worker.py) behind the onnxruntime
+    `run()` interface. close() ends the child, which frees ALL of its VRAM (B29)."""
+
+    def __init__(self, path, start_timeout: float = 120.0):
+        import multiprocessing as mp
+        from core.lama_worker import worker_main
+        ctx = mp.get_context("spawn")
+        self.conn, child = ctx.Pipe()
+        self.proc = ctx.Process(target=worker_main, args=(child, path), daemon=True)
+        self.proc.start()
+        self.lock = threading.Lock()
+        if not self.conn.poll(start_timeout):
+            self.close()
+            raise RuntimeError("LaMa GPU worker did not start in time")
+        kind, info = self.conn.recv()
+        if kind != "ready":
+            self.close()
+            raise RuntimeError(f"LaMa GPU worker failed: {info}")
+        self.info = info
+
+    def run(self, _outputs, feeds):
+        with self.lock:
+            self.conn.send(("run", feeds["l_image_"], feeds["l_mask_"]))
+            kind, payload = self.conn.recv()
+        if kind != "ok":
+            raise RuntimeError(f"LaMa GPU worker: {payload}")
+        return [payload]
+
+    def close(self):
+        try:
+            self.conn.send(None)
+        except Exception:
+            pass
+        try:
+            self.proc.join(10)
+            if self.proc.is_alive():
+                self.proc.kill()
+        except Exception:
+            pass
+
+
+LAMA_INPROC = os.getenv("LAMA_INPROC", "0") == "1"   # 1 = old in-process CUDA (keeps VRAM, see B29)
 
 
 def _load_torch_lama():
@@ -138,9 +183,13 @@ def _load_torch_lama():
             logger.info("[LaMa] big-lama.pt not found (set LAMA_TORCH_PATH) -> ONNX CPU")
             return None
         t0 = time.time()
-        sess = _TorchLamaSession(path, torch.device("cuda"))
+        if LAMA_INPROC:
+            sess = _TorchLamaSession(path, torch.device("cuda"))
+        else:
+            sess = _SubprocLamaSession(path)
         _rstat("lama_load", time.time() - t0, n=0)
-        logger.info(f"[LaMa] Loaded big-lama TorchScript on CUDA from {path}")
+        logger.info(f"[LaMa] big-lama on CUDA ({'in-process' if LAMA_INPROC else 'child process'}) "
+                    f"ready in {time.time() - t0:.1f}s from {path}")
         return sess
     except Exception as e:
         logger.warning(f"[LaMa] torch backend failed ({e}) -> ONNX CPU")
@@ -231,11 +280,13 @@ def unload_models():
     global _LAMA_SESSION
     with _LAMA_SESSION_LOCK:
         if _LAMA_SESSION is not None:
+            if hasattr(_LAMA_SESSION, "close"):
+                _LAMA_SESSION.close()   # GPU child process exits -> its VRAM is released (B29)
             del _LAMA_SESSION
             _LAMA_SESSION = None
     try:
         import torch
-        if torch.cuda.is_available():
+        if torch.cuda.is_available() and torch.cuda.is_initialized():  # never create a CUDA context here (B29)
             torch.cuda.empty_cache()
     except Exception:
         pass

@@ -19,6 +19,8 @@ if hasattr(sys.stderr, 'reconfigure'):
         pass
 
 import os
+# torch.cuda.is_available() via NVML: no CUDA driver init in the web server process (B29)
+os.environ.setdefault("PYTORCH_NVML_BASED_CUDA_CHECK", "1")
 import sys
 import time
 import warnings

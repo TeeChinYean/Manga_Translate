@@ -86,8 +86,12 @@ _CACHE_TTL_S = 3.0
 
 
 def _mode() -> str:
-    m = os.getenv("EXTRACT_DEVICE", "auto").strip().lower()
-    return m if m in ("auto", "cpu", "gpu") else "auto"
+    # Default "cpu" (B29): any CUDA / DirectML context in the web server process keeps the
+    # LLM from being fully resident in VRAM on a 4 GB card (translation 11 s -> 47 s). Only
+    # LaMa uses the GPU, in a child process that exits after rendering. EXTRACT_DEVICE=auto/gpu
+    # brings the old behaviour back.
+    m = os.getenv("EXTRACT_DEVICE", "cpu").strip().lower()
+    return m if m in ("auto", "cpu", "gpu") else "cpu"
 
 
 def _reserve_mb() -> int:
@@ -144,7 +148,8 @@ def free_vram_mb(force: bool = False):
         if not force and time.time() - _CACHE["t"] < _CACHE_TTL_S:
             return _CACHE["free"], _CACHE["source"]
         free, source = None, "none"
-        for name, fn in (("torch.cuda", _probe_torch), ("nvidia-smi", _probe_nvidia_smi),
+        # nvidia-smi first: torch.cuda.mem_get_info() would create a CUDA context in this process
+        for name, fn in (("nvidia-smi", _probe_nvidia_smi), ("torch.cuda", _probe_torch),
                          ("windows-counters", _probe_windows_counters)):
             try:
                 v = fn()

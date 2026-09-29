@@ -280,7 +280,7 @@ async def _run_pipeline_async(pdf_path, page_range_str, source_lang, target_lang
         from core.extractor import unload_models as unload_ocr
         await asyncio.to_thread(unload_ocr)
         import torch
-        if torch.cuda.is_available():
+        if torch.cuda.is_available() and torch.cuda.is_initialized():  # never create a CUDA context here (B29)
             torch.cuda.empty_cache()
             
         # 等待后台翻译队列全部完成收尾
@@ -379,7 +379,7 @@ async def _run_pipeline_async(pdf_path, page_range_str, source_lang, target_lang
         # Unload models and clear VRAM cache
         try:
             import torch
-            if torch.cuda.is_available():
+            if torch.cuda.is_available() and torch.cuda.is_initialized():  # never create a CUDA context here (B29)
                 torch.cuda.empty_cache()
         except Exception:
             pass
