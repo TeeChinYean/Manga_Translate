@@ -1472,7 +1472,7 @@
             metricRate.textContent = '--';
             metricTime.textContent = '--';
 
-            logToConsole(`[+] 启动排版翻译流水线。正在分发任务...`);
+            logToConsole(`正在分发任务...`);
 
             // Assemble Form with tuned inpainting & typography parameters
             const formData = new FormData();
@@ -1559,7 +1559,7 @@
                 const stage = data.stage || '处理中';
 
                 progressBarFill.style.width = `${percent}%`;
-                logToConsole(`[${percent}%] 流水线状态: ${stage}`);
+                logToConsole(`[${percent}%] ${stage}`);
 
                 // Update performance metric indicators dynamically when in inference step
                 if (data.metrics) {

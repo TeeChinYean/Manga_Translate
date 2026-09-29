@@ -42,9 +42,13 @@ $RECYCLE.BIN/
 [Bb]in/
 [Oo]bj/
 
-# Test sample PDFs
-test_ori_clip.pdf
-test_manga_sample.pdf
+# PDFs and Archives (manga files and translation output)
+*.pdf
+*.zip
+*.tar
+*.tar.gz
+*.7z
+*.rar
 
 # Scratch development scripts
 scratch/

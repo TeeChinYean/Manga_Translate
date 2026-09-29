@@ -355,7 +355,7 @@ async def translation_worker():
             # Step 2: Streaming Pipeline Setup
             status_db[task_id] = {
                 "percent": 15,
-                "stage": "流水线全并发就绪: 边检测边翻译",
+                "stage": "并发就绪:",
                 "status": "processing"
             }
             await asyncio.sleep(0.3)
@@ -445,7 +445,7 @@ async def translation_worker():
 
                 status_db[task_id]["percent"] = percent
                 status_db[task_id]["stage"] = (
-                    f"流水线全速并发中: 已提取 {extracted_count}/{total_selected_pages} 页, "
+                    f"并发中: {extracted_count}/{total_selected_pages} 页, "
                     f"已翻译 {translated_count}/{total_selected_pages} 页, "
                     f"已重绘 {rendered_count}/{total_selected_pages} 页" + model_str
                 )
@@ -752,7 +752,7 @@ async def translation_worker():
                 
             status_db[task_id] = {
                 "percent": 95,
-                "stage": "编译拼装高保真 PDF 中",
+                "stage": "编译拼装 PDF 中",
                 "status": "processing",
                 "metrics": total_metrics
             }
@@ -847,7 +847,7 @@ async def translation_worker():
             
             status_db[task_id] = {
                 "percent": 100,
-                "stage": "全部处理完成！" + (f"（{extraction_warning}）" if extraction_warning else ""),
+                "stage": "处理完成！" + (f"（{extraction_warning}）" if extraction_warning else ""),
                 "status": "complete",
                 "warning": extraction_warning,
                 "failed_pages": [p for p, _ in failed_pages],
