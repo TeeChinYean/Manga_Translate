@@ -184,4 +184,4 @@
 - 涉及文件/模块：core/async_stages.py（`hold_render_until_translate_done`）、main.py（`resolve_pipeline_mode` → AUTO_GPU_MODE，overlap 开始前检查 LLM 是否被挤出显存并重启）
 - 实现要点：hold 时已翻译队列不限长度，翻译不会被还没开始的重绘卡住；翻译出错时重绘不会死等；AUTO_GPU_MODE=serial 恢复旧行为；CPU LaMa 时 auto 规则不变（<20 页 serial，≥20 页 overlap）；手动选 overlap 且 LaMa 在 GPU 时同样等翻译完成再重绘
 - 相关测试：tests/test_async_stages.py（重绘在所有翻译之后、翻译与提取重叠、出错不死锁）、tests/test_low_bugs.py（GPU 时 auto → overlap）
-- 状态：Done（待用户 bench 确认时间）
+- 状态：Done。实测第5巻（scratch/bench_modes.py）：1-10 页 overlap 46.3s / serial 46.9s（只有 24 句 < 一批 36 句，翻译只能等提取完才开始）；1-30 页 overlap 173.2s / serial 244.3s（x1.41，约 90s 翻译藏进 128s 提取里，提取结束后只多等 15.5s）
