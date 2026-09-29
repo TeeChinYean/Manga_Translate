@@ -89,6 +89,48 @@ _LAMA_TORCH_PATHS = [
 ]
 
 
+# ONNX CPU model choice (scratch/lama_matrix.py, 8 windows, i5 CPU, LLM stopped):
+#   lama.onnx (old export)      5.19 s/window  (baseline)
+#   lama_fp32.onnx (Carve)      2.84 s/window  x1.83, same big-lama weights as big-lama.pt
+#   lama-manga.onnx             2.93 s/window  manga-trained, different look (opt-in)
+# DirectML fails on all three; ONNX CUDA is 0.29 s/window but +1109 MB VRAM (too big next to
+# the LLM on 4 GB), so GPU stays on the torch child. LAMA_ONNX_MODEL=<file in data/models/onnx>.
+_LAMA_ONNX_DIR = os.path.join(os.path.dirname(os.path.abspath(__file__)), "..", "data", "models", "onnx")
+_LAMA_ONNX_CANDIDATES = ["lama_fp32.onnx", "lama.onnx"]
+
+
+def _lama_onnx_path():
+    """Env LAMA_ONNX_MODEL (name or path) wins, else the first existing candidate."""
+    env = os.getenv("LAMA_ONNX_MODEL", "").strip()
+    if env:
+        p = env if os.path.isabs(env) else os.path.join(_LAMA_ONNX_DIR, env)
+        return p if os.path.exists(p) else None
+    for name in _LAMA_ONNX_CANDIDATES:
+        p = os.path.join(_LAMA_ONNX_DIR, name)
+        if os.path.exists(p):
+            return p
+    return None
+
+
+class _OnnxLamaSession:
+    """Wraps any LaMa ONNX export behind the l_image_/l_mask_ -> 0..255 interface:
+    maps input names (image/mask vs l_image_/l_mask_) and rescales 0..1 outputs."""
+
+    def __init__(self, sess):
+        self.sess = sess
+        ins = sess.get_inputs()
+        img = next((i for i in ins if len(i.shape) > 1 and i.shape[1] == 3), ins[0])
+        msk = next(i for i in ins if i is not img)
+        self.img_name, self.mask_name = img.name, msk.name
+
+    def run(self, output_names, feeds):
+        y = self.sess.run(output_names, {self.img_name: feeds["l_image_"],
+                                         self.mask_name: feeds["l_mask_"]})[0]
+        if y.max() <= 1.5:
+            y = y * 255.0
+        return [y]
+
+
 class _TorchLamaSession:
     """big-lama TorchScript on CUDA behind the onnxruntime `run()` interface used by
     _lama_inpaint_crop: feeds l_image_ [1,3,H,W] 0..1 and l_mask_ [1,1,H,W] {0,1}, returns
@@ -209,16 +251,17 @@ def _get_lama_session():
             if _LAMA_SESSION is None:
                 try:
                     import onnxruntime as ort
-                    model_path = os.path.join(os.path.dirname(os.path.abspath(__file__)), "..", "data", "models", "onnx", "lama.onnx")
+                    model_path = _lama_onnx_path() or os.path.join(_LAMA_ONNX_DIR, "lama.onnx")
                     if os.path.exists(model_path):
                         opts = ort.SessionOptions()
                         opts.graph_optimization_level = ort.GraphOptimizationLevel.ORT_DISABLE_ALL
                         opts.intra_op_num_threads = LAMA_THREADS
                         # LaMa runs on CPU to guarantee FFC DFT node numerical stability
                         t_load = time.time()
-                        _LAMA_SESSION = ort.InferenceSession(model_path, sess_options=opts, providers=['CPUExecutionProvider'])
+                        _LAMA_SESSION = _OnnxLamaSession(ort.InferenceSession(
+                            model_path, sess_options=opts, providers=['CPUExecutionProvider']))
                         _rstat("lama_load", time.time() - t_load, n=0)
-                        logger.info(f"[LaMa] Loaded LaMa ONNX session on CPU with ORT_DISABLE_ALL")
+                        logger.info(f"[LaMa] Loaded {os.path.basename(model_path)} on CPU with ORT_DISABLE_ALL")
                     else:
                         logger.info(f"[LaMa] Model not found at {model_path}, using Telea diffusion fallback.")
                 except Exception as e:
@@ -1327,7 +1370,7 @@ def _merge_into(target: np.ndarray, x0: int, y0: int, x1: int, y1: int, mask: np
 
 # ── Main Renderer Class ────────────────────────────────────────────────────────
 # Bump whenever rendering output changes, so page JPEG caches from older logic are not reused.
-RENDER_CACHE_VERSION = "2026-09-29-bubble"
+RENDER_CACHE_VERSION = "2026-09-29-lamafp32"
 
 
 class PDFLayoutRenderer:

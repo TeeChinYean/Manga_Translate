@@ -171,3 +171,10 @@
 - 实现要点：接口与 MangaOcr 一致（batch / __call__），`_manga_ocr_batch` 直接转发；子进程启动失败或超时 → 本任务回退 CPU MangaOCR；MANGA_OCR_GPU_WORKER=0 关闭；overlap/stream 模式不启用（提取与翻译同时进行，会和 LLM 抢显存）
 - 相关测试：tests/test_manga_gpu_worker.py
 - 状态：Done，默认关闭（实测：OCR 11.3s→2.2s，但每个任务启动子进程的开销让提取 19.6s→28.8s、全程 42.8s→54.1s；MANGA_OCR_GPU_WORKER=1 开启）
+
+### [Render] 不用 torch 时 LaMa 改用 lama_fp32.onnx（CPU x1.83）
+- 说明：scratch/lama_matrix.py 一次测完 3 个 ONNX 模型 × CPU/DirectML/CUDA × 线程/优化参数 + torch fp32/fp16（8 个窗口）：lama.onnx CPU 5.19 s/窗口 → lama_fp32.onnx 2.84 s/窗口（与 big-lama.pt 同一权重，PSNR 相同）；DirectML 全部失败；ONNX CUDA 0.29 s/窗口但 +1109MB 显存（4GB 卡挨着 LLM 放不下）；torch fp16 输出损坏（4.8 dB）→ GPU 继续用 torch fp32 子进程（+669MB）
+- 涉及文件/模块：core/renderer.py（`_lama_onnx_path`、`_OnnxLamaSession`、`_get_lama_session`；RENDER_CACHE_VERSION 更新）
+- 实现要点：优先 lama_fp32.onnx，没有则 lama.onnx；LAMA_ONNX_MODEL=lama-manga.onnx 可切换漫画训练版；包装层把 l_image_/l_mask_ 映射到模型实际输入名（image/mask），0..1 输出自动 ×255
+- 相关测试：tests/test_lama_backend.py（名称映射 + 缩放、模型选择与 env 覆盖）
+- 状态：Done
