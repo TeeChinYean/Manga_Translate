@@ -82,7 +82,11 @@ async def run_three_stage_pipeline(
     """
     abort = asyncio.Event()
     errors: list = []
-    q_extracted: asyncio.Queue = asyncio.Queue(maxsize=queue_size)
+    # overlap: extraction must never wait for translation. With a bounded queue a slow LLM batch
+    # (~10 s) blocked the producer after `queue_size` pages, so fast (GPU OCR) extraction was
+    # held to the translation pace and the OCR child stayed alive longer (30 p: extract_done
+    # 61.5 s serial vs 114.8 s overlap). Pages are small dicts, so unbounded is fine.
+    q_extracted: asyncio.Queue = asyncio.Queue(maxsize=0 if hold_render_until_source_done else queue_size)
     hold_any = hold_render_until_source_done or hold_render_until_translate_done
     q_translated: asyncio.Queue = asyncio.Queue(maxsize=0 if hold_any else queue_size)
     render_gate = asyncio.Event()
