@@ -503,13 +503,25 @@ def _manga_model_ref():
     return local if os.path.exists(local) else "kha-white/manga-ocr-base"
 
 
-def start_manga_gpu_worker() -> bool:
-    """Start the GPU MangaOCR child (non-blocking). Called by the serial pipeline before
-    extraction. OFF by default: measured (第5巻 p1-10 serial) OCR 11.3 s -> 2.2 s, but the child
-    start (torch + transformers + CUDA, every job) made extraction 19.6 s -> 28.8 s and the
-    job 42.8 s -> 54.1 s. MANGA_OCR_GPU_WORKER=1 turns it on (worth it for long books only if
-    the start cost is amortised)."""
-    if os.getenv("MANGA_OCR_GPU_WORKER", "0") != "1":
+MANGA_OCR_GPU_MIN_PAGES = max(0, int(os.getenv("MANGA_OCR_GPU_MIN_PAGES", "20")))
+
+
+def manga_gpu_worker_wanted(n_pages=None) -> bool:
+    """MANGA_OCR_GPU_WORKER=1 / 0 forces on / off; default (auto): only for jobs with MORE than
+    MANGA_OCR_GPU_MIN_PAGES pages. Measured on 第5巻: 10 p serial 42.8 s -> 54.1 s (child start
+    ~18 s not amortised); 30 p overlap 173.2 s -> 144.5 s (extract 129.9 s -> 55.5 s)."""
+    mode = os.getenv("MANGA_OCR_GPU_WORKER", "auto").strip().lower()
+    if mode in ("1", "on", "true"):
+        return True
+    if mode in ("0", "off", "false"):
+        return False
+    return n_pages is not None and n_pages > MANGA_OCR_GPU_MIN_PAGES
+
+
+def start_manga_gpu_worker(n_pages=None) -> bool:
+    """Start the GPU MangaOCR child (non-blocking) before extraction (serial / overlap).
+    See manga_gpu_worker_wanted() for when it is used."""
+    if not manga_gpu_worker_wanted(n_pages):
         return False
     with _MANGA_GPU_LOCK:
         if _MANGA_GPU["proxy"] is not None or _MANGA_GPU["failed"]:

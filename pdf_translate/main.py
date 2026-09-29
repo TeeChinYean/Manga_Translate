@@ -609,7 +609,7 @@ async def translation_worker():
                 # MangaOCR on the GPU in a child process for the extraction stage only (B30);
                 # it is stopped by unload_ocr_models() before the LLM translates.
                 from core.extractor import start_manga_gpu_worker
-                await asyncio.to_thread(start_manga_gpu_worker)
+                await asyncio.to_thread(start_manga_gpu_worker, total_selected_pages)
                 pages = []
                 async for p in extracted_pages():
                     _check_cancel()
@@ -658,11 +658,12 @@ async def translation_worker():
                     await run_serial()
                 else:
                     if pipeline_mode == "overlap":
-                        # MangaOCR GPU child during extraction (MANGA_OCR_GPU_WORKER=1): it fits
+                        # MangaOCR GPU child during extraction (jobs > 20 pages, see
+                        # manga_gpu_worker_wanted): it fits
                         # next to the resident LLM (serial 30 p: extract 128 s -> 61.5 s, LLM not
                         # evicted); stopped by unload_ocr_models() when extraction ends.
                         from core.extractor import start_manga_gpu_worker
-                        await asyncio.to_thread(start_manga_gpu_worker)
+                        await asyncio.to_thread(start_manga_gpu_worker, total_selected_pages)
                     if lama_uses_gpu() and pipeline_mode == "overlap":
                         # nothing is translating yet: the only safe moment to restart an
                         # evicted LLM in overlap mode (B29)

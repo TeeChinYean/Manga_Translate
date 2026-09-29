@@ -192,9 +192,10 @@
 - 相关测试：无（未改代码）
 - 状态：Done（测量完成，保持 batch 16 / 默认线程）
 
-### [Extract] MangaOCR GPU 子进程也可用于 overlap 模式（测试中）
+### [Extract] MangaOCR GPU 子进程用于 overlap 模式（>20 页自动开启）
 - 说明：串行 30 页实测 MANGA_OCR_GPU_WORKER=1：OCR 101.5s → 16.0s，提取 118s → 61.5s，LLM 未被挤出（翻译 81s 与之前相同），全程 175.9s（与 overlap CPU 版 173.2s 持平）。overlap 模式也启动它：提取 GPU OCR + 同时翻译，预期 30 页约 130-140s
 - 涉及文件/模块：main.py（overlap 分支在流水线前调用 start_manga_gpu_worker；提取结束 unload_ocr_models → stop_manga_gpu_worker）
-- 实现要点：仍需 MANGA_OCR_GPU_WORKER=1（默认关）；待用户 bench 确认 GPU OCR 和 LLM 同时推理不会互相拖慢或挤出显存后，再决定是否默认开启
-- 相关测试：tests/test_manga_gpu_worker.py `test_overlap_starts_worker_and_unload_stops_it`
-- 状态：In progress
+- 实现要点：默认 auto = 超过 20 页（MANGA_OCR_GPU_MIN_PAGES）才启用，短任务子进程启动开销不划算；MANGA_OCR_GPU_WORKER=1/0 强制开/关；GPU 不可用或子进程启动失败自动回退 CPU
+- 实测（第5巻 1-30 页 overlap，修复 B33 后）：173.2s → 144.5s（x1.2），提取 129.9s → 55.5s，翻译 87s 与之前相同（GPU OCR 和 LLM 同时推理没有互相拖慢），LLM 未被挤出；瓶颈转为翻译（translate_done 118.5s）
+- 相关测试：tests/test_manga_gpu_worker.py（`test_overlap_starts_worker_and_unload_stops_it`、页数门槛）
+- 状态：Done
