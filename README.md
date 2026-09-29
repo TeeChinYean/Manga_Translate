@@ -40,14 +40,16 @@
 
 前： |  后： 翻译约75-85%对
 
-<img width="1125" height="1600" alt="page_58_944999c6a5" src="https://github.com/user-attachments/assets/17f2e9a0-4b0c-477d-9050-dabba4123438"  style="display:inline-block; margin-right:10px;"/>
-<img width="1653" height="2351" alt="図書館の大魔術師 第１巻 conv 58" src="https://github.com/user-attachments/assets/262e0b53-1c8d-4d26-b0ef-9041e25a3bd3" />
-
-
-
+<table>
+  <tr>
+    <td><img width="1125" height="1600" alt="page_58_944999c6a5" src="https://github.com/user-attachments/assets/17f2e9a0-4b0c-477d-9050-dabba4123438"/></td>
+    <td><img width="1653" height="2351" alt="図書館の大魔術師 第１巻 conv 58" src="https://github.com/user-attachments/assets/262e0b53-1c8d-4d26-b0ef-9041e25a3bd3" /></td>
+  </tr>
+</table>
 
 **注意**
 部分字体会过小， 过大， 或重叠
+
 ---
 
 ## 🏗️ 核心流程
@@ -91,8 +93,8 @@ flowchart TD
 
 虽然默认配置是为了适配 4GB 显存的本地轻量大模型，但系统保留了灵活的切换支持：
 
-- **下载模型是 Optional（可选）的**：如果你电脑没有下载本地大模型（Qwen / Sakura），不用担心，代码里**内置开着 Google 翻译自动兜底**（没关）！检测不到本地大模型时，只要有网就会自动走 Google 翻译跑完整本漫画。如果想要更有二次元味道的精细汉化腔调，才需要去部署本地模型或填云端 AI API。
-- **配置更好的电脑**：如果你用的是桌面端显卡或者显存比较大（比如 8GB / 12GB / 16GB 以上），完全可以换成参数量更大的本地模型（比如 7B 或 14B 版的 Qwen / Sakura），翻译出来的语句和语感会更丰富细腻。
+- **下载模型是 Optional（可选）的**：如果你电脑没有下载本地大模型（Qwen / Sakura），不用担心，代码里**内置开着 Google 翻译自动兜底**（没关）！检测...
+- **配置更好的电脑**：如果你用的是桌面端显卡或者显存比较大（比如 8GB / 12GB / 16GB 以上），完全可以换成参数量更大的本地模型（比如 7B 或 14B 版的 ...）
 - **外接 AI API**：如果你不想给电脑负担，也可以直接接入各大主流的在线 AI 接口（比如 OpenAI ChatGPT、DeepSeek、Google Gemini、Groq 等），走云端翻译。
 
 ---
@@ -100,7 +102,7 @@ flowchart TD
 ## ✨ 主要功能
 
 - **日文竖排自动转横排中文**：自动根据气泡大小通过二分法计算最合适的字号，文字自动居中，并处理标点避头尾，排版看起来自然。
-- **支持专有漫画词典**：可以针对不同漫画分别建立术语表（`data/terms/<漫画名>.json`），角色名、招式名、世界观名词前后一致(但可能和你自己知道的名字不同，所以部分翻译需要去到对应的json 表更改），不会每一页翻出来的名字都不一样。
+- **支持专有漫画词典**：可以针对不同漫画分别建立术语表（`data/terms/<漫画名>.json`），角色名、招式名、世界观名词前后一致(但可能和你自己知道的...)
 - **Web 界面与实时进度**：基于 FastAPI 搭建的网页界面，有实时的进度条和控制台日志，也能直接查看预览图和排版微调。
 - **直接导出**：一键生成翻译后的高清 PDF，或者把每页图片打包成 ZIP 下载。
 
