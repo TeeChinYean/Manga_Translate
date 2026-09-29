@@ -40,8 +40,9 @@
 
 前： |  后： 翻译约75-85%对
 
-<img src="https://via.placeholder.com/150" alt="图片1" style="display:inline-block; margin-right:10px;">
-<img src="https://via.placeholder.com/150" alt="图片2" style="display:inline-block;">
+<img width="1125" height="1600" alt="page_58_944999c6a5" src="https://github.com/user-attachments/assets/17f2e9a0-4b0c-477d-9050-dabba4123438"  style="display:inline-block; margin-right:10px;"/>
+<img width="1653" height="2351" alt="図書館の大魔術師 第１巻 conv 58" src="https://github.com/user-attachments/assets/262e0b53-1c8d-4d26-b0ef-9041e25a3bd3" />
+
 
 
 
