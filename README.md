@@ -43,11 +43,11 @@
   <tr>
     <td align="center" valign="top" width="50%">
       <div><strong>Before</strong></div>
-      <img src="https://github.com/user-attachments/assets/17f2e9a0-4b0c-477d-9050-dabba4123438" alt="page_58_944999c6a5" style="max-width:100%; height:auto; border-radius:8px;" />
+      <img src="https://github.com/user-attachments/assets/262e0b53-1c8d-4d26-b0ef-9041e25a3bd3" alt="図書館の大魔術師 第１巻 conv 58" style="max-width:100%; height:auto; border-radius:8px;" />
     </td>
     <td align="center" valign="top" width="50%">
       <div><strong>After</strong></div>
-      <img src="https://github.com/user-attachments/assets/262e0b53-1c8d-4d26-b0ef-9041e25a3bd3" alt="図書館の大魔術師 第１巻 conv 58" style="max-width:100%; height:auto; border-radius:8px;" />
+       <img src="https://github.com/user-attachments/assets/17f2e9a0-4b0c-477d-9050-dabba4123438" alt="page_58_944999c6a5" style="max-width:100%; height:auto; border-radius:8px;" />
     </td>
   </tr>
 </table>
