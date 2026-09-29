@@ -35,9 +35,13 @@
 
 ---
 ### 效果
+**漫画例子：图书馆的大魔法师** #这漫画不错但出的慢
 前：
+
 <img width="1653" height="2351" alt="図書館の大魔術師 第１巻 conv 58" src="https://github.com/user-attachments/assets/324476bb-7c8c-47da-a504-452880bff635" />
+
 后：
+
 <img width="1125" height="1600" alt="page_58_944999c6a5" src="https://github.com/user-attachments/assets/e6567802-b8c9-47da-85be-3411ea48a7f5" />
 
 
