@@ -121,8 +121,6 @@ flowchart TD
 ### 1. 安装环境
 电脑需要先装好 Python 3.10+，拉取项目并安装依赖：
 ```bash
-git clone https://github.com/TeeChinYean/pdf_translate_v2_async_pipeline.git
-cd pdf_translate_v2_async_pipeline
 pip install -r pdf_translate/requirements.txt
 ```
 
