@@ -48,8 +48,8 @@ def _get_llama_api_key():
             candidate_paths = [
                 os.path.join(os.path.dirname(os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))), "qwen_turbovec_rag", "app", "storage", "llama_api_key.txt"),
                 os.path.join(os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__)))), "..", "qwen_turbovec_rag", "app", "storage", "llama_api_key.txt"),
-                r"c:\Users\Work\Desktop\project\qwen_turbovec_rag\app\storage\llama_api_key.txt"
-            ]
+            ] + ([os.path.join(os.environ["TURBOVEC_RAG_DIR"], "app", "storage", "llama_api_key.txt")]
+                 if os.getenv("TURBOVEC_RAG_DIR") else [])
             for p in candidate_paths:
                 p_norm = os.path.normpath(p)
                 if os.path.exists(p_norm):
@@ -113,8 +113,7 @@ def _rag_dirs():
     return [
         os.path.join(os.path.dirname(os.path.dirname(os.path.dirname(os.path.dirname(here)))), "qwen_turbovec_rag"),
         os.path.join(os.path.dirname(os.path.dirname(os.path.dirname(here))), "..", "qwen_turbovec_rag"),
-        r"c:\Users\Work\Desktop\project\qwen_turbovec_rag",
-    ]
+    ] + ([os.environ["TURBOVEC_RAG_DIR"]] if os.getenv("TURBOVEC_RAG_DIR") else [])
 
 
 def _gpu_used_mb():
