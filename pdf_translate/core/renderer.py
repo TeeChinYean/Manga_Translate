@@ -78,9 +78,10 @@ def preload_lama():
 # ── LaMa backend (ONNX CPU = default; torch big-lama on CUDA = opt-in) ──────────
 # Measured (scratch/gpu_ocr_lama_check.py, RTX 3050 4 GB): ONNX CPU 6.1-7.0 s/window vs torch
 # CUDA 0.39-0.41 s/window (x15-17), +~600 MB VRAM, fits next to the LLM (3121 -> 3824 MB).
-# Output differs from lama.onnx (PSNR median 20.8 dB) -> opt in after checking the images:
-#   LAMA_BACKEND=torch  (needs a CUDA build of PyTorch and big-lama.pt)
-LAMA_BACKEND = os.getenv("LAMA_BACKEND", "onnx").strip().lower()
+# Output differs from lama.onnx pixel-wise (PSNR median 20.8 dB) but side-by-side images
+# (scratch/lama_gpu_compare) look equal or cleaner (fewer ghost strokes). Default "auto": torch
+# CUDA when a CUDA PyTorch + big-lama.pt are present, else ONNX CPU. LAMA_BACKEND=onnx forces CPU.
+LAMA_BACKEND = os.getenv("LAMA_BACKEND", "auto").strip().lower()
 _LAMA_TORCH_PATHS = [
     os.getenv("LAMA_TORCH_PATH", ""),
     os.path.join(os.path.dirname(os.path.abspath(__file__)), "..", "data", "models", "big-lama.pt"),
@@ -1258,7 +1259,7 @@ def _merge_into(target: np.ndarray, x0: int, y0: int, x1: int, y1: int, mask: np
 
 # ── Main Renderer Class ────────────────────────────────────────────────────────
 # Bump whenever rendering output changes, so page JPEG caches from older logic are not reused.
-RENDER_CACHE_VERSION = "2026-09-28-bubble"
+RENDER_CACHE_VERSION = "2026-09-29-bubble"
 
 
 class PDFLayoutRenderer:

@@ -163,4 +163,4 @@
 - 涉及文件/模块：core/extractor.py（GPU 上自动 fp16，MANGA_OCR_FP16=0 关闭；输入按模型 dtype 转换）；core/gpu_budget.py（manga_ocr 预估 600MB）；core/renderer.py（`_TorchLamaSession`，LAMA_BACKEND=torch 启用，默认 onnx；找不到 CUDA / big-lama.pt 自动回退 ONNX）
 - 实现要点：需要主程序的 Python 装 CUDA 版 PyTorch（目前是 +cpu）；big-lama.pt 默认从 ~/.cache/torch/hub/checkpoints 读取（simple-lama 下载的位置），或 LAMA_TORCH_PATH；torch LaMa 输出与 lama.onnx 不同（PSNR 中位 20.8 dB），需看对比图后再启用
 - 相关测试：tests/test_lama_backend.py、tests/test_manga_batch.py
-- 状态：Done（LaMa torch 默认关闭，待画质确认）
+- 状态：Done（对比图确认画质相当或更干净 → LAMA_BACKEND 默认 auto：有 CUDA 版 PyTorch + big-lama.pt 就用 GPU，否则 ONNX CPU）
