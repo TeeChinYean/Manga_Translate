@@ -576,10 +576,18 @@ async def translation_worker():
                     update_progress()
                 _mark("render_done")
 
-            async def unload_ocr_models():
+            async def unload_ocr_models(restart_llm: bool = False):
                 from core.extractor import unload_models as unload_ocr
                 released = await asyncio.to_thread(unload_ocr)
                 _mark("ocr_unloaded")
+                # GPU OCR can evict part of the LLM's VRAM to system RAM (4x slower translation):
+                # restart the LLM so it is fully resident again before translating (B29).
+                # Only where nothing is translating yet (serial): a restart would kill an
+                # in-flight request in overlap/stream mode.
+                if restart_llm:
+                    from core.engine import restart_llm_if_evicted
+                    if await asyncio.to_thread(restart_llm_if_evicted):
+                        _mark("llm_restarted")
                 if not lama_uses_gpu():
                     start_lama_preload()
                 logger.info(f"[Pipeline] OCR models released: {sorted(released or [])} "
@@ -596,7 +604,7 @@ async def translation_worker():
                     _check_cancel()
                     pages.append(p)
                 pages.sort(key=lambda x: x["page_num"])
-                await unload_ocr_models()
+                await unload_ocr_models(restart_llm=True)
                 if not lama_uses_gpu():
                     start_lama_preload()  # CPU is idle while the LLM translates (CPU LaMa only;
                                           # GPU LaMa waits until the LLM is done: B28)

@@ -100,6 +100,89 @@ def _wait_health(max_wait_seconds: float) -> bool:
     return False
 
 
+# ── LLM VRAM residency (B29) ──────────────────────────────────────────────────
+# On the 4 GB card, GPU OCR / LaMa pushed part of the llama-server allocations out to shared
+# system memory (WDDM eviction). They never came back: during translation total VRAM was 2303 MB
+# although the LLM alone needs ~3184 MB -> generation ~4x slower (11 s -> 46 s). A restart puts
+# the whole model back in VRAM (~7-10 s), far cheaper than a slow translation.
+LLM_EVICT_TOLERANCE_MB = 200
+
+
+def _rag_dirs():
+    here = os.path.abspath(__file__)
+    return [
+        os.path.join(os.path.dirname(os.path.dirname(os.path.dirname(os.path.dirname(here)))), "qwen_turbovec_rag"),
+        os.path.join(os.path.dirname(os.path.dirname(os.path.dirname(here))), "..", "qwen_turbovec_rag"),
+        r"c:\Users\Work\Desktop\project\qwen_turbovec_rag",
+    ]
+
+
+def _gpu_used_mb():
+    import subprocess
+    try:
+        out = subprocess.run(["nvidia-smi", "--query-gpu=memory.used", "--format=csv,noheader,nounits"],
+                             capture_output=True, text=True, timeout=10).stdout.strip().splitlines()
+        return int(out[0]) if out else None
+    except Exception:
+        return None
+
+
+def _llm_expected_mb():
+    """VRAM the LLM uses when fully resident: env LLM_EXPECTED_VRAM_MB, else the launcher's own
+    measurement (qwen_turbovec_rag/app/storage/ctx_calibration.json, Qwen 3.5 4B entry)."""
+    env = os.getenv("LLM_EXPECTED_VRAM_MB")
+    if env:
+        return int(env)
+    import json
+    for d in _rag_dirs():
+        f = os.path.join(d, "app", "storage", "ctx_calibration.json")
+        if os.path.exists(f):
+            try:
+                cal = json.load(open(f, encoding="utf-8"))
+                vals = [v.get("measured_used_mb") for k, v in cal.items()
+                        if k.startswith("docker.io/ai/qwen3.5:4b") and "|ub512|" in k and v.get("measured_used_mb")]
+                if vals:
+                    return int(vals[0])
+            except Exception:
+                pass
+    return None
+
+
+def llm_vram_evicted(used_mb=None, expected_mb=None) -> bool:
+    """True when total VRAM in use is clearly below what the LLM alone needs (it was evicted)."""
+    used = _gpu_used_mb() if used_mb is None else used_mb
+    exp = _llm_expected_mb() if expected_mb is None else expected_mb
+    if used is None or not exp:
+        return False
+    return used < exp - LLM_EVICT_TOLERANCE_MB
+
+
+def restart_llm_if_evicted() -> bool:
+    """Restart llama-server when its VRAM was evicted. Returns True if it restarted."""
+    if not llm_vram_evicted():
+        return False
+    import subprocess
+    used, exp = _gpu_used_mb(), _llm_expected_mb()
+    logger.warning(f"[Turbovec LLM] VRAM in use {used} MB < LLM needs {exp} MB: model memory was evicted "
+                   f"to system RAM (slow). Restarting llama-server to bring it back into VRAM (B29).")
+    try:
+        if os.name == "nt":
+            subprocess.run(["taskkill", "/F", "/IM", "com.docker.llama-server.exe"], capture_output=True, timeout=15)
+        else:
+            subprocess.run(["pkill", "-f", "llama-server"], capture_output=True, timeout=15)
+    except Exception as e:
+        logger.warning(f"[Turbovec LLM] could not stop llama-server: {e}")
+        return False
+    t0 = time.time()
+    while time.time() - t0 < 15 and (_port_open(18089) or _llama_server_running()):
+        time.sleep(0.5)
+    _LAST_LAUNCH["t"] = 0.0      # deliberate restart: bypass the relaunch cooldown
+    ok = ensure_turbovec_llm_ready(auto_launch=True, max_wait_seconds=60)
+    logger.info(f"[Turbovec LLM] restart {'OK' if ok else 'FAILED'} in {time.time() - t0:.1f}s, "
+                f"VRAM now {_gpu_used_mb()} MB")
+    return ok
+
+
 def ensure_turbovec_llm_ready(auto_launch: bool = True, max_wait_seconds: int = 25) -> bool:
     """
     Checks if Turbovec LLM (port 18089 direct or 18088 gateway) is active and pre-warmed.
@@ -127,11 +210,7 @@ def ensure_turbovec_llm_ready(auto_launch: bool = True, max_wait_seconds: int = 
         return _wait_health(max_wait_seconds)
 
     # 2. Find llm_launcher.py in qwen_turbovec_rag
-    candidate_dirs = [
-        os.path.join(os.path.dirname(os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))), "qwen_turbovec_rag"),
-        os.path.join(os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__)))), "..", "qwen_turbovec_rag"),
-        r"c:\Users\Work\Desktop\project\qwen_turbovec_rag"
-    ]
+    candidate_dirs = _rag_dirs()
     rag_dir = None
     for d in candidate_dirs:
         norm_d = os.path.normpath(d)
