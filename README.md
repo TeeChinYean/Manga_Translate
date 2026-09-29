@@ -22,6 +22,7 @@
 
 ## 💻 跑在什么配置的电脑上？（实测硬件）
 
+- **环境**：Window 11 Home
 - **显卡 (GPU)**：NVIDIA GeForce RTX 3050 Laptop GPU（**4GB 显存** 笔记本版）
 - **处理器 (CPU)**：AMD Ryzen 5 7535HS
 - **内存 (RAM)**：16 GB
