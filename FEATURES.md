@@ -164,3 +164,10 @@
 - 实现要点：需要主程序的 Python 装 CUDA 版 PyTorch（目前是 +cpu）；big-lama.pt 默认从 ~/.cache/torch/hub/checkpoints 读取（simple-lama 下载的位置），或 LAMA_TORCH_PATH；torch LaMa 输出与 lama.onnx 不同（PSNR 中位 20.8 dB），需看对比图后再启用
 - 相关测试：tests/test_lama_backend.py、tests/test_manga_batch.py
 - 状态：Done（对比图确认画质相当或更干净 → LAMA_BACKEND 默认 auto：有 CUDA 版 PyTorch + big-lama.pt 就用 GPU，否则 ONNX CPU）
+
+### [Extract] MangaOCR 在 GPU 子进程里跑（serial 提取阶段，B30）
+- 说明：serial 模式提取开始时启动 core/manga_worker.py（CUDA fp16），提取结束（unload_models）立即结束子进程，显存全部释放后再翻译；主进程不建 CUDA 上下文（见 B29）。启动不阻塞：子进程加载时 CTD 先处理前几页，第一次 OCR 时才等待就绪
+- 涉及文件/模块：core/manga_worker.py、core/extractor.py（`_MangaGpuProxy`、start/stop_manga_gpu_worker、`_manga_gpu_worker`）、main.py（run_serial）
+- 实现要点：接口与 MangaOcr 一致（batch / __call__），`_manga_ocr_batch` 直接转发；子进程启动失败或超时 → 本任务回退 CPU MangaOCR；MANGA_OCR_GPU_WORKER=0 关闭；overlap/stream 模式不启用（提取与翻译同时进行，会和 LLM 抢显存）
+- 相关测试：tests/test_manga_gpu_worker.py
+- 状态：Done（待用户实测）

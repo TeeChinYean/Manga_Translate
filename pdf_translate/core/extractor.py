@@ -414,6 +414,118 @@ def get_extract_stats() -> dict:
 MANGA_OCR_BATCH = max(1, int(os.getenv("MANGA_OCR_BATCH", "16")))
 
 
+# ── MangaOCR GPU child process (serial mode only, B29 / B30) ──────────────────
+_MANGA_GPU = {"proxy": None, "failed": False}
+_MANGA_GPU_LOCK = threading.Lock()
+
+
+class _MangaGpuProxy:
+    """Talks to core/manga_worker.py. Start is non-blocking (the child loads while CTD works on
+    the first pages); the first OCR call waits until it is ready."""
+
+    def __init__(self, model_ref):
+        import multiprocessing as mp
+        from core.manga_worker import worker_main
+        ctx = mp.get_context("spawn")
+        self.conn, child = ctx.Pipe()
+        self.proc = ctx.Process(target=worker_main,
+                                args=(child, model_ref, os.getenv("MANGA_OCR_FP16", "1") != "0"), daemon=True)
+        self.proc.start()
+        self.lock = threading.Lock()
+        self.ready = None          # None = starting, True = ready, False = failed
+        self.t0 = _time.time()
+
+    def wait_ready(self, timeout: float = 90.0) -> bool:
+        with self.lock:
+            if self.ready is None:
+                if self.conn.poll(timeout):
+                    kind, info = self.conn.recv()
+                    self.ready = kind == "ready"
+                    if self.ready:
+                        logger.info(f"[MangaOCR] GPU child process ready in {_time.time() - self.t0:.1f}s ({info})")
+                    else:
+                        logger.warning(f"[MangaOCR] GPU child process failed: {info} -> CPU")
+                else:
+                    self.ready = False
+                    logger.warning("[MangaOCR] GPU child process did not start in time -> CPU")
+        return bool(self.ready)
+
+    def batch(self, images) -> list:
+        arrays = [np.asarray(im.convert("RGB")) for im in images]
+        with self.lock:
+            self.conn.send(("ocr", arrays))
+            kind, payload = self.conn.recv()
+        if kind != "ok":
+            raise RuntimeError(f"MangaOCR GPU worker: {payload}")
+        return payload
+
+    def __call__(self, image) -> str:
+        return self.batch([image])[0]
+
+    def close(self):
+        try:
+            self.conn.send(None)
+        except Exception:
+            pass
+        try:
+            self.proc.join(10)
+            if self.proc.is_alive():
+                self.proc.kill()
+        except Exception:
+            pass
+
+
+def _manga_model_ref():
+    local = os.path.join(os.path.dirname(os.path.abspath(__file__)), "..", "manga-ocr-base")
+    return local if os.path.exists(local) else "kha-white/manga-ocr-base"
+
+
+def start_manga_gpu_worker() -> bool:
+    """Start the GPU MangaOCR child (non-blocking). Called by the serial pipeline before
+    extraction. MANGA_OCR_GPU_WORKER=0 disables it."""
+    if os.getenv("MANGA_OCR_GPU_WORKER", "1") == "0":
+        return False
+    with _MANGA_GPU_LOCK:
+        if _MANGA_GPU["proxy"] is not None or _MANGA_GPU["failed"]:
+            return _MANGA_GPU["proxy"] is not None
+        try:
+            import torch
+            if not torch.cuda.is_available():
+                _MANGA_GPU["failed"] = True
+                return False
+            _MANGA_GPU["proxy"] = _MangaGpuProxy(_manga_model_ref())
+            return True
+        except Exception as e:
+            logger.warning(f"[MangaOCR] cannot start GPU child process ({e}) -> CPU")
+            _MANGA_GPU["failed"] = True
+            return False
+
+
+def stop_manga_gpu_worker():
+    """End the child: all of its VRAM is released (must happen before translation)."""
+    with _MANGA_GPU_LOCK:
+        p = _MANGA_GPU["proxy"]
+        _MANGA_GPU["proxy"] = None
+    if p is not None:
+        p.close()
+        _MANGA_GPU["failed"] = False   # may start again for the next job
+
+
+def _manga_gpu_worker():
+    """The ready GPU proxy, or None (not started / failed -> caller uses CPU MangaOCR)."""
+    p = _MANGA_GPU["proxy"]
+    if p is None:
+        return None
+    if p.wait_ready():
+        return p
+    with _MANGA_GPU_LOCK:
+        if _MANGA_GPU["proxy"] is p:
+            _MANGA_GPU["proxy"] = None
+            _MANGA_GPU["failed"] = True
+    p.close()
+    return None
+
+
 def _to_model_dtype(x, model):
     """Cast pixel values to the model's dtype (fp16 MangaOCR on CUDA)."""
     dt = getattr(model, "dtype", None)
@@ -428,6 +540,8 @@ def _manga_ocr_batch(mocr, images, batch_size: int = MANGA_OCR_BATCH) -> list:
     Every crop is still recognised on its own (the batch only stacks them), so each text maps
     back to its own box / position. Returns one string per image ("" on failure).
     """
+    if isinstance(mocr, _MangaGpuProxy):
+        return mocr.batch(images)
     import torch
     from manga_ocr.ocr import post_process
     texts = []
@@ -548,6 +662,7 @@ def unload_models(force: bool = False):
         with _OCR_LOCK:
             _OCR_READER_JA = None
             _OCR_READER_EN = None
+    stop_manga_gpu_worker()   # always: the GPU child must be gone before translation (B30)
     if "manga_ocr" in which:
         with _MANGA_OCR_LOCK:
             _MANGA_OCR_INSTANCE = None
@@ -956,7 +1071,7 @@ class PDFLayoutExtractor:
         paddle_ocr = _get_paddle_ocr()
         mocr = None
         if source_lang == "Japanese":
-            mocr = _get_manga_ocr()
+            mocr = _manga_gpu_worker() or _get_manga_ocr()
             if mocr is None:
                 logger.warning("[OCR] MangaOCR unavailable; falling back to PaddleOCR for Japanese (accuracy will drop).")
 

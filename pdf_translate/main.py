@@ -601,6 +601,10 @@ async def translation_worker():
 
             async def run_serial():
                 """Mode 'serial': extract ALL -> unload OCR -> translate ALL (big context) -> render ALL."""
+                # MangaOCR on the GPU in a child process for the extraction stage only (B30);
+                # it is stopped by unload_ocr_models() before the LLM translates.
+                from core.extractor import start_manga_gpu_worker
+                await asyncio.to_thread(start_manga_gpu_worker)
                 pages = []
                 async for p in extracted_pages():
                     _check_cancel()
