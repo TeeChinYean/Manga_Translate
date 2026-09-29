@@ -110,6 +110,23 @@ class _TorchLamaSession:
             return [(out.clamp(0, 1) * 255.0).float().cpu().numpy()]
 
 
+def lama_uses_gpu() -> bool:
+    """True when rendering will run LaMa on the GPU (torch CUDA backend usable). Cheap check,
+    does not load the model. On a 4 GB card the LLM and GPU LaMa must not be resident together
+    during translation (measured: LLM 11 s -> 45.6 s when they were, B28)."""
+    if LAMA_BACKEND not in ("torch", "auto"):
+        return False
+    if isinstance(_LAMA_SESSION, _TorchLamaSession):
+        return True
+    try:
+        import torch
+        if not torch.cuda.is_available():
+            return False
+    except Exception:
+        return False
+    return any(p and os.path.exists(p) for p in _LAMA_TORCH_PATHS)
+
+
 def _load_torch_lama():
     try:
         import torch

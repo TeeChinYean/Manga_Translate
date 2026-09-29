@@ -141,6 +141,14 @@ AUTO_OVERLAP_MIN_PAGES = max(1, int(os.getenv("AUTO_OVERLAP_MIN_PAGES", "20")))
 def resolve_pipeline_mode(mode: str, n_pages: int) -> str:
     """Map 'auto' (or an unknown value) to a concrete mode for this job size."""
     if mode not in PIPELINE_MODES or mode == "auto":
+        try:
+            from core.renderer import lama_uses_gpu
+            if lama_uses_gpu():
+                # GPU LaMa (+ GPU OCR) must not share the 4 GB card with the LLM: serial keeps
+                # the stages apart (extract -> translate -> render) (B28).
+                return "serial"
+        except Exception:
+            pass
         return "overlap" if n_pages >= AUTO_OVERLAP_MIN_PAGES else "serial"
     return mode
 # Measured 2026-09-28 (第5巻 p1-10, RTX 3050 4GB + 12 threads): serial 109.2s vs stream 129.7s,
@@ -219,7 +227,7 @@ async def preload_all_models():
         import numpy as np
         from PIL import Image
         from core import extractor as ex
-        from core.renderer import preload_lama
+        from core.renderer import preload_lama, lama_uses_gpu
         steps = [
             ("placement", ex.prepare_extract_devices),
             ("comic_detector", ex._get_comic_detector),
@@ -228,6 +236,14 @@ async def preload_all_models():
             ("lama", preload_lama),
         ]
         for name, fn in steps:
+            # GPU models are NOT kept resident at boot: next to the LLM they overflow the 4 GB
+            # card and the LLM slows down ~4x (B28). They load in 1-2 s when a job needs them.
+            if name == "lama" and lama_uses_gpu():
+                logger.info("[Preloader] lama: GPU backend, loaded on demand when rendering starts")
+                continue
+            if name in ("comic_detector", "manga_ocr", "paddle_ocr") and ex._PLACEMENT.get(name) == "gpu":
+                logger.info(f"[Preloader] {name}: placed on GPU, loaded on demand when extraction starts")
+                continue
             t = time.time()
             try:
                 obj = fn()
@@ -384,7 +400,7 @@ async def translation_worker():
             )
             
             # Semaphore to restrict GPU inpainting to 1 concurrent task to guarantee 4GB VRAM safety
-            from core.renderer import LAMA_PARALLEL, reset_render_stats, get_render_stats, preload_lama
+            from core.renderer import LAMA_PARALLEL, reset_render_stats, get_render_stats, preload_lama, lama_uses_gpu
             render_sem = asyncio.Semaphore(LAMA_PARALLEL)
             reset_render_stats()
             lama_preload = None
@@ -564,7 +580,8 @@ async def translation_worker():
                 from core.extractor import unload_models as unload_ocr
                 released = await asyncio.to_thread(unload_ocr)
                 _mark("ocr_unloaded")
-                start_lama_preload()
+                if not lama_uses_gpu():
+                    start_lama_preload()
                 logger.info(f"[Pipeline] OCR models released: {sorted(released or [])} "
                             "(GPU ones always; CPU ones only when RAM is low, see OCR_UNLOAD).")
 
@@ -580,7 +597,9 @@ async def translation_worker():
                     pages.append(p)
                 pages.sort(key=lambda x: x["page_num"])
                 await unload_ocr_models()
-                start_lama_preload()  # CPU is idle while the LLM translates
+                if not lama_uses_gpu():
+                    start_lama_preload()  # CPU is idle while the LLM translates (CPU LaMa only;
+                                          # GPU LaMa waits until the LLM is done: B28)
 
                 # Group whole pages so each engine call carries up to context_chunk_size lines
                 to_render, group, n_lines = [], [], 0
@@ -650,6 +669,10 @@ async def translation_worker():
             total_metrics["extract_devices"] = {k: v for k, v in extract_devices.items() if not k.startswith("_")}
             total_metrics["stage_times"] = stage_times
             total_metrics["render_breakdown"] = get_render_stats()
+            if lama_uses_gpu():
+                # free the GPU for the next job's OCR / translation (LaMa reloads in ~1-2 s)
+                from core.renderer import unload_models as unload_lama
+                await asyncio.to_thread(unload_lama)
             total_metrics["extract_breakdown"] = get_extract_stats()
             logger.info(f"[Timing] mode={pipeline_mode} pages={total_selected_pages} {stage_times}")
 
