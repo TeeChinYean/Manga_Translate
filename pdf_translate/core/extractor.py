@@ -34,7 +34,9 @@ logger = logging.getLogger(__name__)
 _OCR_LOCK = threading.Lock()
 _OCR_READER = None
 
-_MANGA_OCR_LOCK = threading.Lock()
+# RLock: the GPU warm-up runs _manga_ocr_batch while _get_manga_ocr already holds the lock
+# (a plain Lock deadlocked every job once MangaOCR was on CUDA: B27)
+_MANGA_OCR_LOCK = threading.RLock()
 _MANGA_OCR_INSTANCE = None
 
 _COMIC_DETECTOR_LOCK = threading.Lock()
