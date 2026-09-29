@@ -158,7 +158,7 @@ def main():
             elif fn == "quant":
                 qm = quant_decoder()
                 fn = (lambda m=qm: run_torch(16, m=m))
-            keep = pix_all
+            keep = list(pix_all)
             pix_all[:] = keep[:16]
             fn()                                   # warm-up on 16 crops
             pix_all[:] = keep
