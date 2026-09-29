@@ -142,10 +142,33 @@ def _llm_expected_mb():
                 vals = [v.get("measured_used_mb") for k, v in cal.items()
                         if k.startswith("docker.io/ai/qwen3.5:4b") and "|ub512|" in k and v.get("measured_used_mb")]
                 if vals:
-                    return int(vals[0])
+                    return _remember_llm_best(int(vals[0]))
             except Exception:
                 pass
-    return None
+    return _remember_llm_best(None)
+
+
+_LLM_BEST_FILE = os.path.join(os.path.dirname(os.path.abspath(__file__)), "..", "data", "llm_vram_best.json")
+
+
+def _remember_llm_best(mb):
+    """The launcher overwrites its measurement on every start, also after a start that was
+    already partly evicted (measured 2317 MB vs 3184 MB fully resident). Keep the best value
+    ever seen so the eviction check keeps working (B29)."""
+    import json
+    best = None
+    try:
+        best = int(json.load(open(_LLM_BEST_FILE, encoding="utf-8")).get("best_mb") or 0) or None
+    except Exception:
+        pass
+    if mb and (best is None or mb > best):
+        best = mb
+        try:
+            os.makedirs(os.path.dirname(_LLM_BEST_FILE), exist_ok=True)
+            json.dump({"best_mb": best}, open(_LLM_BEST_FILE, "w", encoding="utf-8"))
+        except Exception:
+            pass
+    return best
 
 
 def llm_vram_evicted(used_mb=None, expected_mb=None) -> bool:

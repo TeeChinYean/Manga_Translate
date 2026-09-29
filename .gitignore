@@ -53,6 +53,7 @@ scratch/
 pdf_translate/data/proper_nouns_auto.json
 # Machine-specific measured VRAM cost of extraction models
 pdf_translate/data/gpu_model_vram.json
+pdf_translate/data/llm_vram_best.json
 
 # Isolated CUDA test environment (scratch/setup_cuda_venv.bat)
 .venv-cuda/
