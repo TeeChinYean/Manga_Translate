@@ -93,7 +93,8 @@ flowchart TD
 
 ## 🚀 快速上手使用
 
-###注意###
+###**注意**
+
 需要自己去下载qwen3.5:4b, MangaOCR, EasyOCR, LaMa
 
 ### 1. 安装环境
