@@ -293,6 +293,12 @@ async def translation_worker():
         source_lang = task["source_lang"]
         target_lang = task["target_lang"]
         filename = task["filename"]
+        # Per-manga term dictionary (data/terms/<series>.json): no names leak between series
+        try:
+            from core.engine import set_active_series
+            set_active_series(task.get("series") or filename)
+        except Exception as _te:
+            logger.warning(f"[Terms] cannot load series terms: {_te}")
         page_range = task.get("page_range", "")
         force_retranslate = bool(task.get("force_retranslate", False))
         
@@ -1062,7 +1068,8 @@ async def upload_pdf_file(
     font_scale: float = Form(1.0),
     pipeline_mode: str = Form(DEFAULT_PIPELINE_MODE),
     context_chunk_size: int = Form(DEFAULT_CONTEXT_CHUNK),
-    translate_batch_lines: int = Form(DEFAULT_STREAM_BATCH_LINES)
+    translate_batch_lines: int = Form(DEFAULT_STREAM_BATCH_LINES),
+    series: str = Form("")
 ):
     """
     Uploads the raw PDF file, assigns uuid, applies custom tuning parameters, and queues the task.
@@ -1095,7 +1102,9 @@ async def upload_pdf_file(
         "font_scale": font_scale,
         "pipeline_mode": pipeline_mode if pipeline_mode in PIPELINE_MODES else DEFAULT_PIPELINE_MODE,
         "context_chunk_size": context_chunk_size,
-        "translate_batch_lines": translate_batch_lines
+        "translate_batch_lines": translate_batch_lines,
+        # optional: term dictionary name; empty = derived from the file name (volume removed)
+        "series": (series or "").strip(),
     }
     
     status_db[task_id] = {

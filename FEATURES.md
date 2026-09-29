@@ -199,3 +199,15 @@
 - 实测（第5巻 1-30 页 overlap，修复 B33 后）：173.2s → 144.5s（x1.2），提取 129.9s → 55.5s，翻译 87s 与之前相同（GPU OCR 和 LLM 同时推理没有互相拖慢），LLM 未被挤出；瓶颈转为翻译（translate_done 118.5s）
 - 相关测试：tests/test_manga_gpu_worker.py（`test_overlap_starts_worker_and_unload_stops_it`、页数门槛）
 - 状态：Done
+
+### [Translate] 专有名词库按漫画分开（通用于不同漫画）
+- 说明：删除全局 proper_nouns.json / proper_nouns_auto.json 和 local_translator 里写死的《図書館の大魔術師》人名表；每部漫画一个独立词库，名字不会串到别的漫画
+- 涉及文件/模块：core/engine.py（`series_key_from_filename`、`set_active_series`、`_save_auto_terms`）、core/local_translator.py（改用当前漫画的词库）、main.py（每个任务开始时切换词库；上传接口可选 `series` 字段覆盖）、data/terms/
+- 实现要点：
+  - 系列名 = PDF 文件名去掉卷号/话数/括号标签/末尾数字（「図書館の大魔術師 第5巻」→「図書館の大魔術師」，「One_Piece_Vol.12」→「One Piece」），所以同一系列各卷共用；文件名不分大小写
+  - data/terms/<系列>.json = 人工词库（第一次翻译时自动建空文件 `{}`，可手动填「原文: 译名」）；data/terms/<系列>.auto.json = LLM 自动发现（只做提示，不强制替换；AUTO_PROPER_NOUNS=1 才开启，gitignored）
+  - 原有 295 条 + local_translator 的 13 条英文名已迁移到 data/terms/図書館の大魔術師.json（共 308 条），自动词条迁到 .auto.json
+  - glossary.json（通用 IT/AI 术语）保持全局
+  - 任务是一个接一个执行的，所以切换全局词库是安全的
+- 相关测试：tests/test_terms.py（系列名解析、不同漫画互不影响、自动词条只写入当前漫画、local_translator 不再有写死的名字）
+- 状态：Done

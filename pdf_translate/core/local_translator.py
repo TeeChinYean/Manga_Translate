@@ -15,34 +15,8 @@ import threading
 
 logger = logging.getLogger(__name__)
 
-# ─────────────────────────────────────────────────────────────────────────────
-# Manga-specific proper noun fix table (applied AFTER translation)
-# ─────────────────────────────────────────────────────────────────────────────
-PROPER_NOUN_MAP = {
-    # Character names
-    "Kafna":    "卡夫那",
-    "kafna":    "卡夫那",
-    "KAFNA":    "卡夫那",
-    "Kohkwa":   "库瓦",
-    "kohkwa":   "库瓦",
-    "KOHKWA":   "库瓦",
-    "Kohkwa":   "库瓦",
-    "Ko Hkwa":  "库瓦",
-    "KO HKWA":  "库瓦",
-    "Theo":     "西奥",
-    "THEO":     "西奥",
-    "Sae":      "萨埃",
-    "SAE":      "萨埃",
-    "Tepel":    "特佩尔",
-    "TEPEL":    "特佩尔",
-    "Sedona":   "塞多纳",
-    "Medina":   "麦地那",
-    "Amun":     "阿蒙",
-    "Hyron":    "亥隆",
-    "Kadira":   "卡迪拉",
-    # Series title
-    "Magus of the Library": "圕的大魔法师",
-}
+# Proper nouns come from the active manga series' term file (core.engine, data/terms/),
+# so this translator no longer carries one manga's names for every book.
 
 # OCR garbage patterns that should NOT be translated (return empty string)
 _NOISE_PATTERNS = [
@@ -83,9 +57,15 @@ def _is_noise(text: str) -> bool:
 
 
 def _apply_proper_nouns(text: str) -> str:
-    """Replace proper nouns after translation."""
-    for en, zh in PROPER_NOUN_MAP.items():
-        text = text.replace(en, zh)
+    """Replace the active series' curated proper nouns after translation."""
+    try:
+        from core import engine as _engine
+        terms = dict(_engine._PROPER_NOUNS)
+        replace = _engine._replace_term
+    except Exception:
+        return text
+    for src, tgt in terms.items():
+        text = replace(text, src, tgt)
     return text
 
 

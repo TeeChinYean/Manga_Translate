@@ -444,10 +444,13 @@ def _call_turbovec_llm_raw(payload: dict, timeout: float = 15.0):
     return None
 
 # ── Proper noun pre-fixes and glossary loaded from JSON ───────────────────────
+# Terms are PER MANGA SERIES (data/terms/<series>.json), so names from one manga never leak
+# into another. The series comes from the PDF name with the volume removed
+# ("図書館の大魔術師 第5巻.pdf" -> "図書館の大魔術師"), so all volumes of a series share it.
 # Two tiers (BUG.md B5):
-#   _PROPER_NOUNS : curated terms (proper_nouns.json + glossary.json). Used for exact-match
-#                   overrides, input/output canonicalization and prompt hints.
-#   _AUTO_TERMS   : terms the LLM discovered at runtime (proper_nouns_auto.json). Unverified,
+#   _PROPER_NOUNS : curated terms (terms/<series>.json, user-editable, + generic glossary.json).
+#                   Used for exact-match overrides, input/output canonicalization, prompt hints.
+#   _AUTO_TERMS   : terms the LLM discovered at runtime (terms/<series>.auto.json). Unverified,
 #                   so they are ONLY offered to the LLM as prompt hints, never force-applied.
 # Every term passes _is_valid_term(); ASCII terms only match on word boundaries so that
 # junk like "K" / "SO" / "5" can no longer rewrite unrelated text.
@@ -457,9 +460,11 @@ from functools import lru_cache
 _DATA_DIR = os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__))), "data")
 _PROPER_NOUNS = {}
 _AUTO_TERMS = {}
-_PROPER_NOUNS_PATH = os.path.join(_DATA_DIR, "proper_nouns.json")
-_AUTO_TERMS_PATH = os.path.join(_DATA_DIR, "proper_nouns_auto.json")
+_TERMS_DIR = os.path.join(_DATA_DIR, "terms")
+_PROPER_NOUNS_PATH = ""      # set by set_active_series(); "" = no series (glossary only)
+_AUTO_TERMS_PATH = ""
 _GLOSSARY_PATH = os.path.join(_DATA_DIR, "glossary.json")
+ACTIVE_SERIES = ""
 _TERMS_LOCK = threading.Lock()
 # Off by default: measured ~10s per page (31% of translation time) for ~11 tokens of output.
 AUTO_PROPER_NOUNS_ENABLED = os.getenv("AUTO_PROPER_NOUNS", "0") == "1"
@@ -535,10 +540,63 @@ def _load_terms():
         if _is_valid_term(k, v) and k not in _PROPER_NOUNS:
             _AUTO_TERMS[k.strip()] = v.strip()
     if rejected:
-        logger.warning(f"[Terms] Ignored {rejected} invalid entries in proper_nouns.json (single letters, digits, no-op mappings).")
+        logger.warning(f"[Terms] Ignored {rejected} invalid entries in {os.path.basename(_PROPER_NOUNS_PATH)} "
+                       "(single letters, digits, no-op mappings).")
 
 
-_load_terms()
+_VOLUME_PATTERNS = [
+    re.compile(r"第\s*[0-9０-９一二三四五六七八九十百〇零]+\s*[巻卷集話话冊册部]"),
+    re.compile(r"[0-9]+\s*[巻卷冊册]"),
+    re.compile(r"(?i)(?<![a-z])(?:vol(?:ume)?|v|ch(?:apter)?|ep(?:isode)?|book|tome|part)\.?\s*[0-9]+"),
+    re.compile(r"[(\[（【［][^)\]）】］]*[)\]）】］]"),     # (scanlator) [tags] 【完】
+]
+
+
+def series_key_from_filename(filename: str) -> str:
+    """Series name from a PDF file name: volume / chapter markers, bracket tags and trailing
+    numbers removed, so every volume of one manga maps to the same term file."""
+    import unicodedata
+    name = os.path.splitext(os.path.basename(filename or ""))[0]
+    name = unicodedata.normalize("NFKC", name)
+    for pat in _VOLUME_PATTERNS:
+        name = pat.sub(" ", name)
+    name = re.sub(r"[_\-~～・.]+", " ", name)
+    name = re.sub(r"\s+[0-9]+\s*$", "", " " + name).strip()   # "Title 05" -> "Title"
+    return " ".join(name.split())
+
+
+def _safe_series_file(key: str) -> str:
+    safe = re.sub(r'[<>:"/\\|?*\x00-\x1f]', "_", key).strip(" .")[:80]
+    return safe or "_default"
+
+
+def set_active_series(name_or_filename: str) -> str:
+    """Load the term files of one manga series (called once per task; tasks run one at a time).
+    Creates an empty terms/<series>.json the user can fill in. Returns the series key."""
+    global _PROPER_NOUNS_PATH, _AUTO_TERMS_PATH, ACTIVE_SERIES
+    key = series_key_from_filename(name_or_filename) if name_or_filename else ""
+    with _TERMS_LOCK:
+        _PROPER_NOUNS.clear()
+        _AUTO_TERMS.clear()
+        if key:
+            base = os.path.join(_TERMS_DIR, _safe_series_file(key.casefold()))   # "ONE PIECE" == "One Piece"
+            _PROPER_NOUNS_PATH, _AUTO_TERMS_PATH = base + ".json", base + ".auto.json"
+            if not os.path.exists(_PROPER_NOUNS_PATH):
+                try:
+                    os.makedirs(_TERMS_DIR, exist_ok=True)
+                    with open(_PROPER_NOUNS_PATH, "w", encoding="utf-8") as f:
+                        f.write("{}\n")
+                except Exception as e:
+                    logger.warning(f"[Terms] cannot create {_PROPER_NOUNS_PATH}: {e}")
+        else:
+            _PROPER_NOUNS_PATH, _AUTO_TERMS_PATH = "", ""
+        ACTIVE_SERIES = key
+        _load_terms()
+    logger.info(f"[Terms] series={key or '-'}: {len(_PROPER_NOUNS)} curated + {len(_AUTO_TERMS)} auto terms")
+    return key
+
+
+_load_terms()   # no series yet: generic glossary only
 
 
 def _get_relevant_glossary(texts: list) -> dict:
@@ -897,6 +955,9 @@ def _filter_discovered_terms(parsed: dict, sources: list, translations: list) ->
 
 def _save_auto_terms():
     """Atomic write of the auto-discovered terms file (caller holds _TERMS_LOCK)."""
+    if not _AUTO_TERMS_PATH:
+        return          # no active series: keep discoveries in memory only
+    os.makedirs(os.path.dirname(_AUTO_TERMS_PATH), exist_ok=True)
     tmp = _AUTO_TERMS_PATH + ".tmp"
     with open(tmp, "w", encoding="utf-8") as f:
         json.dump(_AUTO_TERMS, f, ensure_ascii=False, indent=4)
@@ -905,7 +966,7 @@ def _save_auto_terms():
 
 def _extract_proper_nouns_from_batch(blocks: list, results: list):
     """
-    用 LLM 分析刚才这批翻译，提取可能遗漏的专有名词，写入 proper_nouns_auto.json。
+    用 LLM 分析刚才这批翻译，提取可能遗漏的专有名词，写入当前漫画的 terms/<series>.auto.json。
     这些词条未经人工确认，只作为后续 prompt 的参考，不会强制替换原文/译文（BUG.md B5）。
     设置环境变量 AUTO_PROPER_NOUNS=0 可关闭（省去每批一次 LLM 调用）。
     """
@@ -924,7 +985,7 @@ def _extract_proper_nouns_from_batch(blocks: list, results: list):
     if not pairs:
         return
         
-    prompt = "以下是一批漫画翻译对话。请提取其中明显的【特有专有名词】（如角色名、地名、特有招式等），特别是全大写的英文/罗马音单词或特殊称谓。如果没有发现专有名词，请返回空字典。严格输出纯 JSON，格式如: {\"KAFNA\": \"卡夫娜\", \"TEPEL\": \"泰佩尔\"}。\n\n" + "\n".join(pairs)
+    prompt = "以下是一批漫画翻译对话。请提取其中明显的【特有专有名词】（如角色名、地名、特有招式等），特别是全大写的英文/罗马音单词或特殊称谓。如果没有发现专有名词，请返回空字典。严格输出纯 JSON，格式如: {\"原文专有名词\": \"中文译名\"}。\n\n" + "\n".join(pairs)
     
     payload = {
         "model": TURBOVEC_MODEL,
