@@ -189,6 +189,12 @@ def main():
                 ps.append(99.0 if mse < 1e-9 else 10 * np.log10(255 ** 2 / mse))
             print(f"     PSNR vs production (inside mask): min {min(ps):.1f} dB, median {np.median(ps):.1f} dB"
                   "  (same model family; >=30 dB = very close, compare images if lower)")
+            out_dir = os.path.join(ROOT, "scratch", "lama_gpu_compare")
+            os.makedirs(out_dir, exist_ok=True)
+            for k, ((w, m), o, r) in enumerate(zip(windows, outs, ref_out)):
+                tile = np.concatenate([w, np.stack([m] * 3, -1), r, o], axis=1)
+                Image.fromarray(tile).save(os.path.join(out_dir, f"win_{k:02d}_psnr{ps[k]:.0f}.jpg"), quality=90)
+            print(f"     images: {out_dir}  (original | mask | ONNX CPU (production) | torch CUDA)")
     except torch.cuda.OutOfMemoryError:
         print("CUDA: OUT OF MEMORY (the LLM leaves too little VRAM) -> stop the LLM and run again")
 

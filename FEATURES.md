@@ -157,3 +157,10 @@
 - 实现要点：去字后的文字框 ≥85% 为白（≥225）→ 取其所在白色连通区；区域碰到搜索窗口边界或面积 >40 倍文字框 → 视为开放区域跳过；填洞后按气泡尺寸 7% 内缩；以文字中心为轴生成 8 种高度的最大内接矩形（避开同页其他块），逐个试 `_best_font`，取字号最大者；气泡内字号上限 72px；仍保留与已排文字重叠时缩小的保护。单次检测约 60ms。
 - 相关测试：tests/test_bubble_fit.py
 - 状态：Done
+
+### [Extract/Render] GPU：MangaOCR fp16 + LaMa torch CUDA（可选）
+- 说明：实测（scratch/gpu_ocr_lama_check.py，RTX 3050 4GB，LLM 开着 3121MB）：MangaOCR CUDA fp16 x10–11、文字 9/9 一致，+~800MB 显存；LaMa big-lama torch CUDA 0.4s/窗口 vs ONNX CPU 6–7s（x15–17），+~600MB 显存；两者都能挨着 LLM 放下（分阶段使用，不同时）
+- 涉及文件/模块：core/extractor.py（GPU 上自动 fp16，MANGA_OCR_FP16=0 关闭；输入按模型 dtype 转换）；core/gpu_budget.py（manga_ocr 预估 600MB）；core/renderer.py（`_TorchLamaSession`，LAMA_BACKEND=torch 启用，默认 onnx；找不到 CUDA / big-lama.pt 自动回退 ONNX）
+- 实现要点：需要主程序的 Python 装 CUDA 版 PyTorch（目前是 +cpu）；big-lama.pt 默认从 ~/.cache/torch/hub/checkpoints 读取（simple-lama 下载的位置），或 LAMA_TORCH_PATH；torch LaMa 输出与 lama.onnx 不同（PSNR 中位 20.8 dB），需看对比图后再启用
+- 相关测试：tests/test_lama_backend.py、tests/test_manga_batch.py
+- 状态：Done（LaMa torch 默认关闭，待画质确认）

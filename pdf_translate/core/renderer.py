@@ -75,9 +75,68 @@ def preload_lama():
     return _get_lama_session() is not None
 
 
+# ── LaMa backend (ONNX CPU = default; torch big-lama on CUDA = opt-in) ──────────
+# Measured (scratch/gpu_ocr_lama_check.py, RTX 3050 4 GB): ONNX CPU 6.1-7.0 s/window vs torch
+# CUDA 0.39-0.41 s/window (x15-17), +~600 MB VRAM, fits next to the LLM (3121 -> 3824 MB).
+# Output differs from lama.onnx (PSNR median 20.8 dB) -> opt in after checking the images:
+#   LAMA_BACKEND=torch  (needs a CUDA build of PyTorch and big-lama.pt)
+LAMA_BACKEND = os.getenv("LAMA_BACKEND", "onnx").strip().lower()
+_LAMA_TORCH_PATHS = [
+    os.getenv("LAMA_TORCH_PATH", ""),
+    os.path.join(os.path.dirname(os.path.abspath(__file__)), "..", "data", "models", "big-lama.pt"),
+    os.path.join(os.path.expanduser("~"), ".cache", "torch", "hub", "checkpoints", "big-lama.pt"),
+]
+
+
+class _TorchLamaSession:
+    """big-lama TorchScript on CUDA behind the onnxruntime `run()` interface used by
+    _lama_inpaint_crop: feeds l_image_ [1,3,H,W] 0..1 and l_mask_ [1,1,H,W] {0,1}, returns
+    [array 1x3xHxW in 0..255]."""
+
+    def __init__(self, path, device):
+        import torch
+        self.torch = torch
+        self.device = device
+        self.model = torch.jit.load(path, map_location=device).eval()
+        self.lock = threading.Lock()   # one GPU, one stream: serialise calls
+
+    def run(self, _outputs, feeds):
+        torch = self.torch
+        with self.lock, torch.inference_mode():
+            img = torch.from_numpy(feeds["l_image_"]).to(self.device)
+            mask = torch.from_numpy(feeds["l_mask_"]).to(self.device)
+            out = self.model(img, mask)
+            return [(out.clamp(0, 1) * 255.0).float().cpu().numpy()]
+
+
+def _load_torch_lama():
+    try:
+        import torch
+        if not torch.cuda.is_available():
+            logger.info("[LaMa] LAMA_BACKEND=torch but CUDA is not available -> ONNX CPU")
+            return None
+        path = next((p for p in _LAMA_TORCH_PATHS if p and os.path.exists(p)), None)
+        if path is None:
+            logger.info("[LaMa] big-lama.pt not found (set LAMA_TORCH_PATH) -> ONNX CPU")
+            return None
+        t0 = time.time()
+        sess = _TorchLamaSession(path, torch.device("cuda"))
+        _rstat("lama_load", time.time() - t0, n=0)
+        logger.info(f"[LaMa] Loaded big-lama TorchScript on CUDA from {path}")
+        return sess
+    except Exception as e:
+        logger.warning(f"[LaMa] torch backend failed ({e}) -> ONNX CPU")
+        return None
+
+
 def _get_lama_session():
-    """Singleton session for lama.onnx with CPU execution and ORT_DISABLE_ALL for FFC stability."""
+    """Singleton LaMa session: torch CUDA when LAMA_BACKEND=torch works, else lama.onnx on CPU
+    (ORT_DISABLE_ALL for FFC stability)."""
     global _LAMA_SESSION
+    if _LAMA_SESSION is None and LAMA_BACKEND in ("torch", "auto"):
+        with _LAMA_SESSION_LOCK:
+            if _LAMA_SESSION is None:
+                _LAMA_SESSION = _load_torch_lama()
     if _LAMA_SESSION is None:
         with _LAMA_SESSION_LOCK:
             if _LAMA_SESSION is None:

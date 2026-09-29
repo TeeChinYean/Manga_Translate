@@ -27,7 +27,7 @@ logger = logging.getLogger(__name__)
 # Approximate peak VRAM per model (weights + activations at our input sizes).
 MODEL_VRAM_MB = {
     "comic_detector": 700,   # comic-text-detector.onnx @1024x1024
-    "manga_ocr": 900,        # ViT encoder + BERT decoder, fp32, generate()
+    "manga_ocr": 600,        # ViT encoder + BERT decoder, fp16 on CUDA (fp32 measured +791 MB)
     "paddle_ocr": 300,       # PP-OCRv4 det+cls+rec
 }
 DEFAULT_MODEL_VRAM_MB = dict(MODEL_VRAM_MB)

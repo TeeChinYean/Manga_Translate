@@ -412,6 +412,14 @@ def get_extract_stats() -> dict:
 MANGA_OCR_BATCH = max(1, int(os.getenv("MANGA_OCR_BATCH", "16")))
 
 
+def _to_model_dtype(x, model):
+    """Cast pixel values to the model's dtype (fp16 MangaOCR on CUDA)."""
+    dt = getattr(model, "dtype", None)
+    if dt is not None and getattr(x, "dtype", dt) != dt:
+        x = x.to(dt)
+    return x
+
+
 def _manga_ocr_batch(mocr, images, batch_size: int = MANGA_OCR_BATCH) -> list:
     """
     OCR several crops with one encoder/decoder pass per batch instead of one call per crop.
@@ -424,7 +432,7 @@ def _manga_ocr_batch(mocr, images, batch_size: int = MANGA_OCR_BATCH) -> list:
     for i in range(0, len(images), batch_size):
         chunk = images[i:i + batch_size]
         with _MANGA_OCR_LOCK, torch.inference_mode():
-            x = torch.stack([mocr._preprocess(im) for im in chunk]).to(mocr.model.device)
+            x = _to_model_dtype(torch.stack([mocr._preprocess(im) for im in chunk]).to(mocr.model.device), mocr.model)
             out = mocr.model.generate(x, max_new_tokens=64, max_length=None).cpu()
         for row in out:
             texts.append(post_process(mocr.tokenizer.decode(row, skip_special_tokens=True)).strip())
@@ -470,8 +478,12 @@ def _get_manga_ocr():
                         global _MANGA_OCR_INSTANCE
                         _MANGA_OCR_INSTANCE = MangaOcr(pretrained_model_name_or_path=model_ref, force_cpu=not use_gpu)
                         if use_gpu:
+                            # fp16 on CUDA: x10 vs CPU, identical text 9/9, half the VRAM
+                            # (scratch/gpu_ocr_lama_check.py); MANGA_OCR_FP16=0 keeps fp32
+                            if os.getenv("MANGA_OCR_FP16", "1") != "0":
+                                _MANGA_OCR_INSTANCE.model.half()
                             from PIL import Image as _Img
-                            _MANGA_OCR_INSTANCE(_Img.new("RGB", (64, 256), "white"))
+                            _manga_ocr_batch(_MANGA_OCR_INSTANCE, [_Img.new("RGB", (64, 256), "white")])
 
                     if use_gpu:
                         # Measure load + first inference VRAM so later tasks plan with the real cost
@@ -1007,7 +1019,8 @@ class PDFLayoutExtractor:
                     with torch.inference_mode():
                         try:
                             x = mocr._preprocess(crop_img)
-                            tokens = mocr.model.generate(x[None].to(mocr.model.device), max_new_tokens=64, max_length=None)[0].cpu()
+                            tokens = mocr.model.generate(_to_model_dtype(x[None].to(mocr.model.device), mocr.model),
+                                                         max_new_tokens=64, max_length=None)[0].cpu()
                             text = mocr.tokenizer.decode(tokens, skip_special_tokens=True)
                             from manga_ocr.ocr import post_process
                             text = post_process(text)
