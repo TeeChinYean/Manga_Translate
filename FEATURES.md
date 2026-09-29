@@ -191,3 +191,10 @@
 - 实现要点：所有方案差距 ±5%（测量噪声内），不值得改；encoder 占 62%（0.186 s/框），固定 224×224 输入，无法缩小。流水线里实际约 0.5 s/框，比单独测慢 1.65 倍，原因是和 CTD 同时抢 CPU（总 CPU 工作量不变，并行帮不上）
 - 相关测试：无（未改代码）
 - 状态：Done（测量完成，保持 batch 16 / 默认线程）
+
+### [Extract] MangaOCR GPU 子进程也可用于 overlap 模式（测试中）
+- 说明：串行 30 页实测 MANGA_OCR_GPU_WORKER=1：OCR 101.5s → 16.0s，提取 118s → 61.5s，LLM 未被挤出（翻译 81s 与之前相同），全程 175.9s（与 overlap CPU 版 173.2s 持平）。overlap 模式也启动它：提取 GPU OCR + 同时翻译，预期 30 页约 130-140s
+- 涉及文件/模块：main.py（overlap 分支在流水线前调用 start_manga_gpu_worker；提取结束 unload_ocr_models → stop_manga_gpu_worker）
+- 实现要点：仍需 MANGA_OCR_GPU_WORKER=1（默认关）；待用户 bench 确认 GPU OCR 和 LLM 同时推理不会互相拖慢或挤出显存后，再决定是否默认开启
+- 相关测试：tests/test_manga_gpu_worker.py `test_overlap_starts_worker_and_unload_stops_it`
+- 状态：In progress
