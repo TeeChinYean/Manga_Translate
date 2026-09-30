@@ -1089,6 +1089,8 @@
                     <select id="textDirection">
                         <option value="horizontal" selected style="color:black">横排：从左到右（默认）</option>
                         <option value="vertical" style="color:black">竖排：从上到下，列从左到右</option>
+                        <option value="vertical_rtl" style="color:black">竖排：从上到下，列从右到左（日漫读序）</option>
+                        <option value="auto" style="color:black">自动：按原文文字的排列逐框判断（原文竖排 → 竖排，横排 → 横排）</option>
                     </select>
                 </div>
 
@@ -1384,6 +1386,8 @@
                         <select id="beDir" style="flex: 1; padding: 6px 8px; background: rgba(255,255,255,0.08); border: 1px solid rgba(255,255,255,0.15); border-radius: 6px; color: var(--text-primary);">
                             <option value="horizontal" style="color:black">横排（左→右）</option>
                             <option value="vertical" style="color:black">竖排（上→下，列从左到右）</option>
+                            <option value="vertical_rtl" style="color:black">竖排（上→下，列从右到左）</option>
+                            <option value="auto" style="color:black">自动（按原文文字的排列）</option>
                         </select>
                     </label>
                     <button class="btn" id="beOcr" type="button" style="padding: 8px 12px; font-size: 0.85rem;">🔍 识别并翻译此框</button>
@@ -2130,7 +2134,7 @@
                 ctx.fillStyle = col + (sel ? '55' : '2a'); ctx.strokeStyle = sel ? '#ffffff' : col;
                 ctx.fillRect(x, y, w, h); ctx.strokeRect(x, y, w, h);
                 ctx.fillStyle = col; ctx.font = 'bold 12px sans-serif';
-                ctx.fillText('#' + b.id + (b.text ? '' : ' (空)') + (b.dir === 'vertical' ? ' 竖' : ''), x + 3, y + 13);
+                ctx.fillText('#' + b.id + (b.text ? '' : ' (空)') + (b.dir === 'auto' ? ' 自动' : b.dir === 'vertical_rtl' ? ' 竖←' : b.dir === 'vertical' ? ' 竖' : ''), x + 3, y + 13);
                 if (sel) {
                     ctx.fillStyle = '#ffffff'; ctx.strokeStyle = col; ctx.lineWidth = 2;
                     Object.values(beCorners(b)).forEach(([cx, cy]) => {

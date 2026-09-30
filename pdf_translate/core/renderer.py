@@ -475,6 +475,10 @@ V_PITCH = 1.1            # distance between two characters of a column, in font 
 V_COL = 1.25             # column width, in font sizes (same as the horizontal line height)
 V_CLOSING = set("，。、；：！？）】〉》」』”’．,.!?)")           # must not start a column
 V_SHIFT = set("，。、．,.")                                   # small marks sit at the upper right of the cell
+AUTO_VERTICAL_RATIO = 1.0   # direction "auto", fallback: a source box at least this many times taller than wide -> vertical
+TEXT_DIRECTIONS = ("horizontal", "vertical", "vertical_rtl", "auto")   # keep in sync with core.document_skill.DIRECTIONS
+ORIENT_CLEAR_RATIO = 1.5   # ink extent at least this many times longer along one axis: a single line / column
+ORIENT_GAP_RATIO = 1.5     # near-square ink: the axis with the clearly wider gaps separates the lines / columns
 V_ROTATE = set("（）()《》〈〉「」『』【】“”‘’—―…⋯～~-ー[]<>")   # rotated 90 degrees clockwise, like vertical typesetting
 
 
@@ -1302,6 +1306,44 @@ def _text_draw_box(seg, x0: int, y0: int, x1: int, y1: int):
     return tx0, ty0, tx1, ty1
 
 
+def _max_gap(profile) -> int:
+    """Longest run of empty rows / columns strictly between the first and the last inked one."""
+    idx = np.flatnonzero(profile)
+    if len(idx) < 2:
+        return 0
+    return int(np.diff(idx).max()) - 1
+
+
+def _source_orientation(seg, x0: int, y0: int, x1: int, y1: int):
+    """
+    How the ORIGINAL lettering runs inside a box, from the detector's text mask: "vertical"
+    (characters top -> bottom in columns), "horizontal" (lines), or None when it cannot tell
+    (a single character, no mask). A clearly tall / wide ink extent is a single column / line;
+    near-square ink is a multi-column or multi-line block, where the gaps between columns /
+    lines are wider than the gaps between characters.
+    """
+    if seg is None:
+        return None
+    region = np.asarray(seg[y0:y1, x0:x1]) > 0
+    if region.sum() < 30:
+        return None
+    cols, rows = region.sum(axis=0) >= 2, region.sum(axis=1) >= 2      # ignore single-pixel specks
+    xs, ys = np.flatnonzero(cols), np.flatnonzero(rows)
+    if len(xs) == 0 or len(ys) == 0:
+        return None
+    tw, th = int(xs[-1] - xs[0] + 1), int(ys[-1] - ys[0] + 1)
+    if th >= ORIENT_CLEAR_RATIO * tw:
+        return "vertical"
+    if tw >= ORIENT_CLEAR_RATIO * th:
+        return "horizontal"
+    gx, gy = _max_gap(cols), _max_gap(rows)        # gx: between columns, gy: between lines
+    if gx >= 3 and gx >= ORIENT_GAP_RATIO * gy:
+        return "vertical"
+    if gy >= 3 and gy >= ORIENT_GAP_RATIO * gx:
+        return "horizontal"
+    return None
+
+
 GLYPH_SIZE_FACTOR = 1.05   # translated font size <= 1.05 x original glyph size
 
 
@@ -1487,7 +1529,7 @@ class PDFLayoutRenderer:
     def __init__(self, original_pdf_path=None, output_pdf_path=None,
                  ink_thresh: int = 95, dilate_iter: int = 2,
                  max_stroke_ratio: float = 0.35, font_scale: float = 1.0, text_direction: str = "horizontal"):
-        self.text_direction = "vertical" if text_direction == "vertical" else "horizontal"
+        self.text_direction = text_direction if text_direction in TEXT_DIRECTIONS else "horizontal"
         self.original_pdf_path = original_pdf_path
         self.output_pdf_path = output_pdf_path or (original_pdf_path.replace(".pdf", "_translated.pdf") if original_pdf_path else None)
         self.ink_thresh = int(ink_thresh)
@@ -1574,7 +1616,8 @@ class PDFLayoutRenderer:
                 has_telea_masks = True
 
             dx0, dy0, dx1, dy1 = _text_draw_box(seg_full, px0, py0, px1, py1)
-            style = {"glyph_px": glyph_px, "clean_bg": not is_textured}
+            style = {"glyph_px": glyph_px, "clean_bg": not is_textured,
+                     "orient": _source_orientation(seg_full, px0, py0, px1, py1)}
             blocks_to_render.append((dx0, dy0, dx1, dy1, translated, block, style))
 
         if has_lama_masks:
@@ -1600,6 +1643,9 @@ class PDFLayoutRenderer:
         page_glyph = int(np.median(known)) if known else 0
         plans, placed = [], []
         # Boxes the user drew / moved / re-typed in the box editor are always drawn (B38)
+        orients = [(it[6] if len(it) > 6 else {}).get("orient") for it in blocks_to_render]
+        n_v, n_h = orients.count("vertical"), orients.count("horizontal")
+        page_prior = "vertical" if n_v > n_h else "horizontal" if n_h > n_v else None   # for boxes the mask can't tell
         dup = {i for i in _nested_duplicates(boxes) if not blocks_to_render[i][5].get("user_edited")}
         for idx, item in enumerate(blocks_to_render):
             if idx in dup:
@@ -1608,7 +1654,8 @@ class PDFLayoutRenderer:
             px0, py0, px1, py1, translated, block = item[:6]
             style = item[6] if len(item) > 6 else {}
             others = [bx for j, bx in enumerate(boxes) if j != idx and j not in dup]
-            vertical = self._is_vertical(block)
+            resolved = self._resolve_direction(block, (px0, py0, px1, py1), orients[idx], page_prior)
+            vertical, rtl = resolved != "horizontal", resolved == "vertical_rtl"
             fit = _best_font_vertical if vertical else _best_font
             cands = _bubble_rects(gray, (px0, py0, px1, py1), others) if style.get("clean_bg") else None
             bubble = None
@@ -1637,6 +1684,8 @@ class PDFLayoutRenderer:
             for _attempt in range(TYPESET_MAX_TRIES):
                 font, lines, fs = fit(translated, bw, bh, font_scale=self.font_scale,
                                       max_size=cap, min_size=MIN_FONT_PX)
+                if rtl:
+                    lines = lines[::-1]   # first column at the right, like the original manga
                 if vertical:   # columns left -> right, characters top -> bottom
                     colw, pitch = fs * V_COL, fs * V_PITCH
                     total_w, total_h = len(lines) * colw, max(len(c) for c in lines) * pitch
@@ -1668,9 +1717,23 @@ class PDFLayoutRenderer:
             plans.append((px0, py0, bw, bh, translated, block, style, font, lines, fs, widths, top))
         return plans
 
-    def _is_vertical(self, block) -> bool:
-        """Per-box direction (box editor) wins over the task's default."""
-        return (block.get("direction") or self.text_direction) == "vertical"
+    def _resolve_direction(self, block, box=None, orient=None, prior=None) -> str:
+        """
+        "horizontal", "vertical" (columns left -> right) or "vertical_rtl" (columns right -> left).
+        A per-box direction (box editor) wins over the task's default. "auto" follows how the ORIGINAL
+        text runs: the detector's mask (`orient`), else the page's majority, else the source box's shape
+        (taller than wide = vertical).
+        """
+        direction = block.get("direction") or self.text_direction
+        if direction != "auto":
+            return direction if direction in TEXT_DIRECTIONS else "horizontal"
+        found = orient or prior
+        if found is None and box:
+            found = "vertical" if (box[3] - box[1]) >= AUTO_VERTICAL_RATIO * (box[2] - box[0]) else "horizontal"
+        return "vertical" if found == "vertical" else "horizontal"
+
+    def _is_vertical(self, block, box=None, orient=None, prior=None) -> bool:
+        return self._resolve_direction(block, box, orient, prior) != "horizontal"
 
     def _draw_translations(self, healed, blocks_to_render):
         """Draw translated CJK text into `healed` in place (shared by page render and preview)."""
@@ -1828,7 +1891,8 @@ class PDFLayoutRenderer:
                 _merge_into(mask_np, *bm)
             mask_np[py0:py1, px0:px1] = np.maximum(mask_np[py0:py1, px0:px1], stroke_mask)
             dx0, dy0, dx1, dy1 = _text_draw_box(seg_full, px0, py0, px1, py1)
-            style = {"glyph_px": glyph_px, "clean_bg": not is_textured}
+            style = {"glyph_px": glyph_px, "clean_bg": not is_textured,
+                     "orient": _source_orientation(seg_full, px0, py0, px1, py1)}
             blocks_to_render.append((dx0, dy0, dx1, dy1, translated, block, style))
 
         # 3. Create Mask Overlay visualization (Hot magenta / crimson highlight on original image)

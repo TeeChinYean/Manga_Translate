@@ -334,3 +334,10 @@
 - 实现要点：模型权重本来就不在仓库里（`.gitignore` 排除 `*.onnx/*.bin/...`）；PyMuPDF 是 AGPL-3.0，个人本地使用无额外要求，打包分发或做网络服务需看 THIRD_PARTY_NOTICES.md 的说明；已核对的许可证：comic-text-detector GPL-3.0、manga-ocr 与 manga-ocr-base Apache-2.0、EasyOCR / RapidOCR Apache-2.0、big-lama 权重页 Apache-2.0、Qwen3.5-4B Apache-2.0
 - 相关测试：tests/test_open_source_ready.py（LICENSE 为 MIT、第三方声明覆盖 README 提到的模型、仓库不含 GPL 源码和模型权重、README 无截图并链接许可证、export_onnx 不依赖内置源码），已接入 test_pre_commit
 - 状态：Done（公开前还有待确认项，见「待确认问题」）
+
+### [Home] 译文排版方向新增「竖排·列从右到左」和「自动」
+- 说明：「译文排版方向」现在有四个选项：横排、竖排（列从左到右）、竖排（列从右到左，日漫读序）、自动。「自动」逐框判断：先看渲染时检测到的原文文字掩膜（seg mask）——原文是一整列 / 一整行就直接判定；接近正方形的多列 / 多行块，比较列间距与字间距哪个轴的空隙明显更宽；仍判断不出来（如只有一个字）就取本页多数框的方向，再不行才用框形状（高 ≥ 宽 → 竖排）。全局下拉和框编辑器单框下拉都有这些选项；单框明确选择的优先于全局；「自动」判断出的竖排列顺序为从左到右
+- 涉及文件/模块：`core/renderer.py`（`_source_orientation`、`_resolve_direction`、`TEXT_DIRECTIONS`；右到左 = 排好的列整体倒序）、`core/document_skill.py`（`DIRECTIONS`）、`main.py`（`normalize_direction`）、`templates/index.html`
+- 实现要点：orient 在 `_build_masks` 里由 `_source_orientation` 写进每个框的 style；框编辑器里「自动」框只显示「自动」（判断要等渲染时的掩膜，编辑器里预先不知道）；默认值仍是「横排」，旧行为不变
+- 相关测试：tests/test_text_direction.py（掩膜判断单列 / 单行 / 多列 / 多行 / 无法判断、按原文而非框形状、本页多数兜底、右到左列顺序、方向常量同步、JSON 往返、上传参数、页面控件）
+- 状态：Done（自动判断的准确度需要用真实漫画页确认，见「待确认问题」）

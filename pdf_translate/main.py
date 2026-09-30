@@ -367,6 +367,17 @@ async def startup_event():
 # in the box editor, then the pages are rendered once with the corrected boxes ──
 REVIEW_TIMEOUT_SEC = int(os.getenv("REVIEW_TIMEOUT_SEC", "3600"))   # nobody answers: continue unchanged
 review_waits = {}      # task_id -> {"event": asyncio.Event, "payload": {page: rows} | None}
+
+
+from core.document_skill import DIRECTIONS  # noqa: E402
+
+
+def normalize_direction(value) -> str:
+    """Lettering direction of the translation: horizontal (default), vertical (columns left -> right),
+    vertical_rtl (columns right -> left) or auto (per box, from how the original text runs)."""
+    return value if value in DIRECTIONS else "horizontal"
+
+
 MOVE_TOL_PT = 1.0      # a box that moved / resized by more than this (PDF points) counts as changed
 
 
@@ -591,7 +602,7 @@ async def translation_worker():
             max_stroke_ratio = float(task.get("max_stroke_ratio", 0.35))
             font_scale = float(task.get("font_scale", 1.0))
 
-            text_direction = "vertical" if task.get("text_direction") == "vertical" else "horizontal"
+            text_direction = normalize_direction(task.get("text_direction"))
             renderer = PDFLayoutRenderer(
                 pdf_path,
                 None,
@@ -1581,7 +1592,7 @@ async def upload_pdf_file(
         # pause after extraction + translation so the user can fix boxes before anything is rendered
         "review_first": bool(review_first) and correction_rows is None,
         # lettering of the translation: "horizontal" (left -> right) or "vertical" (top -> bottom, columns left -> right)
-        "text_direction": "vertical" if text_direction == "vertical" else "horizontal",
+        "text_direction": normalize_direction(text_direction),
     }
     
     status_db[task_id] = {
