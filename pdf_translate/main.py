@@ -363,6 +363,110 @@ async def startup_event():
 # ----------------------------------------------------
 # Asynchronous Background Queue Worker Pipeline
 # ----------------------------------------------------
+# ── Review before render ("先调框"): pause after extraction + translation, the user fixes boxes / text
+# in the box editor, then the pages are rendered once with the corrected boxes ──
+REVIEW_TIMEOUT_SEC = int(os.getenv("REVIEW_TIMEOUT_SEC", "3600"))   # nobody answers: continue unchanged
+review_waits = {}      # task_id -> {"event": asyncio.Event, "payload": {page: rows} | None}
+MOVE_TOL_PT = 1.0      # a box that moved / resized by more than this (PDF points) counts as changed
+
+
+def build_edit_pages(layout_pages: list, tmap: dict) -> list:
+    """Bubbles + translations of the given layout pages, in the shape the box editor loads."""
+    out = []
+    for p_data in layout_pages:
+        out.append({
+            "page": p_data["page_num"],
+            "w": float(p_data.get("page_width") or 0), "h": float(p_data.get("page_height") or 0),
+            "blocks": [{"id": blk.get("id"), "bbox": [float(v) for v in blk.get("bbox")],
+                        "raw": blk.get("cleaned_text", blk.get("text", "")),
+                        "text": tmap.get((p_data["page_num"], blk.get("id")), "")}
+                       for blk in p_data.get("blocks", []) if blk.get("bbox")],
+        })
+    return out
+
+
+def plan_review(pages: list, rows_by_page: dict, tmap: dict) -> dict:
+    """
+    Apply the user's box edits to the layout pages IN PLACE (before rendering).
+    rows_by_page: {page: [{"id","bbox","text","raw","edited"}]} (only pages the user changed).
+    A box missing from the rows was deleted. A box that moved / was resized while its translation was
+    left as it was, and a new box with no text at all, need OCR + translation again -> `need_ocr`.
+    Returns {"need_ocr": [(page, block)], "pages": [changed page numbers], "removed": n}.
+    """
+    from core.document_skill import blocks_from_corrections
+    by_num = {p["page_num"]: p for p in pages}
+    need, changed, removed = [], [], 0
+    for num in sorted(rows_by_page):
+        page = by_num.get(num)
+        if page is None:
+            continue
+        old = {b["id"]: b for b in page.get("blocks", [])}
+        new_blocks = []
+        for r in rows_by_page[num]:
+            blk = blocks_from_corrections([r])[0]
+            o = old.get(r["id"])
+            if o is not None:
+                blk["text"] = o.get("text", blk["text"])
+                blk["cleaned_text"] = o.get("cleaned_text", blk["text"])
+                blk["ocr_engine"] = o.get("ocr_engine", blk["ocr_engine"])
+                moved = any(abs(a - b) > MOVE_TOL_PT for a, b in zip(r["bbox"], o["bbox"]))
+                typed = r["text"] != tmap.get((num, r["id"]), "")
+                if moved and not typed:
+                    need.append((num, blk))
+                if moved or typed:
+                    blk["user_edited"] = True
+            else:   # drawn by the user
+                blk["user_edited"] = True
+                if not r["text"].strip() and not r["raw"].strip():
+                    need.append((num, blk))
+            tmap[(num, r["id"])] = r["text"]
+            new_blocks.append(blk)
+        gone = set(old) - {r["id"] for r in rows_by_page[num]}
+        for bid in gone:
+            tmap.pop((num, bid), None)
+        removed += len(gone)
+        page["blocks"] = new_blocks
+        changed.append(num)
+    return {"need_ocr": need, "pages": changed, "removed": removed}
+
+
+def review_reocr(items: list, pdf_path: str, source_lang: str, target_lang: str, engine, tmap: dict,
+                 context_chunk_size: int = 12) -> list:
+    """
+    OCR + translate (+ language check) the boxes in `items` [(page, block)], in place, and store the
+    translations in `tmap`. Returns [(page, block id)] of boxes where no text was recognised (they
+    keep the original lettering).
+    """
+    from core.extractor import ocr_region
+    blank, todo = [], []
+    for num, blk in items:
+        raw = ""
+        try:
+            raw = (ocr_region(pdf_path, num, blk["bbox"], source_lang) or "").strip()
+        except Exception as ex:
+            logger.warning(f"[Review] OCR failed on page {num} #{blk['id']}: {ex}")
+        if not raw:
+            blk["text"] = blk["cleaned_text"] = ""
+            tmap[(num, blk["id"])] = ""
+            blank.append((num, blk["id"]))
+            continue
+        blk["text"] = blk["cleaned_text"] = raw
+        todo.append((num, blk))
+    if todo:
+        combined = [{"id": i, "text": blk["text"]} for i, (_, blk) in enumerate(todo)]
+        engine.translate_batch(combined, source_lang=source_lang, target_lang=target_lang,
+                               context_chunk_size=context_chunk_size)
+        for i, (num, blk) in enumerate(todo):
+            blk["translated_text"] = combined[i].get("translated_text", "") or ""
+        try:
+            apply_language_check(todo, engine, source_lang, target_lang, context_chunk_size)
+        except Exception as ex:
+            logger.warning(f"[Review] language check skipped: {ex}")
+        for num, blk in todo:
+            tmap[(num, blk["id"])] = blk.get("translated_text", "") or ""
+    return blank
+
+
 async def translation_worker():
     """
     Main loop monitoring translation_queue. Runs tasks asynchronously.
@@ -385,6 +489,8 @@ async def translation_worker():
         corrections = task.get("corrections")
         unmatched_rows = {}   # re-insert: {page_num: corrected rows that matched no bubble}
         language_fixes = []   # language check reports (LLM translations that had to be fixed)
+        review_first = bool(task.get("review_first")) and corrections is None   # pause before rendering
+        review_notes = []     # review: messages for the completion warning
         flagged_rows = []     # re-insert: corrected rows with foreign letters / symbols (only warned)
         
         status_db[task_id] = {
@@ -711,6 +817,49 @@ async def translation_worker():
                 if task_id in cancelled_tasks:
                     raise PipelineCancelled("Task cancelled by user.")
 
+            async def review_pause(pages):
+                """Wait for the user to fix boxes / text in the editor (POST /api/v1/translate/review/<id>),
+                then apply the edits to `pages` before they are rendered. Cancel and timeout are honoured."""
+                wait = {"event": asyncio.Event(), "payload": None}
+                review_waits[task_id] = wait
+                status_db[task_id] = {
+                    "percent": 45, "stage": "翻译完成，等待你调整检测框（调好后点「继续重绘」）", "status": "review",
+                    "edit_data": {"pages": build_edit_pages(pages, translated_text_map), "source_lang": source_lang},
+                    "metrics": total_metrics}
+                logger.info(f"[Review] task {task_id}: waiting for the user (timeout {REVIEW_TIMEOUT_SEC}s)")
+                t_wait = time.monotonic()
+                try:
+                    while not wait["event"].is_set():
+                        _check_cancel()
+                        if time.monotonic() - t_wait > REVIEW_TIMEOUT_SEC:
+                            logger.warning(f"[Review] task {task_id}: no answer, continuing unchanged")
+                            break
+                        try:
+                            await asyncio.wait_for(wait["event"].wait(), timeout=0.5)
+                        except asyncio.TimeoutError:
+                            pass
+                finally:
+                    review_waits.pop(task_id, None)
+                total_metrics["review_wait_s"] = round(time.monotonic() - t_wait, 1)
+                rows = wait["payload"] or {}
+                status_db[task_id] = {"percent": 45, "stage": "按调整后的检测框重绘中", "status": "processing",
+                                      "metrics": total_metrics}
+                if not rows:
+                    return
+                plan = plan_review(pages, rows, translated_text_map)
+                logger.info(f"[Review] task {task_id}: edited pages {plan['pages']}, removed {plan['removed']} box(es), "
+                            f"{len(plan['need_ocr'])} box(es) to recognise again")
+                if plan["need_ocr"]:
+                    status_db[task_id]["stage"] = f"重新识别并翻译 {len(plan['need_ocr'])} 个改动的框"
+                    _check_cancel()
+                    blank = await asyncio.to_thread(review_reocr, plan["need_ocr"], pdf_path, source_lang,
+                                                    target_lang, translation_engine, translated_text_map,
+                                                    context_chunk_size)
+                    if blank:
+                        review_notes.append("重新识别时没读到文字的框（保留原文）: "
+                                            + ", ".join(f"第{p}页#{i}" for p, i in blank))
+                status_db[task_id]["stage"] = "按调整后的检测框重绘中"
+
             async def run_serial():
                 """Mode 'serial': extract ALL -> unload OCR -> translate ALL (big context) -> render ALL."""
                 # MangaOCR on the GPU in a child process for the extraction stage only (B30);
@@ -741,6 +890,9 @@ async def translation_worker():
                 if group:
                     _check_cancel()
                     to_render += await translate_pages(group, context_chunk_size)
+
+                if review_first:
+                    await review_pause(pages)
 
                 # Nothing else runs now, so render several pages at once: while one page waits
                 # for LaMa, others do masks / Telea / text drawing / JPEG encoding.
@@ -832,7 +984,7 @@ async def translation_worker():
                 extraction_warning = "；".join(w for w in (extraction_warning, build_unmatched_warning(unmatched_rows)) if w)
             from core.text_check import build_language_warning, build_flagged_warning
             extraction_warning = "；".join(w for w in (extraction_warning, build_language_warning(language_fixes),
-                                                     build_flagged_warning(flagged_rows)) if w)
+                                                     build_flagged_warning(flagged_rows), *review_notes) if w)
             if extraction_warning:
                 logger.warning(f"Task {task_id}: {extraction_warning}")
 
@@ -906,18 +1058,8 @@ async def translation_worker():
                     script_pages.append({"page_num": p_num, "blocks": p_blocks})
 
             # Bubbles + translations for the box editor (page image comes from /api/v1/edit/...)
-            edit_pages = []
-            for p_data in layout_data:
-                if p_data["page_num"] not in selected_pages:
-                    continue
-                edit_pages.append({
-                    "page": p_data["page_num"],
-                    "w": float(p_data.get("page_width") or 0), "h": float(p_data.get("page_height") or 0),
-                    "blocks": [{"id": blk.get("id"), "bbox": [float(v) for v in blk.get("bbox")],
-                                "raw": blk.get("cleaned_text", blk.get("text", "")),
-                                "text": translated_text_map.get((p_data["page_num"], blk.get("id")), "")}
-                               for blk in p_data.get("blocks", []) if blk.get("bbox")],
-                })
+            edit_pages = build_edit_pages([p for p in layout_data if p["page_num"] in selected_pages],
+                                          translated_text_map)
             if base_result:   # earlier pages stay in the Excel script and stay editable
                 done = {ep["page"] for ep in edit_pages}
                 for bp, bdata in sorted(base_result["data"].items()):
@@ -1357,7 +1499,8 @@ async def upload_pdf_file(
     series: str = Form(""),
     corrections: UploadFile = File(None),
     corrections_json: str = Form(""),
-    base_task_id: str = Form("")
+    base_task_id: str = Form(""),
+    review_first: bool = Form(False)
 ):
     """
     Uploads the raw PDF file, assigns uuid, applies custom tuning parameters, and queues the task.
@@ -1369,6 +1512,8 @@ async def upload_pdf_file(
 
     correction_rows = None
     base = ""
+    if review_first:
+        pipeline_mode = "serial"   # only serial has one point where everything is translated but nothing rendered
     if corrections is not None and corrections.filename:
         correction_rows, meta = await _load_corrections(corrections, file)
         # Same pages and render parameters as the run that produced the script
@@ -1427,6 +1572,8 @@ async def upload_pdf_file(
         "series": (series or "").strip(),
         "corrections": correction_rows,
         "base_task_id": base,
+        # pause after extraction + translation so the user can fix boxes before anything is rendered
+        "review_first": bool(review_first) and correction_rows is None,
     }
     
     status_db[task_id] = {
@@ -1450,7 +1597,7 @@ async def cancel_translation_task(task_id: str):
     """
     if task_id in status_db:
         status = status_db[task_id].get("status")
-        if status in ["queued", "processing"]:
+        if status in ["queued", "processing", "review"]:
             cancelled_tasks.add(task_id)
             status_db[task_id] = {
                 "percent": 0,
@@ -1460,6 +1607,29 @@ async def cancel_translation_task(task_id: str):
             }
             return {"status": "cancelled", "message": "Cancellation request submitted."}
     return {"status": "error", "message": "Task not found or already completed."}
+
+class ReviewRequest(BaseModel):
+    action: str = "continue"          # "continue" (apply `pages`) | "skip" (render as translated)
+    pages: dict[str, list] = {}       # {page: [{id, bbox, text, raw, edited}]}: only the pages the user changed
+
+
+@app.post("/api/v1/translate/review/{task_id}")
+async def review_continue(task_id: str, req: ReviewRequest):
+    """Answer a task that is waiting in 'review' (先调框): apply the edits, then render."""
+    wait = review_waits.get(task_id)
+    if not wait:
+        raise HTTPException(status_code=409, detail="这个任务当前没有在等待调框（可能已继续、已取消或已超时）。")
+    rows = {}
+    if req.action != "skip" and req.pages:
+        from core.document_skill import parse_corrections_json, CorrectionsError
+        try:
+            rows = parse_corrections_json(json.dumps({"pages": req.pages}))
+        except CorrectionsError as e:
+            raise HTTPException(status_code=400, detail=str(e))
+    wait["payload"] = rows
+    wait["event"].set()
+    return {"status": "resumed", "pages": sorted(rows)}
+
 
 @app.get("/api/v1/translate/status/{task_id}")
 async def get_translation_status_stream(task_id: str):
@@ -1471,6 +1641,7 @@ async def get_translation_status_stream(task_id: str):
         
     async def sse_event_generator():
         last_percent = -1
+        review_sent = False
         while True:
             task_status = status_db.get(task_id)
             if not task_status:
@@ -1481,12 +1652,19 @@ async def get_translation_status_stream(task_id: str):
             status = task_status.get("status", "")
             metrics = task_status.get("metrics", None)
             
-            if percent != last_percent or status in ["complete", "failed"]:
+            left_review = review_sent and status != "review"
+            if left_review:
+                review_sent = False
+            if percent != last_percent or left_review or status in ["complete", "failed", "review"]:
                 last_percent = percent
                 
                 if status == "complete":
                     yield f"event: complete\ndata: {json.dumps({'download_url': task_status.get('download_url'), 'download_zip_url': task_status.get('download_zip_url'), 'download_xlsx_url': task_status.get('download_xlsx_url'), 'download_json_url': task_status.get('download_json_url'), 'warning': task_status.get('warning', ''), 'edit_data': task_status.get('edit_data'), 'failed_pages': task_status.get('failed_pages', []), 'stage_times': (task_status.get('metrics') or {}).get('stage_times'), 'pipeline_mode': (task_status.get('metrics') or {}).get('pipeline_mode'), 'extract_devices': (task_status.get('metrics') or {}).get('extract_devices'), 'translate_breakdown': (task_status.get('metrics') or {}).get('translate_breakdown'), 'render_breakdown': (task_status.get('metrics') or {}).get('render_breakdown'), 'extract_breakdown': (task_status.get('metrics') or {}).get('extract_breakdown'), 'model_usage': (task_status.get('metrics') or {}).get('model_usage')}, ensure_ascii=False)}\n\n"
                     break
+                elif status == "review":
+                    if not review_sent:
+                        review_sent = True
+                        yield f"event: review\ndata: {json.dumps({'stage': stage, 'edit_data': task_status.get('edit_data')}, ensure_ascii=False)}\n\n"
                 elif status == "failed":
                     yield f"event: error\ndata: {json.dumps({'message': task_status.get('message', 'Processing pipeline crashed.')})}\n\n"
                     break
