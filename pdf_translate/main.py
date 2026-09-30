@@ -202,6 +202,41 @@ def clear_leftovers() -> None:
         shutil.rmtree(d, ignore_errors=True)
 
 
+# ── Last result kept for the box editor: only the pages the user changed are re-rendered, the other
+# pages are taken from here. Rendered page JPEGs + bubble data of ONE result; dropped when a new
+# translation starts, replaced by the next edit, swept on startup (CACHE_DIR). KEEP_LAST_RESULT=0 disables.
+KEEP_LAST_RESULT = os.getenv("KEEP_LAST_RESULT", "1") != "0"
+LAST_RESULT_DIR = os.path.join(CACHE_DIR, "last_result")
+last_result = {}   # {"task_id", "dir", "pages": {page: jpg path}, "data": {page: {"page","w","h","blocks"}}}
+
+
+def drop_last_result() -> None:
+    d = last_result.get("dir")
+    last_result.clear()
+    if d:
+        shutil.rmtree(d, ignore_errors=True)
+
+
+def store_last_result(task_id: str, pages: dict, data: dict) -> None:
+    """Copy the rendered pages into their own folder (the render temp dir is deleted at task end)
+    and replace the previous result."""
+    old_dir = last_result.get("dir")
+    new_dir = os.path.join(LAST_RESULT_DIR, task_id)
+    os.makedirs(new_dir, exist_ok=True)
+    kept = {}
+    for p, src in pages.items():
+        if not os.path.exists(src):
+            continue
+        dst = os.path.join(new_dir, f"page_{int(p):04d}.jpg")
+        if os.path.abspath(src) != os.path.abspath(dst):
+            shutil.copyfile(src, dst)
+        kept[int(p)] = dst
+    last_result.clear()
+    last_result.update({"task_id": task_id, "dir": new_dir, "pages": kept, "data": dict(data)})
+    if old_dir and os.path.abspath(old_dir) != os.path.abspath(new_dir):
+        shutil.rmtree(old_dir, ignore_errors=True)
+
+
 DOWNLOAD_MEDIA_TYPES = {
     ".pdf": "application/pdf",
     ".zip": "application/zip",
@@ -381,6 +416,14 @@ async def translation_worker():
             # Outputs of the previous task are dropped once a new task starts (downloaded ones are already gone)
             clear_dir_contents(STATIC_DIR)
             close_edit_sessions()
+            # Box editor re-render: only the changed pages are processed, the rest comes from the last result
+            base_result = None
+            if task.get("base_task_id"):
+                if last_result.get("task_id") != task["base_task_id"]:
+                    raise Exception("上一次的翻译结果已过期（服务器已清理），请重新翻译。")
+                base_result = {"pages": dict(last_result["pages"]), "data": dict(last_result["data"])}
+            else:
+                drop_last_result()
             
             # Step 1: Intelligent Layout Extraction (CPU Parallel)
             status_db[task_id] = {
@@ -827,10 +870,14 @@ async def translation_worker():
             out_filename = f"translated_{uuid.uuid4().hex[:8]}_{filename}"
             output_pdf_path = os.path.join(STATIC_DIR, out_filename)
             
+            if base_result:   # pages that were not re-rendered keep their earlier result
+                for bp, bpath in base_result["pages"].items():
+                    if bp not in temp_paths and os.path.exists(bpath):
+                        temp_paths[bp] = bpath
             out_doc = fitz.open()
             for page_num in range(1, actual_total_pages + 1):
                 src_page = src_doc[page_num - 1]
-                if page_num in selected_pages and page_num in temp_paths and os.path.exists(temp_paths[page_num]):
+                if page_num in temp_paths and os.path.exists(temp_paths[page_num]):
                     out_page = out_doc.new_page(
                         width=src_page.rect.width,
                         height=src_page.rect.height
@@ -871,6 +918,17 @@ async def translation_worker():
                                 "text": translated_text_map.get((p_data["page_num"], blk.get("id")), "")}
                                for blk in p_data.get("blocks", []) if blk.get("bbox")],
                 })
+            if base_result:   # earlier pages stay in the Excel script and stay editable
+                done = {ep["page"] for ep in edit_pages}
+                for bp, bdata in sorted(base_result["data"].items()):
+                    if bp in done:
+                        continue
+                    edit_pages.append(bdata)
+                    script_pages.append({"page_num": bp, "blocks": [
+                        {"id": b["id"], "raw": b["raw"], "translated": b["text"], "bbox": b["bbox"]}
+                        for b in bdata["blocks"]]})
+                edit_pages.sort(key=lambda ep: ep["page"])
+                script_pages.sort(key=lambda sp: sp["page_num"])
             edit_data = {"pages": edit_pages, "source_lang": source_lang}
 
             xlsx_path = None
@@ -917,6 +975,13 @@ async def translation_worker():
             download_xlsx_url = f"/api/v1/download/{os.path.basename(xlsx_path)}" if xlsx_path else ""
             download_json_url = f"/api/v1/download/{out_json_filename}"
             
+            if KEEP_LAST_RESULT:
+                try:
+                    await asyncio.to_thread(store_last_result, task_id, dict(temp_paths),
+                                            {ep["page"]: ep for ep in edit_pages})
+                except Exception as keep_err:
+                    logger.warning(f"[Editor] could not keep the result for later edits: {keep_err}")
+                    drop_last_result()
             logger.info(f"✅ Task {task_id} completed successfully.")
             
             status_db[task_id] = {
@@ -1160,8 +1225,10 @@ def render_edit_page_png(pdf_path: str, page_num: int, max_px: int = MAX_EDIT_PA
 
 
 @app.post("/api/v1/edit/open")
-async def edit_open(file: UploadFile = File(...)):
-    """Upload the source PDF once for the box editor; returns edit_id."""
+async def edit_open(file: UploadFile = File(...), task_id: str = Form("")):
+    """Upload the source PDF once for the box editor; returns edit_id.
+    base_available: the server still has the rendered pages of result `task_id`, so an edit can
+    re-render only the changed pages."""
     if not (file.filename or "").lower().endswith(".pdf"):
         raise HTTPException(status_code=400, detail="Only PDF files are supported.")
     close_edit_sessions()
@@ -1177,7 +1244,8 @@ async def edit_open(file: UploadFile = File(...)):
         _remove_quietly(path)
         raise HTTPException(status_code=400, detail=f"Invalid PDF file: {ex}")
     edit_sessions[edit_id] = {"pdf_path": path, "total_pages": total}
-    return {"edit_id": edit_id, "total_pages": total}
+    return {"edit_id": edit_id, "total_pages": total,
+            "base_available": bool(task_id) and last_result.get("task_id") == task_id}
 
 
 def _edit_session(edit_id: str) -> dict:
@@ -1288,7 +1356,8 @@ async def upload_pdf_file(
     translate_batch_lines: int = Form(DEFAULT_STREAM_BATCH_LINES),
     series: str = Form(""),
     corrections: UploadFile = File(None),
-    corrections_json: str = Form("")
+    corrections_json: str = Form(""),
+    base_task_id: str = Form("")
 ):
     """
     Uploads the raw PDF file, assigns uuid, applies custom tuning parameters, and queues the task.
@@ -1299,6 +1368,7 @@ async def upload_pdf_file(
         return {"error": "Invalid format. Only PDF files are supported."}
 
     correction_rows = None
+    base = ""
     if corrections is not None and corrections.filename:
         correction_rows, meta = await _load_corrections(corrections, file)
         # Same pages and render parameters as the run that produced the script
@@ -1321,6 +1391,11 @@ async def upload_pdf_file(
             raise HTTPException(status_code=400, detail=str(e))
         page_range = ",".join(str(p) for p in sorted(correction_rows))
         pipeline_mode = "serial"
+        if (base_task_id or "").strip():
+            # only the pages in corrections_json are re-rendered; the others come from that result
+            if last_result.get("task_id") != base_task_id.strip():
+                raise HTTPException(status_code=409, detail="上一次的翻译结果已过期（服务器已清理），请重新翻译，或在编辑器里重绘全部页。")
+            base = base_task_id.strip()
 
     task_id = str(uuid.uuid4())
     temp_filename = f"source_{task_id}_{file.filename}"
@@ -1351,6 +1426,7 @@ async def upload_pdf_file(
         # optional: term dictionary name; empty = derived from the file name (volume removed)
         "series": (series or "").strip(),
         "corrections": correction_rows,
+        "base_task_id": base,
     }
     
     status_db[task_id] = {

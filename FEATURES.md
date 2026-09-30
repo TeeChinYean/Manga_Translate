@@ -293,5 +293,8 @@
   - 重绘会开一个新任务，替换当前结果（旧的未下载文件会被清掉，编辑器里有提示）；所有页都会重新排版（不在范围内的页保持原图）
   - 校验：`corrections_json` 必须是 `{"pages": {"页码": [{id, bbox, text, raw}]}}`，bbox 有限且宽高 ≥1pt、同页 id 不重复、译文 ≤2000 字、≤5000 个框，否则 400 且不留上传文件
 - Excel 导出：没有 OCR 原文但有译文的框（编辑器里手动输入的新框）现在也会导出，否则重绘后的 Excel 里会少这一行（tests/test_excel_reinsert.py `test_box_with_translation_but_no_ocr_text_is_exported`）
+- 只重绘被调整的页：编辑器逐页对比修改前后，只把改过的页提交（`corrections_json` 只含这些页）并带上 `base_task_id`；服务器在每个任务成功后把渲染好的页面 JPEG 和气泡数据留一份（`data/cache/last_result/<task_id>/`，`main.last_result`），编辑任务只处理改过的页，其余页原样取自上次结果，PDF / ZIP / Excel 台本 / 编辑器数据仍然覆盖所有页，可以连续多次编辑
+  - 保留策略：只保留最新一个结果；新翻译任务（无 base）开始时删除、被下一次编辑替换时删除旧的、启动时随 cache 清理；`KEEP_LAST_RESULT=0` 关闭（关闭后编辑器会重绘全部页）。这是对「任务完成后删除缓存」的一处例外：只多留页面 JPEG（每页约几百 KB），下载文件仍是一次性的
+  - 上次结果已过期（服务器重启 / 已开始新任务）时，`/edit/open` 返回 `base_available: false`，编辑器自动改为重绘全部页；带过期 `base_task_id` 提交会得到 409
 - 相关测试：tests/test_box_editor.py（JSON 校验、页面图片 / 会话生命周期、OCR 接口含语言检查与出错分支、`ocr_region` 裁剪、JSON 回填入队、页面接线），已接入 test_pre_commit；另外用无头 Chromium 对真实 `main.app` 做了端到端操作：移动 +30px、缩放 +20px、撤销、改译文、画新框自动识别、删除、翻页、提交 —— 入队的 bbox / 译文全部正确
 - 状态：Done（未在真实漫画 + 模型上实测重绘效果，见「待确认问题」）

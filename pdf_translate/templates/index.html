@@ -1369,7 +1369,7 @@
                     「选择」：点框选中，拖框身体移动，拖四个角缩放。<br>
                     「画框」：在页面上拖出新框，会自动识别并翻译（首次约 5–15 秒）。<br>
                     蓝色 = 原有框，橙色 = 新画的框。删除框 = 该处保留原图。<br>
-                    重绘会替换当前结果，需要保留的文件请先下载。
+                    只重绘你改过的页，其余页沿用上次结果。重绘会替换当前结果，需要保留的文件请先下载。
                 </div>
             </div>
         </div>
@@ -1510,6 +1510,7 @@
             cancelBtn.disabled = false;
             outputPanel.style.display = 'none';
             lastEditData = null;
+            lastResultTaskId = null;
             editBoxesBtn.style.display = 'none';
             progressBar.style.display = 'block';
             progressBarFill.style.width = '0%';
@@ -1686,6 +1687,7 @@
                 // Box editor: only when the server sent bubbles for at least one page
                 lastEditData = data.edit_data && data.edit_data.pages && data.edit_data.pages.length ? data.edit_data : null;
                 editBoxesBtn.style.display = lastEditData ? 'block' : 'none';
+                lastResultTaskId = lastEditData ? taskId : null;
 
                 // Close SSE channel and reset buttons
                 eventSource.close();
@@ -1998,6 +2000,7 @@
         const BE_MIN_PX = 6;
         const BE_HANDLE = 8;
         let lastEditData = null;
+        let lastResultTaskId = null;   // task whose rendered pages the server still keeps
         const be = { id: null, pages: {}, order: [], page: 1, tool: 'select', sel: null, undo: [], drag: null,
                      cssW: 0, cssH: 0, busy: false, snapText: null, initial: '' };
         const $be = id => document.getElementById(id);
@@ -2007,6 +2010,7 @@
         const beCur = () => be.pages[be.page];
         const beSnapshot = () => JSON.stringify(be.pages);
         const beChanged = () => beSnapshot() !== be.initial;
+        const beChangedPages = () => be.order.filter(n => JSON.stringify(be.pages[n]) !== be.initialPages[n]);
 
         function beUpdateBar() {
             $be('beUndo').disabled = !be.undo.length || be.busy;
@@ -2016,7 +2020,9 @@
             $be('bePrev').disabled = be.busy || i <= 0;
             $be('beNext').disabled = be.busy || i >= be.order.length - 1;
             const p = beCur();
-            $be('beStatus').textContent = p ? `本页 ${p.boxes.length} 个框` + (beChanged() ? '，有未应用的修改' : '') : '';
+            const nChanged = beChangedPages().length;
+            $be('beStatus').textContent = p ? `本页 ${p.boxes.length} 个框` + (nChanged
+                ? `；已修改 ${nChanged} 页，` + (be.baseOk ? '重绘时只处理这些页' : '重绘时会处理全部页（上次结果已过期）') : '') : '';
         }
 
         function bePushUndo(snap) {
@@ -2050,6 +2056,8 @@
             be.order.sort((a, b) => a - b);
             be.undo = []; be.sel = null; be.tool = 'select';
             be.initial = beSnapshot();
+            be.initialPages = {};
+            be.order.forEach(n => { be.initialPages[n] = JSON.stringify(be.pages[n]); });
         }
 
         function beLayout() {
@@ -2255,10 +2263,12 @@
             try {
                 const fd = new FormData();
                 fd.append('file', selectedFile);
+                fd.append('task_id', lastResultTaskId || '');
                 const res = await fetch('/api/v1/edit/open', { method: 'POST', body: fd });
                 const data = await res.json();
                 if (!res.ok) throw new Error(data.detail || '打开失败');
                 be.id = data.edit_id;
+                be.baseOk = !!data.base_available;
                 beLoad(lastEditData);
                 if (!be.order.length) throw new Error('没有可编辑的页面');
                 beSetTool('select');
@@ -2281,7 +2291,9 @@
         async function beApply() {
             if (be.busy || !beChanged()) return;
             const pages = {};
-            for (const n of be.order) {
+            // Server still has the last result -> send (and re-render) only the pages that changed
+            const sendPages = be.baseOk ? beChangedPages() : be.order;
+            for (const n of sendPages) {
                 const p = be.pages[n];
                 pages[n] = p.boxes.map(b => ({
                     id: b.id, text: b.text, raw: b.raw,
@@ -2289,8 +2301,10 @@
                 }));
             }
             beClose();
-            logToConsole('[+] 按修改后的检测框重新消字与排版（不重新 OCR / 翻译）…');
-            await runTask({ corrections_json: JSON.stringify({ pages }) });
+            logToConsole(`[+] 按修改后的检测框重新消字与排版（不重新 OCR / 翻译），` + (be.baseOk ? `只重绘 ${sendPages.length} 页，其余页沿用上次结果…` : '重绘全部页…'));
+            const extra = { corrections_json: JSON.stringify({ pages }) };
+            if (be.baseOk) extra.base_task_id = lastResultTaskId;
+            await runTask(extra);
         }
 
         editBoxesBtn.addEventListener('click', beOpen);
