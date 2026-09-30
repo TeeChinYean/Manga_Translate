@@ -138,11 +138,12 @@ def _iou(a, b) -> float:
     return inter / union if union > 0 else 0.0
 
 
-def match_corrections(blocks: list, rows: list) -> dict:
+def match_corrections(blocks: list, rows: list, unmatched: list | None = None) -> dict:
     """
     Map re-extracted blocks of one page to corrected rows: best bbox IoU (>= MATCH_MIN_IOU),
     same block id breaks ties. Each row is used once. Returns {block_id: text}.
     Blocks without a match get nothing, so the renderer keeps their original text.
+    `unmatched`: if given, rows with a non-empty translation that matched no block are appended.
     """
     pairs = []
     for bi, blk in enumerate(blocks):
@@ -164,4 +165,16 @@ def match_corrections(blocks: list, rows: list) -> dict:
         used_b.add(bi)
         used_r.add(ri)
         out[blocks[bi]["id"]] = rows[ri]["text"]
+    if unmatched is not None:
+        unmatched.extend(r for ri, r in enumerate(rows) if ri not in used_r and str(r["text"]).strip())
     return out
+
+
+def build_unmatched_warning(unmatched_by_page: dict) -> str:
+    """{page_num: n_rows} -> user message, or "" when every corrected row found its bubble."""
+    pages = sorted(p for p, n in unmatched_by_page.items() if n)
+    if not pages:
+        return ""
+    total = sum(unmatched_by_page[p] for p in pages)
+    return (f"{total} 行校对译文未匹配到气泡（该气泡保留原文）: "
+            + ", ".join(f"第 {p} 页 {unmatched_by_page[p]} 行" for p in pages))

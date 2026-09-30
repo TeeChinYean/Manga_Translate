@@ -254,3 +254,10 @@
 - 风险：若 WDDM 仍把 LLM 显存挤到共享内存，overlap 中途不能重启 LLM，剩余翻译会变慢；需实测确认（见待确认问题）
 - 相关测试：tests/test_async_stages.py（放行时重绘早于最后一批翻译 / 返回 True 仍等待 / 检查函数出错会抛出）、tests/test_gpu_budget.py `test_lama_beside_llm_decision`
 - 状态：Done（待实测 A/B）
+
+### Excel 回填：未匹配的行在完成信息里提示
+- 说明：回填不依赖服务器记录，只用上传的 PDF + Excel（隐藏列 E–H 存气泡坐标，meta 表存 PDF md5 与重绘参数）。重新检测后坐标重叠度 < 0.5 的行以前会被悄悄跳过，现在完成信息与控制台显示「N 行校对译文未匹配到气泡（该气泡保留原文）: 第 X 页 n 行」，日志记录行号
+- 涉及文件/模块：core/document_skill.py（`match_corrections(..., unmatched)`、`build_unmatched_warning`）、main.py（按页统计，与提取失败提示合并到 warning）
+- 实现要点：译文清空的行不算未匹配；与提取失败提示用「；」合并，前端沿用现有 `data.warning` 显示
+- 相关测试：tests/test_excel_reinsert.py `test_unmatched_rows_are_reported`
+- 状态：Done

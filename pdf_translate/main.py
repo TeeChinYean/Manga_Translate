@@ -318,6 +318,7 @@ async def translation_worker():
         page_range = task.get("page_range", "")
         # Re-insert mode: {page_num: [rows]} from a corrected Excel script; no LLM is used
         corrections = task.get("corrections")
+        unmatched_rows = {}   # re-insert: {page_num: corrected rows that matched no bubble}
         
         status_db[task_id] = {
             "percent": 5,
@@ -504,7 +505,12 @@ async def translation_worker():
                     from core.document_skill import match_corrections
                     for page in to_render:
                         p_num = page["page_num"]
-                        texts = match_corrections(page.get("blocks", []), corrections.get(p_num, []))
+                        missed = []
+                        texts = match_corrections(page.get("blocks", []), corrections.get(p_num, []), missed)
+                        if missed:
+                            unmatched_rows[p_num] = unmatched_rows.get(p_num, 0) + len(missed)
+                            logger.warning(f"[Re-insert] page {p_num}: {len(missed)} corrected rows matched no "
+                                           f"bubble: {[r['id'] for r in missed]}")
                         for block in page.get("blocks", []):
                             block["translated_text"] = texts.get(block["id"], "")
                             block["translation_engine"] = "人工校对 (Excel)"
@@ -721,6 +727,9 @@ async def translation_worker():
                 raise Exception("未能成功提取到任何页面数据，请检查 PDF 文件完整性或页面范围设置。" + detail)
 
             extraction_warning = build_failed_pages_warning(failed_pages)
+            if unmatched_rows:
+                from core.document_skill import build_unmatched_warning
+                extraction_warning = "；".join(w for w in (extraction_warning, build_unmatched_warning(unmatched_rows)) if w)
             if extraction_warning:
                 logger.warning(f"Task {task_id}: {extraction_warning}")
 
