@@ -967,6 +967,26 @@
             border: 1px solid rgba(99, 102, 241, 0.3);
             white-space: nowrap;
         }
+        /* ── Box editor (adjust detection boxes after translation) ── */
+        .be-overlay { position: fixed; inset: 0; z-index: 2000; background: #08090d; display: none; flex-direction: column; }
+        .be-overlay.open { display: flex; }
+        .be-bar { display: flex; flex-wrap: wrap; gap: 8px; align-items: center; padding: 10px 14px; border-bottom: 1px solid var(--border-color); background: rgba(18, 20, 29, 0.95); }
+        .be-bar .btn { padding: 7px 14px; font-size: 0.85rem; }
+        .be-bar .be-sep { flex: 1; }
+        .be-tool.active { outline: 2px solid var(--accent-indigo); }
+        .be-main { flex: 1; display: flex; min-height: 0; }
+        .be-stage { flex: 1; overflow: auto; padding: 14px; text-align: center; }
+        .be-wrap { position: relative; display: inline-block; box-shadow: 0 2px 12px rgba(0, 0, 0, 0.6); background: #fff; line-height: 0; user-select: none; }
+        .be-wrap img { display: block; }
+        #beOv { position: absolute; left: 0; top: 0; touch-action: none; }
+        .be-side { width: 300px; border-left: 1px solid var(--border-color); padding: 14px; display: flex; flex-direction: column; gap: 10px; overflow: auto; }
+        .be-side textarea { width: 100%; min-height: 110px; resize: vertical; background: rgba(255, 255, 255, 0.05); color: var(--text-primary); border: 1px solid var(--border-color); border-radius: 8px; padding: 8px; font: inherit; font-size: 0.9rem; }
+        .be-raw { font-size: 0.8rem; color: var(--text-secondary); word-break: break-all; line-height: 1.5; }
+        .be-hint { font-size: 0.78rem; color: var(--text-secondary); line-height: 1.7; }
+        @media (max-width: 800px) {
+            .be-main { flex-direction: column; }
+            .be-side { width: auto; border-left: 0; border-top: 1px solid var(--border-color); }
+        }
     </style>
 </head>
 
@@ -1145,6 +1165,10 @@
                             style="width: 100%; padding:12px 24px; font-size:0.9rem; background: rgba(16, 185, 129, 0.15); border: 1px solid rgba(16, 185, 129, 0.3); color: #6ee7b7; display: none;">
                             📊 下载 Excel 校对台本 (.xlsx)
                         </button>
+                        <button class="btn" id="editBoxesBtn" type="button"
+                            style="width: 100%; padding:12px 24px; font-size:0.9rem; background: rgba(139, 92, 246, 0.15); border: 1px solid rgba(139, 92, 246, 0.35); color: #ddd6fe; display: none;">
+                            ✏️ 调整检测框 / 编辑译文（改完直接重绘）
+                        </button>
                         <button class="btn" id="downloadJsonBtn" hidden
                             style="width: 100%; padding:12px 24px; font-size:0.9rem; background: rgba(245, 158, 11, 0.15); border: 1px solid rgba(245, 158, 11, 0.3); color: #fcd34d; display: none;">
                             📊 下载提取数据与翻译映射 (JSON)
@@ -1312,6 +1336,45 @@
         </div>
     </aside>
 
+    <!-- Box editor: adjust detection boxes / translations after translation, then re-render -->
+    <div class="be-overlay" id="boxEditor" role="dialog" aria-label="检测框编辑器">
+        <div class="be-bar">
+            <button class="btn be-tool active" id="beToolSelect" type="button" title="选择 / 拖动移动 / 拖角缩放">↖ 选择</button>
+            <button class="btn be-tool" id="beToolDraw" type="button" title="在页面上拖动画一个新框">▭ 画框</button>
+            <button class="btn" id="beUndo" type="button" disabled title="撤销 (Ctrl+Z)">↶ 撤销</button>
+            <button class="btn" id="beDelete" type="button" disabled title="删除所选框 (Delete)">🗑 删除所选</button>
+            <span class="be-sep"></span>
+            <button class="btn" id="bePrev" type="button">◀</button>
+            <span id="bePageLabel">1 / 1</span>
+            <button class="btn" id="beNext" type="button">▶</button>
+            <span class="be-sep"></span>
+            <button class="btn" id="beCancel" type="button">取消</button>
+            <button class="btn" id="beApply" type="button" disabled
+                style="background: rgba(99, 102, 241, 0.25); border: 1px solid rgba(99, 102, 241, 0.5); color: #e0e7ff;">🔁 重绘并生成新 PDF</button>
+        </div>
+        <div class="be-main">
+            <div class="be-stage" id="beStage">
+                <div class="be-wrap" id="beWrap"><img id="beImg" alt="原始页面"><canvas id="beOv"></canvas></div>
+            </div>
+            <div class="be-side">
+                <div class="be-hint" id="beStatus"></div>
+                <div id="beForm" style="display: none; flex-direction: column; gap: 10px;">
+                    <div><b id="beBoxTitle"></b></div>
+                    <div class="be-raw" id="beRaw"></div>
+                    <textarea id="beText" placeholder="译文（留空 = 该气泡保留原图）"></textarea>
+                    <button class="btn" id="beOcr" type="button" style="padding: 8px 12px; font-size: 0.85rem;">🔍 识别并翻译此框</button>
+                    <div class="be-hint" id="beNote"></div>
+                </div>
+                <div class="be-hint">
+                    「选择」：点框选中，拖框身体移动，拖四个角缩放。<br>
+                    「画框」：在页面上拖出新框，会自动识别并翻译（首次约 5–15 秒）。<br>
+                    蓝色 = 原有框，橙色 = 新画的框。删除框 = 该处保留原图。<br>
+                    重绘会替换当前结果，需要保留的文件请先下载。
+                </div>
+            </div>
+        </div>
+    </div>
+
     <!-- Front-End JavaScript SSE Logic -->
     <script>
         const fileInput = document.getElementById('fileInput');
@@ -1435,8 +1498,9 @@
             updateTranslateBtn();
         });
 
-        // Action Trigger
-        translateBtn.addEventListener('click', async () => {
+        // Start a task with the selected PDF. extraFields: extra form fields
+        // (Excel re-insert: {corrections: File}; box editor: {corrections_json: string}).
+        async function runTask(extraFields = {}) {
             if (!selectedFile) return;
 
             // Reset UI states
@@ -1445,6 +1509,8 @@
             cancelBtn.style.display = 'block';
             cancelBtn.disabled = false;
             outputPanel.style.display = 'none';
+            lastEditData = null;
+            editBoxesBtn.style.display = 'none';
             progressBar.style.display = 'block';
             progressBarFill.style.width = '0%';
 
@@ -1473,8 +1539,8 @@
             formData.append('max_stroke_ratio', tuningParams.max_stroke_ratio);
             formData.append('font_scale', tuningParams.font_scale);
             formData.append('pipeline_mode', document.getElementById('pipelineMode').value);
-            if (reinsertMode && selectedExcel) {
-                formData.append('corrections', selectedExcel);
+            for (const [k, v] of Object.entries(extraFields)) {
+                formData.append(k, v);
             }
 
             try {
@@ -1505,7 +1571,8 @@
                 progressBar.style.display = 'none';
                 clearInterval(timerInterval);
             }
-        });
+        }
+        translateBtn.addEventListener('click', () => runTask(reinsertMode && selectedExcel ? { corrections: selectedExcel } : {}));
 
         // Cancel Button Action Trigger
         cancelBtn.addEventListener('click', async () => {
@@ -1615,6 +1682,10 @@
                 } else if (downloadDocBtn) {
                     downloadDocBtn.style.display = 'none';
                 }
+
+                // Box editor: only when the server sent bubbles for at least one page
+                lastEditData = data.edit_data && data.edit_data.pages && data.edit_data.pages.length ? data.edit_data : null;
+                editBoxesBtn.style.display = lastEditData ? 'block' : 'none';
 
                 // Close SSE channel and reset buttons
                 eventSource.close();
@@ -1917,6 +1988,332 @@
         // Initialize displays and hide any blank preview elements
         updateTuningDisplays();
         displayActivePreviewImage();
+
+        // ══════════════════════════════════════════════════════════════════════
+        // ── Box editor: move / resize / draw / delete boxes, edit text, re-render ──
+        // Same drawing logic as the standalone annotation page: an overlay canvas over the page,
+        // boxes stored normalised (0..1 of the page) so they survive any display size;
+        // sent back in PDF points (origin top-left) as corrections_json.
+        // ══════════════════════════════════════════════════════════════════════
+        const BE_MIN_PX = 6;
+        const BE_HANDLE = 8;
+        let lastEditData = null;
+        const be = { id: null, pages: {}, order: [], page: 1, tool: 'select', sel: null, undo: [], drag: null,
+                     cssW: 0, cssH: 0, busy: false, snapText: null, initial: '' };
+        const $be = id => document.getElementById(id);
+        const beOv = $be('beOv');
+        const editBoxesBtn = document.getElementById('editBoxesBtn');
+
+        const beCur = () => be.pages[be.page];
+        const beSnapshot = () => JSON.stringify(be.pages);
+        const beChanged = () => beSnapshot() !== be.initial;
+
+        function beUpdateBar() {
+            $be('beUndo').disabled = !be.undo.length || be.busy;
+            $be('beDelete').disabled = !be.sel || be.busy;
+            $be('beApply').disabled = !beChanged() || be.busy;
+            const i = be.order.indexOf(be.page);
+            $be('bePrev').disabled = be.busy || i <= 0;
+            $be('beNext').disabled = be.busy || i >= be.order.length - 1;
+            const p = beCur();
+            $be('beStatus').textContent = p ? `本页 ${p.boxes.length} 个框` + (beChanged() ? '，有未应用的修改' : '') : '';
+        }
+
+        function bePushUndo(snap) {
+            be.undo.push(snap || beSnapshot());
+            if (be.undo.length > 60) be.undo.shift();
+        }
+
+        function beUndoOne() {
+            const s = be.undo.pop();
+            if (!s) return;
+            const selId = be.sel ? be.sel.id : null;
+            be.pages = JSON.parse(s);
+            be.sel = beCur().boxes.find(b => b.id === selId) || null;
+            beFillForm(); beRedraw();
+        }
+
+        function beLoad(editData) {
+            be.pages = {}; be.order = [];
+            for (const p of editData.pages) {
+                if (!p.w || !p.h) continue;
+                be.pages[p.page] = {
+                    w: p.w, h: p.h,
+                    boxes: p.blocks.map(b => ({
+                        id: b.id, raw: b.raw || '', text: b.text || '', isNew: false,
+                        nx: b.bbox[0] / p.w, ny: b.bbox[1] / p.h,
+                        nw: (b.bbox[2] - b.bbox[0]) / p.w, nh: (b.bbox[3] - b.bbox[1]) / p.h,
+                    })),
+                };
+                be.order.push(p.page);
+            }
+            be.order.sort((a, b) => a - b);
+            be.undo = []; be.sel = null; be.tool = 'select';
+            be.initial = beSnapshot();
+        }
+
+        function beLayout() {
+            const p = beCur(); if (!p) return;
+            be.cssW = Math.round(Math.max(240, Math.min($be('beStage').clientWidth - 28, 900)));
+            be.cssH = Math.round(be.cssW * p.h / p.w);
+            const img = $be('beImg');
+            img.style.width = be.cssW + 'px'; img.style.height = be.cssH + 'px';
+            beOv.width = be.cssW; beOv.height = be.cssH;
+            beOv.style.width = be.cssW + 'px'; beOv.style.height = be.cssH + 'px';
+            beRedraw();
+        }
+
+        function beShowPage(n) {
+            be.page = n; be.sel = null; be.drag = null;
+            $be('bePageLabel').textContent = `${be.order.indexOf(n) + 1} / ${be.order.length}（原第 ${n} 页）`;
+            const img = $be('beImg');
+            img.onload = beLayout;
+            img.src = `/api/v1/edit/${be.id}/page/${n}`;
+            beLayout(); beFillForm();
+        }
+
+        function beRedraw() {
+            const ctx = beOv.getContext('2d');
+            ctx.clearRect(0, 0, be.cssW, be.cssH);
+            const p = beCur();
+            if (p) p.boxes.forEach(b => {
+                const x = b.nx * be.cssW, y = b.ny * be.cssH, w = b.nw * be.cssW, h = b.nh * be.cssH;
+                const col = b.isNew ? '#f59e0b' : '#6366f1', sel = b === be.sel;
+                ctx.lineWidth = sel ? 2.5 : 2;
+                ctx.fillStyle = col + (sel ? '55' : '2a'); ctx.strokeStyle = sel ? '#ffffff' : col;
+                ctx.fillRect(x, y, w, h); ctx.strokeRect(x, y, w, h);
+                ctx.fillStyle = col; ctx.font = 'bold 12px sans-serif';
+                ctx.fillText('#' + b.id + (b.text ? '' : ' (空)'), x + 3, y + 13);
+                if (sel) {
+                    ctx.fillStyle = '#ffffff'; ctx.strokeStyle = col; ctx.lineWidth = 2;
+                    Object.values(beCorners(b)).forEach(([cx, cy]) => {
+                        ctx.fillRect(cx - BE_HANDLE / 2, cy - BE_HANDLE / 2, BE_HANDLE, BE_HANDLE);
+                        ctx.strokeRect(cx - BE_HANDLE / 2, cy - BE_HANDLE / 2, BE_HANDLE, BE_HANDLE);
+                    });
+                }
+            });
+            if (be.drag && be.drag.kind === 'draw') {
+                const r = beRect(be.drag);
+                ctx.strokeStyle = '#f59e0b'; ctx.fillStyle = '#f59e0b33'; ctx.lineWidth = 2; ctx.setLineDash([5, 4]);
+                ctx.fillRect(r.x, r.y, r.w, r.h); ctx.strokeRect(r.x, r.y, r.w, r.h); ctx.setLineDash([]);
+            }
+            beUpdateBar();
+        }
+
+        const beRect = d => ({ x: Math.min(d.x0, d.x1), y: Math.min(d.y0, d.y1), w: Math.abs(d.x1 - d.x0), h: Math.abs(d.y1 - d.y0) });
+        const bePos = e => {
+            const r = beOv.getBoundingClientRect();
+            return { x: Math.max(0, Math.min(be.cssW, e.clientX - r.left)), y: Math.max(0, Math.min(be.cssH, e.clientY - r.top)) };
+        };
+        function beCorners(b) {
+            const x = b.nx * be.cssW, y = b.ny * be.cssH, w = b.nw * be.cssW, h = b.nh * be.cssH;
+            return { nw: [x, y], ne: [x + w, y], sw: [x, y + h], se: [x + w, y + h] };
+        }
+        function beHit(px, py) {
+            if (be.sel) {
+                for (const [k, [cx, cy]] of Object.entries(beCorners(be.sel))) {
+                    if (Math.abs(px - cx) <= BE_HANDLE && Math.abs(py - cy) <= BE_HANDLE) return { box: be.sel, handle: k };
+                }
+            }
+            const boxes = beCur().boxes;
+            for (let i = boxes.length - 1; i >= 0; i--) {
+                const b = boxes[i];
+                if (px >= b.nx * be.cssW && px <= (b.nx + b.nw) * be.cssW && py >= b.ny * be.cssH && py <= (b.ny + b.nh) * be.cssH) {
+                    return { box: b, handle: null };
+                }
+            }
+            return null;
+        }
+
+        beOv.addEventListener('pointerdown', e => {
+            if (be.busy || !beCur()) return;
+            const pt = bePos(e);
+            beOv.setPointerCapture(e.pointerId);
+            if (be.tool === 'draw') { be.drag = { kind: 'draw', x0: pt.x, y0: pt.y, x1: pt.x, y1: pt.y }; return; }
+            const hit = beHit(pt.x, pt.y);
+            if (!hit) { be.sel = null; be.drag = null; beFillForm(); beRedraw(); return; }
+            be.sel = hit.box; beFillForm();
+            const b = hit.box;
+            be.drag = { kind: hit.handle ? 'resize' : 'move', handle: hit.handle, start: pt, snap: beSnapshot(), moved: false,
+                        orig: { nx: b.nx, ny: b.ny, nw: b.nw, nh: b.nh } };
+            beRedraw();
+        });
+
+        beOv.addEventListener('pointermove', e => {
+            const pt = bePos(e);
+            if (!be.drag) {
+                if (be.tool === 'draw') { beOv.style.cursor = 'crosshair'; return; }
+                const hit = beCur() ? beHit(pt.x, pt.y) : null;
+                beOv.style.cursor = !hit ? 'default' : hit.handle ? (hit.handle === 'nw' || hit.handle === 'se' ? 'nwse-resize' : 'nesw-resize') : 'move';
+                return;
+            }
+            const d = be.drag;
+            if (d.kind === 'draw') { d.x1 = pt.x; d.y1 = pt.y; beRedraw(); return; }
+            const b = be.sel, o = d.orig;
+            if (d.kind === 'move') {
+                b.nx = Math.max(0, Math.min(1 - o.nw, o.nx + (pt.x - d.start.x) / be.cssW));
+                b.ny = Math.max(0, Math.min(1 - o.nh, o.ny + (pt.y - d.start.y) / be.cssH));
+            } else {
+                let x0 = o.nx, y0 = o.ny, x1 = o.nx + o.nw, y1 = o.ny + o.nh;
+                const px = pt.x / be.cssW, py = pt.y / be.cssH, mx = BE_MIN_PX / be.cssW, my = BE_MIN_PX / be.cssH;
+                if (d.handle.includes('w')) x0 = Math.min(px, x1 - mx);
+                if (d.handle.includes('e')) x1 = Math.max(px, x0 + mx);
+                if (d.handle.includes('n')) y0 = Math.min(py, y1 - my);
+                if (d.handle.includes('s')) y1 = Math.max(py, y0 + my);
+                b.nx = Math.max(0, x0); b.ny = Math.max(0, y0);
+                b.nw = Math.min(1, x1) - b.nx; b.nh = Math.min(1, y1) - b.ny;
+            }
+            d.moved = true;
+            beRedraw();
+        });
+
+        beOv.addEventListener('pointerup', () => {
+            const d = be.drag; be.drag = null;
+            if (!d) return;
+            if (d.kind === 'draw') {
+                const r = beRect(d);
+                if (r.w > BE_MIN_PX && r.h > BE_MIN_PX) beAddBox(r); else beRedraw();
+                return;
+            }
+            if (d.moved) bePushUndo(d.snap);
+            beRedraw();
+        });
+        beOv.addEventListener('pointercancel', () => { be.drag = null; beRedraw(); });
+
+        function beSetTool(t) {
+            be.tool = t;
+            $be('beToolSelect').classList.toggle('active', t === 'select');
+            $be('beToolDraw').classList.toggle('active', t === 'draw');
+            beOv.style.cursor = t === 'draw' ? 'crosshair' : 'default';
+        }
+
+        function beAddBox(r) {
+            const p = beCur();
+            bePushUndo();
+            const b = { id: p.boxes.reduce((m, k) => Math.max(m, k.id), 0) + 1, raw: '', text: '', isNew: true,
+                        nx: r.x / be.cssW, ny: r.y / be.cssH, nw: r.w / be.cssW, nh: r.h / be.cssH };
+            p.boxes.push(b);
+            be.sel = b; beSetTool('select'); beFillForm(); beRedraw();
+            beOcr(b);
+        }
+
+        function beDeleteSel() {
+            if (!be.sel || be.busy) return;
+            bePushUndo();
+            const p = beCur();
+            p.boxes = p.boxes.filter(b => b !== be.sel);
+            be.sel = null; beFillForm(); beRedraw();
+        }
+
+        function beFillForm() {
+            const b = be.sel;
+            $be('beForm').style.display = b ? 'flex' : 'none';
+            if (!b) { beUpdateBar(); return; }
+            $be('beBoxTitle').textContent = `框 #${b.id}` + (b.isNew ? '（新画）' : '');
+            $be('beRaw').textContent = '原文：' + (b.raw || '（无）');
+            $be('beText').value = b.text;
+            $be('beNote').textContent = '';
+            beUpdateBar();
+        }
+
+        $be('beText').addEventListener('focus', () => { be.snapText = beSnapshot(); });
+        $be('beText').addEventListener('input', e => { if (be.sel) { be.sel.text = e.target.value; beRedraw(); } });
+        $be('beText').addEventListener('change', () => {
+            if (be.snapText && be.snapText !== beSnapshot()) bePushUndo(be.snapText);
+            be.snapText = null; beUpdateBar();
+        });
+
+        // OCR + translate one box (new box, or "re-recognise" after it was moved)
+        async function beOcr(b) {
+            const p = beCur(), page = be.page;
+            be.busy = true; $be('beOcr').disabled = true; beUpdateBar();
+            $be('beNote').textContent = '识别并翻译中…（首次会加载模型，约 5–15 秒）';
+            let note = '';
+            try {
+                const res = await fetch(`/api/v1/edit/${be.id}/ocr`, {
+                    method: 'POST', headers: { 'Content-Type': 'application/json' },
+                    body: JSON.stringify({ page, source_lang: (lastEditData && lastEditData.source_lang) || 'Japanese',
+                        bbox: [b.nx * p.w, b.ny * p.h, (b.nx + b.nw) * p.w, (b.ny + b.nh) * p.h] }),
+                });
+                const data = await res.json();
+                if (!res.ok) throw new Error(data.detail || '识别失败');
+                if (data.raw) { bePushUndo(); b.raw = data.raw; b.text = data.translated; }
+                note = data.note || '已识别，可在上面修改译文。';
+            } catch (err) {
+                note = `识别失败：${err.message}。请手动输入译文。`;
+            } finally {
+                be.busy = false; $be('beOcr').disabled = false;
+            }
+            if (be.sel === b) { beFillForm(); $be('beNote').textContent = note; }
+            beRedraw();
+        }
+        $be('beOcr').addEventListener('click', () => { if (be.sel && !be.busy) beOcr(be.sel); });
+
+        async function beOpen() {
+            if (!selectedFile || !lastEditData) { logToConsole('[-] 没有可编辑的翻译结果', 'err'); return; }
+            editBoxesBtn.disabled = true;
+            try {
+                const fd = new FormData();
+                fd.append('file', selectedFile);
+                const res = await fetch('/api/v1/edit/open', { method: 'POST', body: fd });
+                const data = await res.json();
+                if (!res.ok) throw new Error(data.detail || '打开失败');
+                be.id = data.edit_id;
+                beLoad(lastEditData);
+                if (!be.order.length) throw new Error('没有可编辑的页面');
+                beSetTool('select');
+                $be('boxEditor').classList.add('open');
+                document.body.style.overflow = 'hidden';
+                beShowPage(be.order[0]);
+            } catch (err) {
+                logToConsole(`[-] 打开框编辑器失败: ${err.message}`, 'err');
+            } finally {
+                editBoxesBtn.disabled = false;
+            }
+        }
+
+        function beClose() {
+            $be('boxEditor').classList.remove('open');
+            document.body.style.overflow = '';
+            if (be.id) { fetch(`/api/v1/edit/${be.id}`, { method: 'DELETE' }).catch(() => {}); be.id = null; }
+        }
+
+        async function beApply() {
+            if (be.busy || !beChanged()) return;
+            const pages = {};
+            for (const n of be.order) {
+                const p = be.pages[n];
+                pages[n] = p.boxes.map(b => ({
+                    id: b.id, text: b.text, raw: b.raw,
+                    bbox: [b.nx * p.w, b.ny * p.h, (b.nx + b.nw) * p.w, (b.ny + b.nh) * p.h].map(v => +v.toFixed(2)),
+                }));
+            }
+            beClose();
+            logToConsole('[+] 按修改后的检测框重新消字与排版（不重新 OCR / 翻译）…');
+            await runTask({ corrections_json: JSON.stringify({ pages }) });
+        }
+
+        editBoxesBtn.addEventListener('click', beOpen);
+        $be('beToolSelect').addEventListener('click', () => beSetTool('select'));
+        $be('beToolDraw').addEventListener('click', () => { be.sel = null; beFillForm(); beSetTool('draw'); beRedraw(); });
+        $be('beUndo').addEventListener('click', beUndoOne);
+        $be('beDelete').addEventListener('click', beDeleteSel);
+        $be('bePrev').addEventListener('click', () => { const i = be.order.indexOf(be.page); if (i > 0) beShowPage(be.order[i - 1]); });
+        $be('beNext').addEventListener('click', () => { const i = be.order.indexOf(be.page); if (i < be.order.length - 1) beShowPage(be.order[i + 1]); });
+        $be('beApply').addEventListener('click', beApply);
+        $be('beCancel').addEventListener('click', () => {
+            if (be.busy) return;
+            if (beChanged() && !window.confirm('放弃这些修改并关闭编辑器？')) return;
+            beClose();
+        });
+        window.addEventListener('resize', () => { if ($be('boxEditor').classList.contains('open')) beLayout(); });
+        document.addEventListener('keydown', e => {
+            if (!$be('boxEditor').classList.contains('open')) return;
+            const typing = document.activeElement && document.activeElement.tagName === 'TEXTAREA';
+            if (typing) return;
+            if ((e.key === 'Delete' || e.key === 'Backspace') && be.sel) { e.preventDefault(); beDeleteSel(); }
+            else if ((e.ctrlKey || e.metaKey) && e.key.toLowerCase() === 'z') { e.preventDefault(); beUndoOne(); }
+        });
     </script>
 
 </body>

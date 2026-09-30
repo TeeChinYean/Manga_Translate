@@ -7,6 +7,8 @@ The bubble bbox is kept in hidden columns so rows can be matched to the re-extra
 bubbles even if block ids shift. Sheet "meta" (hidden) records the source PDF hash
 and the render parameters of the original run.
 """
+import json
+import math
 import os
 import time
 
@@ -136,6 +138,57 @@ def read_corrections(xlsx_path) -> tuple[dict, dict]:
         return meta, corrections
     finally:
         wb.close()
+
+
+MAX_EDITOR_ROWS = 5000
+MAX_EDITOR_TEXT = 2000
+
+
+def parse_corrections_json(text: str) -> dict:
+    """
+    Rows from the box editor (same shape as read_corrections): JSON
+    {"pages": {"3": [{"id": 1, "bbox": [x0, y0, x1, y1], "text": "译文", "raw": "原文"}, ...]}}.
+    bbox is in PDF points, origin top-left. A page with an empty list is kept (rendered without
+    any bubble). Returns {page_num: [{"id", "bbox", "text", "raw"}]}; raises CorrectionsError.
+    """
+    try:
+        data = json.loads(text)
+    except (TypeError, ValueError):
+        raise CorrectionsError("框编辑数据不是合法的 JSON")
+    pages = data.get("pages") if isinstance(data, dict) else None
+    if not isinstance(pages, dict) or not pages:
+        raise CorrectionsError("框编辑数据里没有页面")
+    out, total = {}, 0
+    for key, rows in pages.items():
+        try:
+            page = int(key)
+        except (TypeError, ValueError):
+            raise CorrectionsError(f"页码无效: {key}")
+        if page < 1 or not isinstance(rows, list):
+            raise CorrectionsError(f"第 {key} 页的数据无效")
+        clean, seen = [], set()
+        for r in rows:
+            try:
+                bid = int(r["id"])
+                bbox = [float(v) for v in r["bbox"]]
+            except (KeyError, TypeError, ValueError):
+                raise CorrectionsError(f"第 {page} 页有一个框的数据不完整")
+            if len(bbox) != 4 or not all(math.isfinite(v) for v in bbox) \
+                    or bbox[2] - bbox[0] < 1 or bbox[3] - bbox[1] < 1:
+                raise CorrectionsError(f"第 {page} 页的框 #{bid} 坐标无效")
+            if bid in seen:
+                raise CorrectionsError(f"第 {page} 页的框编号 #{bid} 重复")
+            seen.add(bid)
+            txt = "" if r.get("text") is None else str(r["text"])
+            if len(txt) > MAX_EDITOR_TEXT:
+                raise CorrectionsError(f"第 {page} 页的框 #{bid} 译文过长")
+            raw = "" if r.get("raw") is None else str(r["raw"])[:MAX_EDITOR_TEXT]
+            clean.append({"id": bid, "bbox": bbox, "text": txt, "raw": raw})
+        total += len(clean)
+        out[page] = clean
+    if total > MAX_EDITOR_ROWS:
+        raise CorrectionsError("框数量过多")
+    return out
 
 
 def _iou(a, b) -> float:

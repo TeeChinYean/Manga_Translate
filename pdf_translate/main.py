@@ -65,7 +65,8 @@ except ImportError:
     pass
 
 from fastapi import FastAPI, UploadFile, File, Form, HTTPException
-from fastapi.responses import HTMLResponse, StreamingResponse, FileResponse
+from fastapi.responses import HTMLResponse, StreamingResponse, FileResponse, Response
+from pydantic import BaseModel
 from starlette.background import BackgroundTask
 
 import fitz
@@ -379,6 +380,7 @@ async def translation_worker():
             
             # Outputs of the previous task are dropped once a new task starts (downloaded ones are already gone)
             clear_dir_contents(STATIC_DIR)
+            close_edit_sessions()
             
             # Step 1: Intelligent Layout Extraction (CPU Parallel)
             status_db[task_id] = {
@@ -856,6 +858,21 @@ async def translation_worker():
                 if p_blocks:
                     script_pages.append({"page_num": p_num, "blocks": p_blocks})
 
+            # Bubbles + translations for the box editor (page image comes from /api/v1/edit/...)
+            edit_pages = []
+            for p_data in layout_data:
+                if p_data["page_num"] not in selected_pages:
+                    continue
+                edit_pages.append({
+                    "page": p_data["page_num"],
+                    "w": float(p_data.get("page_width") or 0), "h": float(p_data.get("page_height") or 0),
+                    "blocks": [{"id": blk.get("id"), "bbox": [float(v) for v in blk.get("bbox")],
+                                "raw": blk.get("cleaned_text", blk.get("text", "")),
+                                "text": translated_text_map.get((p_data["page_num"], blk.get("id")), "")}
+                               for blk in p_data.get("blocks", []) if blk.get("bbox")],
+                })
+            edit_data = {"pages": edit_pages, "source_lang": source_lang}
+
             xlsx_path = None
             try:
                 from core.document_skill import LocalDocumentSkill
@@ -912,6 +929,7 @@ async def translation_worker():
                 "download_zip_url": download_zip_url,
                 "download_xlsx_url": download_xlsx_url,
                 "download_json_url": download_json_url,
+                "edit_data": edit_data,
                 "metrics": total_metrics
             }
             logger.info(f"[✓] Task {task_id} completed successfully! Download URL: {download_url}")
@@ -1115,6 +1133,120 @@ async def preview_render_page(
         logger.error(f"Failed to generate preview: {e}", exc_info=True)
         return {"success": False, "error": str(e)}
 
+# ── Box editor: the browser keeps the source PDF, the server keeps a copy only while editing ──
+edit_sessions = {}          # edit_id -> {"pdf_path", "total_pages"}
+edit_lock = asyncio.Lock()  # one OCR/translation at a time
+MAX_EDIT_PAGE_PX = 1400
+
+
+def close_edit_sessions() -> None:
+    for sid in list(edit_sessions):
+        info = edit_sessions.pop(sid, None)
+        if info:
+            _remove_quietly(info["pdf_path"])
+
+
+def render_edit_page_png(pdf_path: str, page_num: int, max_px: int = MAX_EDIT_PAGE_PX):
+    """(png bytes, page width pt, page height pt) of the ORIGINAL page, longest side <= max_px."""
+    doc = fitz.open(pdf_path)
+    try:
+        page = doc[page_num - 1]
+        w, h = float(page.rect.width), float(page.rect.height)
+        scale = min(max_px / max(w, h), 3.0)
+        pix = page.get_pixmap(matrix=fitz.Matrix(scale, scale), alpha=False)
+        return pix.tobytes("png"), w, h
+    finally:
+        doc.close()
+
+
+@app.post("/api/v1/edit/open")
+async def edit_open(file: UploadFile = File(...)):
+    """Upload the source PDF once for the box editor; returns edit_id."""
+    if not (file.filename or "").lower().endswith(".pdf"):
+        raise HTTPException(status_code=400, detail="Only PDF files are supported.")
+    close_edit_sessions()
+    edit_id = uuid.uuid4().hex[:10]
+    path = os.path.join(UPLOAD_DIR, f"edit_{edit_id}.pdf")
+    with open(path, "wb") as f:
+        f.write(await file.read())
+    try:
+        doc = fitz.open(path)
+        total = len(doc)
+        doc.close()
+    except Exception as ex:
+        _remove_quietly(path)
+        raise HTTPException(status_code=400, detail=f"Invalid PDF file: {ex}")
+    edit_sessions[edit_id] = {"pdf_path": path, "total_pages": total}
+    return {"edit_id": edit_id, "total_pages": total}
+
+
+def _edit_session(edit_id: str) -> dict:
+    info = edit_sessions.get(edit_id)
+    if not info:
+        raise HTTPException(status_code=404, detail="编辑会话已过期，请重新打开框编辑器。")
+    return info
+
+
+@app.get("/api/v1/edit/{edit_id}/page/{page_num}")
+async def edit_page_image(edit_id: str, page_num: int):
+    info = _edit_session(edit_id)
+    if page_num < 1 or page_num > info["total_pages"]:
+        raise HTTPException(status_code=404, detail="Page out of range.")
+    png, w, h = await asyncio.to_thread(render_edit_page_png, info["pdf_path"], page_num)
+    return Response(content=png, media_type="image/png",
+                    headers={"X-Page-Width": f"{w:.2f}", "X-Page-Height": f"{h:.2f}", "Cache-Control": "no-store"})
+
+
+@app.delete("/api/v1/edit/{edit_id}")
+async def edit_close(edit_id: str):
+    info = edit_sessions.pop(edit_id, None)
+    if info:
+        _remove_quietly(info["pdf_path"])
+    return {"status": "closed"}
+
+
+class EditOcrRequest(BaseModel):
+    page: int
+    bbox: list[float]
+    source_lang: str = "Japanese"
+    target_lang: str = "Simplified Chinese"
+
+
+@app.post("/api/v1/edit/{edit_id}/ocr")
+async def edit_ocr_translate(edit_id: str, req: EditOcrRequest):
+    """OCR + translate ONE box the user drew (no other page is touched)."""
+    global translation_engine
+    info = _edit_session(edit_id)
+    b = req.bbox
+    if req.page < 1 or req.page > info["total_pages"]:
+        raise HTTPException(status_code=404, detail="Page out of range.")
+    if len(b) != 4 or not all(v == v and abs(v) < 1e6 for v in b) or b[2] - b[0] < 4 or b[3] - b[1] < 4:
+        raise HTTPException(status_code=400, detail="框太小或坐标无效。")
+    try:
+        async with edit_lock:
+            from core.extractor import ocr_region
+            raw = await asyncio.to_thread(ocr_region, info["pdf_path"], req.page, b, req.source_lang)
+            raw = (raw or "").strip()
+            if not raw:
+                return {"raw": "", "translated": "", "note": "这个框里没有识别到文字，请手动输入译文。"}
+            if translation_engine is None:
+                translation_engine = HighPerformanceTranslationEngine()
+            if req.source_lang == "Japanese":
+                from core.engine import ensure_turbovec_llm_ready
+                await asyncio.to_thread(ensure_turbovec_llm_ready, True, 20)
+            block = {"id": 0, "text": raw}
+            await asyncio.to_thread(translation_engine.translate_batch, [block],
+                                    source_lang=req.source_lang, target_lang=req.target_lang, context_chunk_size=12)
+            await asyncio.to_thread(apply_language_check, [(req.page, block)], translation_engine,
+                                    req.source_lang, req.target_lang)
+            return {"raw": raw, "translated": block.get("translated_text", "") or ""}
+    except HTTPException:
+        raise
+    except Exception as ex:
+        logger.error(f"[Editor] OCR/translate failed: {ex}", exc_info=True)
+        raise HTTPException(status_code=500, detail=f"识别或翻译失败: {ex}")
+
+
 async def _load_corrections(xlsx: UploadFile, pdf: UploadFile):
     """Validate and parse a corrected Excel script; the xlsx never stays on disk."""
     from core.document_skill import read_corrections, CorrectionsError, MAX_XLSX_BYTES
@@ -1155,7 +1287,8 @@ async def upload_pdf_file(
     context_chunk_size: int = Form(DEFAULT_CONTEXT_CHUNK),
     translate_batch_lines: int = Form(DEFAULT_STREAM_BATCH_LINES),
     series: str = Form(""),
-    corrections: UploadFile = File(None)
+    corrections: UploadFile = File(None),
+    corrections_json: str = Form("")
 ):
     """
     Uploads the raw PDF file, assigns uuid, applies custom tuning parameters, and queues the task.
@@ -1178,6 +1311,15 @@ async def upload_pdf_file(
             font_scale = float(meta.get("font_scale", font_scale))
         except ValueError:
             pass
+        pipeline_mode = "serial"
+    elif (corrections_json or "").strip():
+        # Box editor: edited bubbles (positions + translations) as JSON; render parameters come from the form
+        from core.document_skill import parse_corrections_json, CorrectionsError
+        try:
+            correction_rows = parse_corrections_json(corrections_json)
+        except CorrectionsError as e:
+            raise HTTPException(status_code=400, detail=str(e))
+        page_range = ",".join(str(p) for p in sorted(correction_rows))
         pipeline_mode = "serial"
 
     task_id = str(uuid.uuid4())
@@ -1267,7 +1409,7 @@ async def get_translation_status_stream(task_id: str):
                 last_percent = percent
                 
                 if status == "complete":
-                    yield f"event: complete\ndata: {json.dumps({'download_url': task_status.get('download_url'), 'download_zip_url': task_status.get('download_zip_url'), 'download_xlsx_url': task_status.get('download_xlsx_url'), 'download_json_url': task_status.get('download_json_url'), 'warning': task_status.get('warning', ''), 'failed_pages': task_status.get('failed_pages', []), 'stage_times': (task_status.get('metrics') or {}).get('stage_times'), 'pipeline_mode': (task_status.get('metrics') or {}).get('pipeline_mode'), 'extract_devices': (task_status.get('metrics') or {}).get('extract_devices'), 'translate_breakdown': (task_status.get('metrics') or {}).get('translate_breakdown'), 'render_breakdown': (task_status.get('metrics') or {}).get('render_breakdown'), 'extract_breakdown': (task_status.get('metrics') or {}).get('extract_breakdown'), 'model_usage': (task_status.get('metrics') or {}).get('model_usage')}, ensure_ascii=False)}\n\n"
+                    yield f"event: complete\ndata: {json.dumps({'download_url': task_status.get('download_url'), 'download_zip_url': task_status.get('download_zip_url'), 'download_xlsx_url': task_status.get('download_xlsx_url'), 'download_json_url': task_status.get('download_json_url'), 'warning': task_status.get('warning', ''), 'edit_data': task_status.get('edit_data'), 'failed_pages': task_status.get('failed_pages', []), 'stage_times': (task_status.get('metrics') or {}).get('stage_times'), 'pipeline_mode': (task_status.get('metrics') or {}).get('pipeline_mode'), 'extract_devices': (task_status.get('metrics') or {}).get('extract_devices'), 'translate_breakdown': (task_status.get('metrics') or {}).get('translate_breakdown'), 'render_breakdown': (task_status.get('metrics') or {}).get('render_breakdown'), 'extract_breakdown': (task_status.get('metrics') or {}).get('extract_breakdown'), 'model_usage': (task_status.get('metrics') or {}).get('model_usage')}, ensure_ascii=False)}\n\n"
                     break
                 elif status == "failed":
                     yield f"event: error\ndata: {json.dumps({'message': task_status.get('message', 'Processing pipeline crashed.')})}\n\n"

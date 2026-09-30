@@ -281,3 +281,16 @@
   - 允许 / 保留字符集在 text_check.py 顶部的常量里，需要放宽或收紧直接改常量
 - 相关测试：tests/test_text_check.py（字符分类、清理、重译流程、重译失败回退、警告文字、`apply_language_check` 只重发问题行且用原文），已接入 test_pre_commit
 - 状态：Done（未覆盖：繁体字混入，见「待确认问题」）
+
+### [Home] 翻译完成后手动调整检测框（框编辑器）
+- 说明：翻译完成后，结果区多一个「✏️ 调整检测框 / 编辑译文」按钮，打开全屏编辑器：在原始页面上叠一层 canvas（逻辑参考用户给的「PDF 框选标注」页面：归一化坐标、指针事件、拖动画框、删除、撤销），可以移动 / 拖角缩放已有框、画新框、删除框、直接改译文。点「重绘并生成新 PDF」后，用修改后的框和译文重新消字与排版，不重新 OCR、不重新翻译
+- 涉及文件/模块：templates/index.html（编辑器 UI、`runTask(extraFields)` 由原来的点击处理函数拆出）、main.py（`/api/v1/edit/open|{id}/page/{n}|{id}/ocr|DELETE {id}`、上传接口 `corrections_json`、完成事件里的 `edit_data`）、core/document_skill.py（`parse_corrections_json`）、core/extractor.py（`ocr_region`）
+- 实现要点：
+  - 数据来源：完成事件带 `edit_data`（每页的宽高 pt + 每个气泡的 id / bbox / 原文 / 译文）；页面图片由服务器用打开编辑器时上传的 PDF 副本渲染（`/edit/open`，只留一份，关闭 / 新任务开始 / 启动时都会删）；服务器不保存任何翻译结果，任务结束后照样清理
+  - 坐标：框以「占页面宽高的比例」保存，提交时换回 PDF 点（左上角原点）—— 和 Excel 台本的 bbox 完全同一坐标系，所以后端直接走已有的「校对回填」分支（`blocks_from_corrections`，只跑文字遮罩检测）
+  - 新画的框：自动只对该框跑 MangaOCR（`ocr_region`，日文，失败回退 RapidOCR）+ 翻译 + 语言检查；识别不到文字时提示手动输入；已有框移动后可点「识别并翻译此框」重新识别
+  - 删除框 = 该处保留原图；译文清空同理；撤销栈 60 步（移动 / 缩放 / 新增 / 删除 / 识别 / 改译文）；有修改才能点重绘，取消时有确认
+  - 重绘会开一个新任务，替换当前结果（旧的未下载文件会被清掉，编辑器里有提示）；所有页都会重新排版（不在范围内的页保持原图）
+  - 校验：`corrections_json` 必须是 `{"pages": {"页码": [{id, bbox, text, raw}]}}`，bbox 有限且宽高 ≥1pt、同页 id 不重复、译文 ≤2000 字、≤5000 个框，否则 400 且不留上传文件
+- 相关测试：tests/test_box_editor.py（JSON 校验、页面图片 / 会话生命周期、OCR 接口含语言检查与出错分支、`ocr_region` 裁剪、JSON 回填入队、页面接线），已接入 test_pre_commit；另外用无头 Chromium 对真实 `main.app` 做了端到端操作：移动 +30px、缩放 +20px、撤销、改译文、画新框自动识别、删除、翻页、提交 —— 入队的 bbox / 译文全部正确
+- 状态：Done（未在真实漫画 + 模型上实测重绘效果，见「待确认问题」）

@@ -593,6 +593,41 @@ def _manga_ocr_batch(mocr, images, batch_size: int = MANGA_OCR_BATCH) -> list:
     return texts
 
 
+def ocr_region(pdf_path, page_num, bbox, source_lang="Japanese") -> str:
+    """OCR one rectangle of a page (box editor: a box the user drew by hand).
+    bbox = [x0, y0, x1, y1] in PDF points, origin top-left. Same raster scale as page
+    extraction (page height 850 px). Japanese: MangaOCR, then RapidOCR as fallback."""
+    from PIL import Image
+    doc = fitz.open(pdf_path)
+    try:
+        page = doc[page_num - 1]
+        pad = 3.0
+        rect = fitz.Rect(bbox[0] - pad, bbox[1] - pad, bbox[2] + pad, bbox[3] + pad) & page.rect
+        if rect.is_empty or rect.width < 2 or rect.height < 2:
+            return ""
+        scale = 850.0 / max(1.0, float(page.rect.height))
+        pix = page.get_pixmap(matrix=fitz.Matrix(scale, scale), clip=rect, alpha=False)
+        crop = np.frombuffer(pix.samples, dtype=np.uint8).reshape((pix.height, pix.width, 3)).copy()
+    finally:
+        doc.close()
+    if source_lang == "Japanese":
+        mocr = _get_manga_ocr()
+        if mocr is not None:
+            img = Image.fromarray(crop)
+            if img.width < 16 or img.height < 16:
+                img = img.resize((max(img.width, 32), max(img.height, 32)), Image.LANCZOS)
+            texts = _manga_ocr_batch(mocr, [img])
+            if texts and texts[0]:
+                return texts[0].strip()
+    paddle = _get_paddle_ocr()
+    if paddle is None:
+        return ""
+    res, _ = paddle(crop)
+    if not res:
+        return ""
+    return "".join(line[1].strip() for line in res if line and len(line) > 1 and line[1]).strip()
+
+
 def _get_ocr_reader(lang="Japanese"):
     global _OCR_READER_JA, _OCR_READER_EN
     eo = _get_easyocr()
