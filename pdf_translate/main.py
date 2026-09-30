@@ -66,6 +66,7 @@ except ImportError:
 
 from fastapi import FastAPI, UploadFile, File, Form, HTTPException
 from fastapi.responses import HTMLResponse, StreamingResponse, FileResponse, Response
+from typing import List, Optional
 from pydantic import BaseModel
 from starlette.background import BackgroundTask
 
@@ -391,7 +392,11 @@ def build_edit_pages(layout_pages: list, tmap: dict, default_dir: str = "horizon
             "blocks": [{"id": blk.get("id"), "bbox": [float(v) for v in blk.get("bbox")],
                         "raw": blk.get("cleaned_text", blk.get("text", "")),
                         "text": tmap.get((p_data["page_num"], blk.get("id")), ""),
-                        "direction": blk.get("direction") or default_dir}
+                        "direction": blk.get("direction") or default_dir,
+                        # lettering size: chosen by the user (0 = automatic), the size it was drawn at,
+                        # and the inputs of that layout (original glyph size, bubble) for the live preview
+                        "font_size": blk.get("font_size_pt") or 0, "fs_pt": blk.get("fs_pt"),
+                        "glyph_pt": blk.get("glyph_pt") or 0, "bubble_pt": blk.get("bubble_pt")}
                        for blk in p_data.get("blocks", []) if blk.get("bbox")],
         })
     return out
@@ -426,7 +431,8 @@ def plan_review(pages: list, rows_by_page: dict, tmap: dict, default_dir: str = 
                 if moved and not typed:
                     need.append((num, blk))
                 turned = (r.get("direction") or default_dir) != (o.get("direction") or default_dir)
-                if moved or typed or turned:
+                sized = float(r.get("font_size") or 0) != float(o.get("font_size_pt") or 0)
+                if moved or typed or turned or sized:
                     blk["user_edited"] = True
             else:   # drawn by the user
                 blk["user_edited"] = True
@@ -840,7 +846,8 @@ async def translation_worker():
                 status_db[task_id] = {
                     "percent": 45, "stage": "翻译完成，等待你调整检测框（调好后点「继续重绘」）", "status": "review",
                     "edit_data": {"pages": build_edit_pages(pages, translated_text_map, text_direction),
-                                  "source_lang": source_lang, "text_direction": text_direction},
+                                  "source_lang": source_lang, "text_direction": text_direction,
+                                  "font_scale": font_scale},
                     "metrics": total_metrics}
                 logger.info(f"[Review] task {task_id}: waiting for the user (timeout {REVIEW_TIMEOUT_SEC}s)")
                 t_wait = time.monotonic()
@@ -1087,7 +1094,8 @@ async def translation_worker():
                         for b in bdata["blocks"]]})
                 edit_pages.sort(key=lambda ep: ep["page"])
                 script_pages.sort(key=lambda sp: sp["page_num"])
-            edit_data = {"pages": edit_pages, "source_lang": source_lang, "text_direction": text_direction}
+            edit_data = {"pages": edit_pages, "source_lang": source_lang, "text_direction": text_direction,
+                         "font_scale": font_scale}
 
             xlsx_path = None
             try:
@@ -1436,6 +1444,70 @@ class EditOcrRequest(BaseModel):
     bbox: list[float]
     source_lang: str = "Japanese"
     target_lang: str = "Simplified Chinese"
+
+
+class FontBox(BaseModel):
+    id: int
+    bbox: list
+    text: str = ""
+    direction: str = ""
+    font_size: float = 0
+    glyph_pt: float = 0
+    bubble_pt: Optional[list] = None
+    moved: bool = False
+
+
+class FontSizeRequest(BaseModel):
+    page_w: float
+    page_h: float
+    text_direction: str = "horizontal"
+    font_scale: float = 1.0
+    boxes: List[FontBox]
+
+
+def estimate_font_sizes(req: "FontSizeRequest") -> dict:
+    """
+    Size (PDF points) each box will be lettered at, computed with the renderer's own layout code:
+    {id: {"pt": size, "estimate": bool}}. A box that was not moved keeps the original glyph size and
+    the speech bubble found at the last render, so its number matches that render; a moved / drawn
+    box (or a page that was never rendered) only gets an estimate from its rectangle.
+    """
+    from PIL import Image
+    from core.document_skill import clean_font_size, MAX_EDITOR_ROWS, MAX_EDITOR_TEXT
+    if not (10 <= req.page_w <= 20000 and 10 <= req.page_h <= 20000) or len(req.boxes) > MAX_EDITOR_ROWS:
+        raise ValueError("bad page size or too many boxes")
+    scale = min(2.0, 1600.0 / max(1.0, req.page_h))
+    W, H = max(1, int(req.page_w * scale)), max(1, int(req.page_h * scale))
+    renderer = PDFLayoutRenderer(None, None, font_scale=min(max(float(req.font_scale or 1.0), 0.3), 3.0),
+                                 text_direction=normalize_direction(req.text_direction))
+    items, blocks = [], {}
+    for b in req.boxes:
+        text = (b.text or "").strip()[:MAX_EDITOR_TEXT]
+        if not text or len(b.bbox) != 4:
+            continue
+        x0, y0, x1, y1 = (max(0, int(float(v) * scale)) for v in b.bbox)
+        if x1 - x0 < 2 or y1 - y0 < 2:
+            continue
+        known = (not b.moved) and (b.glyph_pt > 0 or bool(b.bubble_pt))
+        bubble = [int(float(v) * scale) for v in b.bubble_pt] if (not b.moved and b.bubble_pt and len(b.bubble_pt) == 4) else None
+        blk = {"id": b.id, "direction": b.direction if b.direction in DIRECTIONS else "",
+               "font_size_pt": clean_font_size(b.font_size), "user_edited": True}
+        style = {"glyph_px": int(b.glyph_pt * scale) if not b.moved else 0, "clean_bg": False, "scale": scale,
+                 "bubble": bubble, "orient": None}
+        items.append((x0, y0, x1, y1, text, blk, style))
+        blocks[b.id] = (blk, not known)
+    renderer._layout_translations(Image.new("RGB", (W, H), "white"), items)
+    return {bid: {"pt": blk.get("fs_pt"), "estimate": est} for bid, (blk, est) in blocks.items()}
+
+
+@app.post("/api/v1/edit/fontsize")
+async def edit_font_sizes(req: FontSizeRequest):
+    """Live 'final lettering size' numbers for the box editor (no rendering, no OCR, no LLM)."""
+    try:
+        sizes = await asyncio.to_thread(estimate_font_sizes, req)
+    except ValueError as ex:
+        raise HTTPException(status_code=400, detail=str(ex))
+    return {"sizes": sizes}
 
 
 @app.post("/api/v1/edit/{edit_id}/ocr")

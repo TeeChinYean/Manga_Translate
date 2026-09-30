@@ -143,6 +143,20 @@ def read_corrections(xlsx_path) -> tuple[dict, dict]:
 
 MAX_EDITOR_ROWS = 5000
 MAX_EDITOR_TEXT = 2000
+MIN_FONT_PT, MAX_FONT_PT = 4.0, 150.0     # box editor: lettering size chosen by the user, in PDF points (0 = automatic)
+
+
+def clean_font_size(value) -> float:
+    """Font size (pt) from the box editor: 0 = automatic, otherwise clamped to MIN_FONT_PT..MAX_FONT_PT."""
+    try:
+        v = float(value or 0)
+    except (TypeError, ValueError):
+        return 0.0
+    if not math.isfinite(v) or v <= 0:
+        return 0.0
+    return round(min(max(v, MIN_FONT_PT), MAX_FONT_PT), 1)
+
+
 DIRECTIONS = ("horizontal", "vertical", "vertical_rtl", "auto")   # lettering direction; keep in sync with core.renderer.TEXT_DIRECTIONS
 
 
@@ -187,7 +201,7 @@ def parse_corrections_json(text: str) -> dict:
             raw = "" if r.get("raw") is None else str(r["raw"])[:MAX_EDITOR_TEXT]
             direction = r.get("direction") if r.get("direction") in DIRECTIONS else ""
             clean.append({"id": bid, "bbox": bbox, "text": txt, "raw": raw, "edited": bool(r.get("edited")),
-                          "direction": direction})
+                          "direction": direction, "font_size": clean_font_size(r.get("font_size"))})
         total += len(clean)
         out[page] = clean
     if total > MAX_EDITOR_ROWS:
@@ -251,6 +265,8 @@ def blocks_from_corrections(rows: list) -> list:
                        "ocr_engine": "Excel 台本", "user_edited": bool(r.get("edited"))})
         if r.get("direction") in DIRECTIONS:
             blocks[-1]["direction"] = r["direction"]     # per-box lettering direction (box editor)
+        if clean_font_size(r.get("font_size")):
+            blocks[-1]["font_size_pt"] = clean_font_size(r.get("font_size"))   # per-box lettering size (box editor)
     return blocks
 
 

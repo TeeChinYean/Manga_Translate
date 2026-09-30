@@ -1391,6 +1391,14 @@
                             <option value="auto" style="color:black">自动（按原文文字的排列）</option>
                         </select>
                     </label>
+                    <label style="font-size: 0.85rem; display: flex; align-items: center; gap: 6px;">此框字号 (pt)
+                        <input id="beFont" type="number" min="4" max="150" step="0.5" placeholder="自动"
+                               style="width: 72px; padding: 6px 8px; background: rgba(255,255,255,0.08); border: 1px solid rgba(255,255,255,0.15); border-radius: 6px; color: var(--text-primary);">
+                        <button class="btn" id="beFontDown" type="button" title="小 1 pt" style="padding: 4px 10px;">−</button>
+                        <button class="btn" id="beFontUp" type="button" title="大 1 pt" style="padding: 4px 10px;">+</button>
+                        <button class="btn" id="beFontAuto" type="button" title="交给程序自动决定" style="padding: 4px 10px; font-size: 0.8rem;">自动</button>
+                    </label>
+                    <div class="be-hint" id="beFontInfo"></div>
                     <button class="btn" id="beOcr" type="button" style="padding: 8px 12px; font-size: 0.85rem;">🔍 识别并翻译此框</button>
                     <div class="be-hint" id="beNote"></div>
                 </div>
@@ -2088,14 +2096,19 @@
                     boxes: p.blocks.map(b => ({
                         id: b.id, raw: b.raw || '', text: b.text || '', isNew: false,
                         dir: b.direction || editData.text_direction || 'horizontal',
+                        fontSize: b.font_size || 0,      // lettering size chosen by the user, pt (0 = automatic)
                         nx: b.bbox[0] / p.w, ny: b.bbox[1] / p.h,
                         nw: (b.bbox[2] - b.bbox[0]) / p.w, nh: (b.bbox[3] - b.bbox[1]) / p.h,
+                        // what the last render did with this box (for the live size preview)
+                        meta: { fs: b.fs_pt || 0, glyph: b.glyph_pt || 0, bubble: b.bubble_pt || null,
+                                box: [b.bbox[0] / p.w, b.bbox[1] / p.h, (b.bbox[2] - b.bbox[0]) / p.w, (b.bbox[3] - b.bbox[1]) / p.h] },
                     })),
                 };
                 be.order.push(p.page);
             }
             be.order.sort((a, b) => a - b);
             be.defaultDir = editData.text_direction || 'horizontal';   // direction of newly drawn boxes
+            be.fontScale = editData.font_scale || 1; be.sizes = {};    // sizes: page -> { box id -> { pt, estimate } }
             be.undo = []; be.sel = null; be.tool = 'select';
             be.initial = beSnapshot();
             be.initialBoxes = {};   // page -> { box id -> JSON }: which boxes the user touched
@@ -2124,7 +2137,7 @@
             beLayout(); beFillForm();
         }
 
-        function beRedraw() {
+        function beDraw() {
             const ctx = beOv.getContext('2d');
             ctx.clearRect(0, 0, be.cssW, be.cssH);
             const p = beCur();
@@ -2135,7 +2148,7 @@
                 ctx.fillStyle = col + (sel ? '55' : '2a'); ctx.strokeStyle = sel ? '#ffffff' : col;
                 ctx.fillRect(x, y, w, h); ctx.strokeRect(x, y, w, h);
                 ctx.fillStyle = col; ctx.font = 'bold 12px sans-serif';
-                ctx.fillText('#' + b.id + (b.text ? '' : ' (空)') + (b.dir === 'auto' ? ' 自动' : b.dir === 'vertical_rtl' ? ' 竖←' : b.dir === 'vertical' ? ' 竖' : ''), x + 3, y + 13);
+                ctx.fillText('#' + b.id + (b.text ? '' : ' (空)') + (b.dir === 'auto' ? ' 自动' : b.dir === 'vertical_rtl' ? ' 竖←' : b.dir === 'vertical' ? ' 竖' : '') + (b.text ? beSizeTag(b) : ''), x + 3, y + 13);
                 if (sel) {
                     ctx.fillStyle = '#ffffff'; ctx.strokeStyle = col; ctx.lineWidth = 2;
                     Object.values(beCorners(b)).forEach(([cx, cy]) => {
@@ -2151,6 +2164,9 @@
             }
             beUpdateBar();
         }
+
+        // Redraw and refresh the "final lettering size" numbers (the server computes them, debounced)
+        function beRedraw() { beDraw(); beQueueSizes(); }
 
         const beRect = d => ({ x: Math.min(d.x0, d.x1), y: Math.min(d.y0, d.y1), w: Math.abs(d.x1 - d.x0), h: Math.abs(d.y1 - d.y0) });
         const bePos = e => {
@@ -2243,7 +2259,7 @@
             const p = beCur();
             bePushUndo();
             const b = { id: p.boxes.reduce((m, k) => Math.max(m, k.id), 0) + 1, raw: '', text: '', isNew: true,
-                        dir: be.defaultDir || 'horizontal',
+                        dir: be.defaultDir || 'horizontal', fontSize: 0,
                         nx: r.x / be.cssW, ny: r.y / be.cssH, nw: r.w / be.cssW, nh: r.h / be.cssH };
             p.boxes.push(b);
             be.sel = b; beSetTool('select'); beFillForm(); beRedraw();
@@ -2266,6 +2282,8 @@
             $be('beRaw').textContent = '原文：' + (b.raw || '（无）');
             $be('beText').value = b.text;
             $be('beDir').value = b.dir || 'horizontal';
+            $be('beFont').value = b.fontSize || '';
+            beShowFontInfo();
             $be('beNote').textContent = '';
             beUpdateBar();
         }
@@ -2281,6 +2299,76 @@
             if (!be.sel || be.busy) return;
             bePushUndo(); be.sel.dir = e.target.value; beRedraw();
         });
+
+        // ── Lettering size: show what each box will be drawn at, and let the user set it (pt, empty = automatic) ──
+        let beSizeTimer = null, beSizeSeq = 0, beSizeKey = '';
+        function beQueueSizes() { clearTimeout(beSizeTimer); beSizeTimer = setTimeout(beFetchSizes, 350); }
+
+        async function beFetchSizes() {
+            const p = beCur();
+            if (!p || !be.order.length) return;
+            const page = be.page;
+            const boxes = p.boxes.filter(b => (b.text || '').trim()).map(b => {
+                const m = b.meta;
+                const moved = !m || [b.nx - m.box[0], b.ny - m.box[1], b.nw - m.box[2], b.nh - m.box[3]]
+                    .some((d, i) => Math.abs(d) * (i % 2 ? p.h : p.w) > 1);
+                return { id: b.id, text: b.text, direction: b.dir || 'horizontal', font_size: b.fontSize || 0,
+                         glyph_pt: m ? m.glyph : 0, bubble_pt: m ? m.bubble : null, moved,
+                         bbox: [b.nx * p.w, b.ny * p.h, (b.nx + b.nw) * p.w, (b.ny + b.nh) * p.h].map(v => +v.toFixed(2)) };
+            });
+            const body = { page_w: p.w, page_h: p.h, text_direction: be.defaultDir || 'horizontal',
+                           font_scale: be.fontScale || 1, boxes };
+            const key = page + JSON.stringify(body);
+            if (key === beSizeKey) return;
+            const seq = ++beSizeSeq;
+            try {
+                const res = await fetch('/api/v1/edit/fontsize', { method: 'POST',
+                    headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(body) });
+                if (!res.ok || seq !== beSizeSeq) return;
+                const data = await res.json();
+                if (seq !== beSizeSeq) return;
+                beSizeKey = key;
+                be.sizes[page] = data.sizes || {};
+                beDraw(); beShowFontInfo();
+            } catch (e) { /* the numbers are only a hint */ }
+        }
+
+        function beSizeTag(b) {
+            const s = (be.sizes[be.page] || {})[b.id];
+            if (b.fontSize) return ` ${b.fontSize}pt`;
+            if (s && s.pt) return ` ${s.estimate ? '≈' : ''}${s.pt}pt`;
+            return b.meta && b.meta.fs ? ` ${b.meta.fs}pt` : '';
+        }
+
+        function beShowFontInfo() {
+            const b = be.sel;
+            if (!b) return;
+            const s = (be.sizes[be.page] || {})[b.id];
+            let t;
+            if (!(b.text || '').trim()) t = '没有译文，这个框不会绘制文字';
+            else if (b.fontSize) t = `已指定 ${b.fontSize} pt（重绘时固定使用，不会被自动缩小）`;
+            else if (s && s.pt) t = `最终字号 ${s.estimate ? '约 ' : ''}${s.pt} pt（自动` + (s.estimate ? '；框改过或还没重绘，仅供参考）' : '）');
+            else if (b.meta && b.meta.fs) t = `上次重绘的字号 ${b.meta.fs} pt（自动）`;
+            else t = '字号计算中…';
+            $be('beFontInfo').textContent = t;
+        }
+
+        function beSetFont(v) {
+            if (!be.sel || be.busy) return;
+            v = parseFloat(v);
+            v = isFinite(v) && v > 0 ? Math.min(150, Math.max(4, Math.round(v * 10) / 10)) : 0;
+            $be('beFont').value = v || '';
+            if (v === (be.sel.fontSize || 0)) return;
+            bePushUndo(); be.sel.fontSize = v; beRedraw(); beShowFontInfo();
+        }
+        function beCurPt() {
+            const s = be.sel && (be.sizes[be.page] || {})[be.sel.id];
+            return (be.sel && be.sel.fontSize) || (s && s.pt) || (be.sel && be.sel.meta && be.sel.meta.fs) || 12;
+        }
+        $be('beFont').addEventListener('change', e => beSetFont(e.target.value));
+        $be('beFontAuto').addEventListener('click', () => beSetFont(0));
+        $be('beFontUp').addEventListener('click', () => beSetFont(Math.round(beCurPt()) + 1));
+        $be('beFontDown').addEventListener('click', () => beSetFont(Math.round(beCurPt()) - 1));
 
         // OCR + translate one box (new box, or "re-recognise" after it was moved)
         async function beOcr(b) {
@@ -2376,7 +2464,7 @@
                     const p = be.pages[n];
                     pages[n] = p.boxes.map(b => ({
                         id: b.id, text: b.text, raw: b.raw,
-                        edited: b.isNew || be.initialBoxes[n][b.id] !== JSON.stringify(b), direction: b.dir || 'horizontal',
+                        edited: b.isNew || be.initialBoxes[n][b.id] !== JSON.stringify(b), direction: b.dir || 'horizontal', font_size: b.fontSize || 0,
                         bbox: [b.nx * p.w, b.ny * p.h, (b.nx + b.nw) * p.w, (b.ny + b.nh) * p.h].map(v => +v.toFixed(2)),
                     }));
                 }
@@ -2394,7 +2482,7 @@
                 const p = be.pages[n];
                 pages[n] = p.boxes.map(b => ({
                     id: b.id, text: b.text, raw: b.raw,
-                    edited: b.isNew || be.initialBoxes[n][b.id] !== JSON.stringify(b), direction: b.dir || 'horizontal',
+                    edited: b.isNew || be.initialBoxes[n][b.id] !== JSON.stringify(b), direction: b.dir || 'horizontal', font_size: b.fontSize || 0,
                     bbox: [b.nx * p.w, b.ny * p.h, (b.nx + b.nw) * p.w, (b.ny + b.nh) * p.h].map(v => +v.toFixed(2)),
                 }));
             }

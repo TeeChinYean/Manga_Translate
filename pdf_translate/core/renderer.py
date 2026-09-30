@@ -1616,7 +1616,7 @@ class PDFLayoutRenderer:
                 has_telea_masks = True
 
             dx0, dy0, dx1, dy1 = _text_draw_box(seg_full, px0, py0, px1, py1)
-            style = {"glyph_px": glyph_px, "clean_bg": not is_textured,
+            style = {"glyph_px": glyph_px, "clean_bg": not is_textured, "scale": scale,
                      "orient": _source_orientation(seg_full, px0, py0, px1, py1)}
             blocks_to_render.append((dx0, dy0, dx1, dy1, translated, block, style))
 
@@ -1657,7 +1657,13 @@ class PDFLayoutRenderer:
             resolved = self._resolve_direction(block, (px0, py0, px1, py1), orients[idx], page_prior)
             vertical, rtl = resolved != "horizontal", resolved == "vertical_rtl"
             fit = _best_font_vertical if vertical else _best_font
-            cands = _bubble_rects(gray, (px0, py0, px1, py1), others) if style.get("clean_bg") else None
+            if style.get("bubble"):      # bubble known from an earlier render (font-size preview)
+                cands = [tuple(int(v) for v in style["bubble"])]
+            else:
+                cands = _bubble_rects(gray, (px0, py0, px1, py1), others) if style.get("clean_bg") else None
+            scale = style.get("scale") or 0
+            forced_pt = float(block.get("font_size_pt") or 0)       # size chosen by the user in the box editor
+            forced_px = int(round(forced_pt * scale)) if forced_pt > 0 and scale else 0
             bubble = None
             if cands:
                 # Speech bubble found: typeset in the bubble interior and let the font grow as
@@ -1682,8 +1688,11 @@ class PDFLayoutRenderer:
                 page_floor = int(page_glyph * PAGE_GLYPH_FLOOR)
                 cap = min(max(cap, page_floor), page_cap) if cap else page_cap
             for _attempt in range(TYPESET_MAX_TRIES):
-                font, lines, fs = fit(translated, bw, bh, font_scale=self.font_scale,
-                                      max_size=cap, min_size=MIN_FONT_PX)
+                if forced_px:
+                    font, lines, fs = fit(translated, bw, bh, font_scale=1.0, max_size=forced_px, min_size=forced_px)
+                else:
+                    font, lines, fs = fit(translated, bw, bh, font_scale=self.font_scale,
+                                          max_size=cap, min_size=MIN_FONT_PX)
                 if rtl:
                     lines = lines[::-1]   # first column at the right, like the original manga
                 if vertical:   # columns left -> right, characters top -> bottom
@@ -1707,11 +1716,15 @@ class PDFLayoutRenderer:
                         top = py0  # overflowing text grows downward, never above the bubble
                     rect = (px0 + (bw - max(widths)) / 2, top, px0 + (bw + max(widths)) / 2, top + total_h)
                 clash = any(_rects_overlap(rect, r) for r in placed)
-                if not clash or fs <= MIN_FONT_PX:
+                if not clash or fs <= MIN_FONT_PX or forced_px:   # a size the user chose is never shrunk
                     break
                 cap = max(MIN_FONT_PX, fs - 2)   # strictly shrinking; bounded loop (never hangs)
                 _rstat("typeset_shrunk_for_overlap", 0.0)
             placed.append(rect)
+            if scale:      # what the box editor shows: the size this box is drawn at (PDF points) and its inputs
+                block["fs_pt"] = forced_pt if forced_px else round(fs / scale, 1)
+                block["glyph_pt"] = round(sizes[idx] / scale, 2) if sizes[idx] else 0
+                block["bubble_pt"] = [round(v / scale, 1) for v in bubble] if bubble is not None else None
             if vertical:
                 style = dict(style, vertical=True, vleft=left)
             plans.append((px0, py0, bw, bh, translated, block, style, font, lines, fs, widths, top))
@@ -1891,7 +1904,7 @@ class PDFLayoutRenderer:
                 _merge_into(mask_np, *bm)
             mask_np[py0:py1, px0:px1] = np.maximum(mask_np[py0:py1, px0:px1], stroke_mask)
             dx0, dy0, dx1, dy1 = _text_draw_box(seg_full, px0, py0, px1, py1)
-            style = {"glyph_px": glyph_px, "clean_bg": not is_textured,
+            style = {"glyph_px": glyph_px, "clean_bg": not is_textured, "scale": SCALE,
                      "orient": _source_orientation(seg_full, px0, py0, px1, py1)}
             blocks_to_render.append((dx0, dy0, dx1, dy1, translated, block, style))
 

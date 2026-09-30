@@ -355,3 +355,10 @@
 - 实现要点：Google 也失败的行保持「未翻译」（渲染时保留原图），引擎标记为「Google Translate API (未检测到 LLM)」；LLM 正常时流程不变；LLM 中途挂掉时仍走原来的逐块 Google 兜底
 - 相关测试：tests/test_korean_and_llm_fallback.py（无 LLM 走 Google、Google 也失败、失败结果被记住并可恢复）
 - 状态：Done
+
+### [Box Editor] 显示最终字号 + 每个框可指定字号
+- 说明：框编辑器里每个有译文的框，在画布标签上显示「最终会用多大的字」（如 `#3 12.5pt`），选中框时表单里有详细说明；表单新增「此框字号 (pt)」输入框、± 1 pt 按钮和「自动」按钮，留空 = 自动；指定后重绘时固定使用这个字号，不受原文字号上限、气泡大小和"与相邻文字重叠就缩小"的影响，范围 4–150 pt
+- 涉及文件/模块：`core/renderer.py`（`_layout_translations` 记录每个框的 `fs_pt / glyph_pt / bubble_pt`，`font_size_pt` 强制字号）、`core/document_skill.py`（`font_size` 解析，`clean_font_size`）、`main.py`（`build_edit_pages`、`plan_review`、`estimate_font_sizes`、`POST /api/v1/edit/fontsize`）、`templates/index.html`
+- 实现要点：① 没动过的框显示上次重绘用的真实字号，实时估算时复用当时的原文字号和气泡，所以数字与上次重绘一致；② 框移动 / 新画的框、或页面还没重绘过（先调框模式），只按框大小估算，标签前加 `≈`；③ 估算走渲染器同一套排版代码，不渲染、不 OCR、不用 LLM，改文字 / 方向 / 字号 / 框后 0.35 秒防抖再请求；④ 只改字号也会把框标记为「已编辑」，不会被嵌套重复框过滤掉
+- 相关测试：tests/test_font_size.py（记录字号、指定字号不缩小、忽略字号上限、真实渲染数据进入编辑数据、解析与钳位、仅改字号不触发 OCR、估算的精确 / 估计标志、接口、页面控件）；另外用浏览器 + 模拟服务器跑过一遍交互（+/−、输入、超范围钳位、自动、拖动、提交）
+- 状态：Done
