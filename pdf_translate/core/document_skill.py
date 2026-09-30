@@ -65,7 +65,8 @@ class LocalDocumentSkill:
         row = 2
         for page in pages_data:
             for blk in page.get("blocks", []):
-                if not str(blk.get("raw", "")).strip():
+                # A box with no OCR text is still exported when it has a translation (typed by hand in the box editor)
+                if not str(blk.get("raw", "")).strip() and not str(blk.get("translated", "")).strip():
                     continue
                 ws.cell(row=row, column=1, value=int(page["page_num"]))
                 ws.cell(row=row, column=2, value=int(blk["id"]))

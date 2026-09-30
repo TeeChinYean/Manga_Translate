@@ -292,5 +292,6 @@
   - 删除框 = 该处保留原图；译文清空同理；撤销栈 60 步（移动 / 缩放 / 新增 / 删除 / 识别 / 改译文）；有修改才能点重绘，取消时有确认
   - 重绘会开一个新任务，替换当前结果（旧的未下载文件会被清掉，编辑器里有提示）；所有页都会重新排版（不在范围内的页保持原图）
   - 校验：`corrections_json` 必须是 `{"pages": {"页码": [{id, bbox, text, raw}]}}`，bbox 有限且宽高 ≥1pt、同页 id 不重复、译文 ≤2000 字、≤5000 个框，否则 400 且不留上传文件
+- Excel 导出：没有 OCR 原文但有译文的框（编辑器里手动输入的新框）现在也会导出，否则重绘后的 Excel 里会少这一行（tests/test_excel_reinsert.py `test_box_with_translation_but_no_ocr_text_is_exported`）
 - 相关测试：tests/test_box_editor.py（JSON 校验、页面图片 / 会话生命周期、OCR 接口含语言检查与出错分支、`ocr_region` 裁剪、JSON 回填入队、页面接线），已接入 test_pre_commit；另外用无头 Chromium 对真实 `main.app` 做了端到端操作：移动 +30px、缩放 +20px、撤销、改译文、画新框自动识别、删除、翻页、提交 —— 入队的 bbox / 译文全部正确
 - 状态：Done（未在真实漫画 + 模型上实测重绘效果，见「待确认问题」）
