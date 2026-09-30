@@ -311,62 +311,6 @@
             transform: none;
         }
 
-        /* Performance Analytics Panel */
-        .metrics-grid {
-            display: grid;
-            grid-template-columns: repeat(3, 1fr);
-            gap: 20px;
-        }
-
-        @media (max-width: 640px) {
-            .metrics-grid {
-                grid-template-columns: 1fr;
-            }
-        }
-
-        .metric-card {
-            background: rgba(255, 255, 255, 0.02);
-            border: 1px solid rgba(255, 255, 255, 0.06);
-            border-radius: 16px;
-            padding: 20px;
-            display: flex;
-            flex-direction: column;
-            gap: 8px;
-            transition: all 0.3s ease;
-        }
-
-        .metric-card:hover {
-            border-color: rgba(16, 185, 129, 0.2);
-            background: rgba(16, 185, 129, 0.01);
-        }
-
-        .metric-label {
-            font-size: 0.75rem;
-            font-weight: 600;
-            color: var(--text-secondary);
-            text-transform: uppercase;
-            letter-spacing: 0.5px;
-        }
-
-        .metric-value {
-            font-family: 'Outfit', sans-serif;
-            font-size: 1.8rem;
-            font-weight: 800;
-            color: var(--text-primary);
-        }
-
-        .metric-value.speed {
-            color: var(--accent-emerald);
-        }
-
-        .metric-value.rate {
-            color: var(--accent-purple);
-        }
-
-        .metric-value.time {
-            color: var(--accent-indigo);
-        }
-
         /* SSE Kernel Shell Output */
         .console-panel {
             background: #040508;
@@ -1152,32 +1096,8 @@
                 </div>
             </div>
 
-            <!-- Right Panel: SSE Console and LLM Analytics -->
+            <!-- Right Panel: SSE Console -->
             <div class="glass-card">
-                <div class="card-header">
-                    <h2 class="card-title">LLM 推理监控与性能看板</h2>
-                    <p class="card-desc">直观感知 TensorRT-LLM 与投机解码带来的极致加速体验</p>
-                </div>
-
-                <!-- Analytics dashboard widgets -->
-                <div class="metrics-grid">
-                    <div class="metric-card">
-                        <div class="metric-label">翻译吞吐速率</div>
-                        <div class="metric-value speed" id="metricSpeed">--</div>
-                        <div class="metric-label" style="text-transform:none; margin-top:2px;">Tokens / Sec</div>
-                    </div>
-                    <div class="metric-card">
-                        <div class="metric-label">投机草稿接受率</div>
-                        <div class="metric-value rate" id="metricRate">--</div>
-                        <div class="metric-label" style="text-transform:none; margin-top:2px;">Acceptance %</div>
-                    </div>
-                    <div class="metric-card">
-                        <div class="metric-label">首字捕捉延迟</div>
-                        <div class="metric-value time" id="metricTime">--</div>
-                        <div class="metric-label" style="text-transform:none; margin-top:2px;">CUDA Graph Latency</div>
-                    </div>
-                </div>
-
                 <!-- Interactive console shell -->
                 <div class="console-panel" id="consoleOutput">
                     <div class="console-line info">
@@ -1417,9 +1337,6 @@
         const progressBarFill = document.getElementById('progressBarFill');
 
         // Metrics widgets
-        const metricSpeed = document.getElementById('metricSpeed');
-        const metricRate = document.getElementById('metricRate');
-        const metricTime = document.getElementById('metricTime');
 
         let selectedFile = null;
         let activeTaskId = null;
@@ -1542,10 +1459,6 @@
                 document.getElementById('elapsedTimerVal').textContent = `${elapsed.toFixed(1)}s`;
             }, 100);
 
-            metricSpeed.textContent = '--';
-            metricRate.textContent = '--';
-            metricTime.textContent = '--';
-
             logToConsole(`正在分发任务...`);
 
             // Assemble Form with tuned inpainting & typography parameters
@@ -1638,18 +1551,6 @@
                 progressBarFill.style.width = `${percent}%`;
                 logToConsole(`[${percent}%] ${stage}`);
 
-                // Update performance metric indicators dynamically when in inference step
-                if (data.metrics) {
-                    if (data.metrics.tokens_per_sec) {
-                        metricSpeed.textContent = `${parseFloat(data.metrics.tokens_per_sec).toFixed(1)}`;
-                    }
-                    if (data.metrics.acceptance_rate) {
-                        metricRate.textContent = `${parseFloat(data.metrics.acceptance_rate).toFixed(1)}%`;
-                    }
-                    if (data.metrics.latency_ms) {
-                        metricTime.textContent = `${parseInt(data.metrics.latency_ms)}ms`;
-                    }
-                }
             });
 
             eventSource.addEventListener('error', (e) => {

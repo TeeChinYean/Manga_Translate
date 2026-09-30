@@ -236,3 +236,9 @@
 - 相关测试：tests/test_excel_reinsert.py（导出→修改→读回、公式安全、id 变化 / bbox 偏移匹配、坏文件和外来文件拒绝、PDF 不匹配 400 且不留文件），已接入 test_pre_commit；真实测试：第5巻 第10页 5 个气泡，Excel 回填 5/5 匹配，45.9s 完成，未启动 LLM
 - 状态：Done
 
+### [Home] 移除「LLM 推理监控与性能看板」
+- 说明：右侧卡片不再显示标题与三个指标（翻译吞吐速率 Tokens/Sec、投机草稿接受率、首字捕捉延迟）；下方 SSE 控制台保留
+- 涉及文件/模块：templates/index.html（删除看板 HTML、`.metrics-grid`/`.metric-*` CSS、`metricSpeed/Rate/Time` 相关 JS）
+- 实现要点：后端 SSE 仍可能携带 `data.metrics`，前端直接忽略，无需改后端
+- 相关测试：tests/test_low_bugs.py `test_llm_metrics_board_removed_from_page`
+- 状态：Done
