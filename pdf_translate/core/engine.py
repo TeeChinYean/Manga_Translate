@@ -205,6 +205,23 @@ def restart_llm_if_evicted() -> bool:
     return ok
 
 
+LLM_DOWN_RETRY_S = 60.0          # after a failed LLM check, translate with Google for this long before checking again
+_LLM_DOWN = {"until": 0.0}
+
+
+def llm_available(max_wait_seconds: int = 20) -> bool:
+    """
+    True when the local Qwen server answers. A failed check is remembered for LLM_DOWN_RETRY_S so the
+    following batches go straight to Google instead of probing (and possibly waiting) every time.
+    """
+    if time.time() < _LLM_DOWN["until"]:
+        return False
+    ok = bool(ensure_turbovec_llm_ready(auto_launch=True, max_wait_seconds=max_wait_seconds))
+    if not ok:
+        _LLM_DOWN["until"] = time.time() + LLM_DOWN_RETRY_S
+    return ok
+
+
 def ensure_turbovec_llm_ready(auto_launch: bool = True, max_wait_seconds: int = 25) -> bool:
     """
     Checks if Turbovec LLM (port 18089 direct or 18088 gateway) is active and pre-warmed.
@@ -630,7 +647,7 @@ def _clean_input(text: str) -> str:
         w_alpha = "".join(c for c in w if c.isalpha())
         if len(w_alpha) >= 3 and not any(c in vowels for c in w_alpha):
             # Do not filter if it's CJK (Japanese doesn't use English vowels)
-            has_cjk = any('\u4e00' <= c <= '\u9fff' or '\u3040' <= c <= '\u30ff' for c in w_alpha)
+            has_cjk = _has_cjk(w_alpha)
             if not has_cjk:
                 # Skip this word (it's a consonant-only SFX or OCR noise)
                 continue
@@ -674,6 +691,11 @@ def _clean_output(text: str) -> str:
     
     return _manga_punct(text.strip())
 
+def _has_cjk(text: str) -> bool:
+    """Han, kana or Hangul: text that is not an ASCII word (so vowel-less checks must not apply)."""
+    return any('\u4e00' <= c <= '\u9fff' or '\u3040' <= c <= '\u30ff' or '\uac00' <= c <= '\ud7a3' for c in text)
+
+
 def _detect_src_lang(text: str) -> str:
     alpha = [c for c in text if c.isalpha()]
     if not alpha:
@@ -692,7 +714,7 @@ def _is_gibberish(text: str) -> bool:
     
     # 1. If the entire text contains letters but has absolutely no vowels, it's gibberish (e.g. RMMBBL, TMPYh)
     alpha_chars = [c for c in t if c.isalpha()]
-    has_cjk = any('\u4e00' <= c <= '\u9fff' or '\u3040' <= c <= '\u30ff' for c in t)
+    has_cjk = _has_cjk(t)
     
     if alpha_chars and not any(c in vowels for c in alpha_chars) and not has_cjk:
         return True
@@ -716,7 +738,7 @@ def _is_gibberish(text: str) -> bool:
             continue
             
         w_clean = "".join(c for c in w if c.isalpha())
-        w_has_cjk = any('\u4e00' <= c <= '\u9fff' or '\u3040' <= c <= '\u30ff' for c in w)
+        w_has_cjk = _has_cjk(w)
         if len(w_clean) >= 4 and not w_has_cjk:
             if not any(c in vowels for c in w_clean):
                 gibberish_count += 1
@@ -731,7 +753,7 @@ def _is_noise(text: str) -> bool:
     if not t:
         return True
         
-    has_cjk = any('\u4e00' <= c <= '\u9fff' or '\u3040' <= c <= '\u30ff' for c in t)
+    has_cjk = _has_cjk(t)
     
     if not has_cjk and len(t) < 2:
         return True
@@ -749,7 +771,7 @@ def _is_noise(text: str) -> bool:
         
     # Filter short vowel-less strings as noise (like TMP, P, Tm, Shh, Hmmm)
     alpha = [c for c in t if c.isalpha()]
-    has_cjk = any('\u4e00' <= c <= '\u9fff' or '\u3040' <= c <= '\u30ff' for c in t)
+    has_cjk = _has_cjk(t)
     
     if alpha and not any(c in "aeiouAEIOU" for c in alpha) and not has_cjk:
         # Allow exceptions like "Mr", "Dr", "Vs"
@@ -786,7 +808,7 @@ def _is_noise(text: str) -> bool:
             return True
     else:
         # For CJK, it is noise ONLY if there are literally 0 CJK characters
-        if not any('\u4e00' <= c <= '\u9fff' or '\u3040' <= c <= '\u30ff' for c in t):
+        if not _has_cjk(t):
             return True
     return False
 
@@ -1164,7 +1186,7 @@ class HighPerformanceTranslationEngine:
             if not raw:
                 continue
             
-            has_cjk = any('\u4e00' <= c <= '\u9fff' or '\u3040' <= c <= '\u30ff' for c in raw)
+            has_cjk = _has_cjk(raw)
             if len(raw) < 2 and not has_cjk:
                 continue
                 
@@ -1178,7 +1200,7 @@ class HighPerformanceTranslationEngine:
                 block["translation_engine"] = "Numeric Passthrough (纯数字)"
                 continue
 
-            src = _detect_src_lang(raw)
+            src = "ko" if source_lang == "Korean" else _detect_src_lang(raw)
             to_translate.append((i, raw, src))
 
         # ── Step 2-4: Translation Pipeline ──
@@ -1195,10 +1217,29 @@ class HighPerformanceTranslationEngine:
                     qwen_needed.append(i)
 
             if qwen_needed:
-                ensure_turbovec_llm_ready(auto_launch=True, max_wait_seconds=20)
-                logger.info(f"[Qwen Japanese Translation] Translating {len(qwen_needed)} blocks in context batch...")
+                llm_ok = llm_available(20)
                 chunk_size = max(1, int(context_chunk_size))
-                pending_chunks = [qwen_needed[c:c + chunk_size] for c in range(0, len(qwen_needed), chunk_size)]
+                if llm_ok:
+                    logger.info(f"[Qwen Japanese Translation] Translating {len(qwen_needed)} blocks in context batch...")
+                    pending_chunks = [qwen_needed[c:c + chunk_size] for c in range(0, len(qwen_needed), chunk_size)]
+                else:
+                    # No local LLM: translate every line with Google right away (no per-chunk timeouts)
+                    logger.warning(f"[Translate] Local LLM not detected: using Google Translate for {len(qwen_needed)} blocks.")
+                    pending_chunks = []
+                    futs = {self._executor.submit(_google_translate_one, blocks[idx]["cleaned_text"].strip(), "ja", "zh-CN"): idx
+                            for idx in qwen_needed}
+                    for fut in as_completed(futs):
+                        idx = futs[fut]
+                        try:
+                            g_res = fut.result()
+                        except Exception as g_err:
+                            logger.warning(f"[Google Failed] ID {idx}: {g_err}")
+                            g_res = ""
+                        if g_res and any('\u4e00' <= c <= '\u9fff' for c in g_res):
+                            results[idx] = _clean_output(g_res)
+                            blocks[idx]["translation_engine"] = "Google Translate API (未检测到 LLM)"
+                        else:
+                            blocks[idx]["translation_engine"] = UNTRANSLATED_ENGINE
                 while pending_chunks:
                     chunk_indices = pending_chunks.pop(0)
                     batch_texts = [blocks[idx].get("cleaned_text", "").strip() for idx in chunk_indices]
@@ -1355,7 +1396,7 @@ class HighPerformanceTranslationEngine:
 
             opus_needed = []
             for i, block in enumerate(blocks):
-                if block.get("is_sfx"):
+                if block.get("is_sfx") or source_lang == "Korean":   # OPUS-MT here is English -> Chinese only
                     continue
                 if not results[i]:
                     opus_needed.append(i)
@@ -1382,7 +1423,7 @@ class HighPerformanceTranslationEngine:
                 if not draft:
                     continue
                 raw_text = block.get("cleaned_text", "").strip()
-                if _should_polish(raw_text, draft):
+                if source_lang != "Korean" and _should_polish(raw_text, draft):   # the polisher prompt is English-specific
                     polish_tasks.append((i, raw_text, draft))
 
             if polish_tasks:

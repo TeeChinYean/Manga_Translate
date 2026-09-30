@@ -341,3 +341,17 @@
 - 实现要点：orient 在 `_build_masks` 里由 `_source_orientation` 写进每个框的 style；框编辑器里「自动」框只显示「自动」（判断要等渲染时的掩膜，编辑器里预先不知道）；默认值仍是「横排」，旧行为不变
 - 相关测试：tests/test_text_direction.py（掩膜判断单列 / 单行 / 多列 / 多行 / 无法判断、按原文而非框形状、本页多数兜底、右到左列顺序、方向常量同步、JSON 往返、上传参数、页面控件）
 - 状态：Done（自动判断的准确度需要用真实漫画页确认，见「待确认问题」）
+
+### [Home] 源语言新增韩语（한국어）
+- 说明：源语言下拉多了「韩语」。OCR 用 EasyOCR 的 `ko`（韩文 + 英文）识别模型，在 CPU 上跑，不占显存；翻译走 Google Translate（源语言固定为 ko），不走本地 Qwen（提示词是日语专用的），也不走英文专用的 OPUS-MT 和润色步骤
+- 涉及文件/模块：`core/extractor.py`（`ocr_korean_crop`、`_get_ocr_reader("Korean")`、提取 OCR 链、`ocr_region`、`_is_meaningful_text`）、`core/engine.py`（`_has_cjk` 把韩文字母算作真实文字，避免被当成噪音 / 乱码 / 无元音单词丢掉；ko 源语言）、`templates/index.html`
+- 实现要点：文字检测仍用 comic-text-detector（对韩文也能框出文字，但没有专门训练）；框编辑器里「识别并翻译此框」同样支持韩文；译文里如果还残留韩文，会被译文语言检查当作错误重翻
+- 相关测试：tests/test_korean_and_llm_fallback.py（ko 识别器参数、识别结果拼接、区域识别、韩文不被当噪音、翻译源语言为 ko 且不走 LLM）
+- 状态：Done（还没有用真实韩文漫画页和真实 EasyOCR 模型验证，见「待确认问题」）
+
+### [Translate] 没检测到本地 LLM 就直接用 Google
+- 说明：日语翻译开始前检查本地 Qwen 服务；检测不到（也启动不了）就整批直接交给 Google Translate，不再逐块等 LLM 超时。检查失败的结果会记住 60 秒，接下来的批次（流水线模式每批都会调用）不再重复探测
+- 涉及文件/模块：`core/engine.py`（`llm_available`、`LLM_DOWN_RETRY_S`、日语分支）
+- 实现要点：Google 也失败的行保持「未翻译」（渲染时保留原图），引擎标记为「Google Translate API (未检测到 LLM)」；LLM 正常时流程不变；LLM 中途挂掉时仍走原来的逐块 Google 兜底
+- 相关测试：tests/test_korean_and_llm_fallback.py（无 LLM 走 Google、Google 也失败、失败结果被记住并可恢复）
+- 状态：Done

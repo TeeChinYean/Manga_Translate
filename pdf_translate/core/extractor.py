@@ -619,6 +619,14 @@ def ocr_region(pdf_path, page_num, bbox, source_lang="Japanese") -> str:
             texts = _manga_ocr_batch(mocr, [img])
             if texts and texts[0]:
                 return texts[0].strip()
+    if source_lang == "Korean":
+        try:
+            text = ocr_korean_crop(crop)
+        except Exception as e:
+            logger.warning(f"[OCR] Korean recognition failed on the region: {e}")
+            text = ""
+        if text:
+            return text
     paddle = _get_paddle_ocr()
     if paddle is None:
         return ""
@@ -628,13 +636,28 @@ def ocr_region(pdf_path, page_num, bbox, source_lang="Japanese") -> str:
     return "".join(line[1].strip() for line in res if line and len(line) > 1 and line[1]).strip()
 
 
+_OCR_READER_KO = None
+
+
+def ocr_korean_crop(crop_np) -> str:
+    """Recognise the Hangul (and Latin) text of one cropped region with EasyOCR (small `ko` model, CPU)."""
+    reader = _get_ocr_reader("Korean")
+    with _OCR_LOCK:
+        lines = reader.readtext(crop_np, detail=0, paragraph=True)
+    return " ".join(t.strip() for t in lines if t and t.strip()).strip()
+
+
 def _get_ocr_reader(lang="Japanese"):
-    global _OCR_READER_JA, _OCR_READER_EN
+    global _OCR_READER_JA, _OCR_READER_EN, _OCR_READER_KO
     eo = _get_easyocr()
     if eo is None:
         raise RuntimeError("easyocr is required for image OCR but not available in environment.")
     
     with _OCR_LOCK:
+        if lang == "Korean":
+            if _OCR_READER_KO is None:
+                _OCR_READER_KO = eo.Reader(['ko', 'en'], gpu=False)   # CPU: keeps the VRAM free for LaMa / the LLM
+            return _OCR_READER_KO
         if lang == "Japanese":
             if _OCR_READER_JA is None:
                 # EasyOCR strictly runs on CPU for bounding box detection (CRAFT)
@@ -1264,7 +1287,17 @@ class PDFLayoutExtractor:
                 logger.error(f"[!] MangaOCR failed on crop: {e}")
             return ""
 
-        if mocr is not None:
+        def _ocr_korean(x0, y0, x1, y1):
+            try:
+                crop_np = _crop(x0, y0, x1, y1, 6)
+                return ocr_korean_crop(crop_np) if crop_np is not None else ""
+            except Exception as ke:
+                logger.warning(f"[EasyOCR-ko] Recognition failed on crop: {ke}")
+                return ""
+
+        if source_lang == "Korean":
+            ocr_chain = [(_ocr_korean, "EasyOCR (Korean)"), (_ocr_paddle, "PaddleOCR (PP-OCRv4 Fallback)")]
+        elif mocr is not None:
             ocr_chain = [(_ocr_manga, "MangaOCR (ViT)"), (_ocr_paddle, "PaddleOCR (PP-OCRv4 Fallback)")]
         else:
             ocr_chain = [(_ocr_paddle, "PaddleOCR (PP-OCRv4)")]
@@ -1381,7 +1414,8 @@ class PDFLayoutExtractor:
         if not text_clean:
             return False
             
-        has_cjk = any('\u4e00' <= c <= '\u9fff' or '\u3040' <= c <= '\u30ff' for c in text_clean)
+        has_cjk = any('\u4e00' <= c <= '\u9fff' or '\u3040' <= c <= '\u30ff' or '\uac00' <= c <= '\ud7a3'
+                      for c in text_clean)   # Han, kana and Hangul all count as real text
         has_jp_punct = any('\u3000' <= c <= '\u303f' or '\uff01' <= c <= '\uff5e' or c in '!?…―〜' for c in text_clean)
         
         # Ignore lonely decorative characters (e.g. '*', '°', '▼')
