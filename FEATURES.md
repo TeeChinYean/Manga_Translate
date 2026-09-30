@@ -389,7 +389,7 @@
 ### [全局] 一键选择 CPU / GPU 启动（start_cpu.bat / start_gpu.bat）
 - 说明：`start_cpu.bat` = 纯 CPU；`start_gpu.bat` = 优先 GPU；`start_web_app.bat` 不带参数 = 自动（检测到 GPU 才用）。`start_web_app.bat` 和 `start_web_app.ps1 -Mode cpu|gpu|auto` 也接受模式参数
 - 涉及文件/模块：`start_web_app.bat`（新增模式参数）、`start_web_app.ps1`（新增 `-Mode`）、新增 `start_cpu.bat`、`start_gpu.bat`（只是带参数调用前者）、README「一键启动」
-- 实现要点：CPU 模式设 `CPU_ONLY=1`、`LAMA_BACKEND=onnx`、`EXTRACT_DEVICE=cpu`、`MANGA_OCR_GPU_WORKER=0`，并跳过 Qwen 启动（Qwen 跑在 GPU 上，翻译改走 Google；已经在运行的 LLM 仍会被使用）。GPU 模式清掉 `CPU_ONLY`，设 `LAMA_BACKEND=auto`、`EXTRACT_DEVICE=auto`（按剩余显存决定哪些模型上 GPU，不会强行挤掉 LLM）、`MANGA_OCR_GPU_WORKER=auto`。机器没有 GPU 时 GPU 模式也会自动退回 CPU
+- 实现要点：CPU 模式设 `CPU_ONLY=1`、`LAMA_BACKEND=onnx`、`EXTRACT_DEVICE=cpu`、`MANGA_OCR_GPU_WORKER=0`，并跳过 Qwen 启动（Qwen 跑在 GPU 上，翻译改走 Google；已经在运行的 LLM 仍会被使用）。GPU 模式清掉 `CPU_ONLY`，设 `LAMA_BACKEND=auto`、`EXTRACT_DEVICE=auto`（按剩余显存决定哪些模型上 GPU，不会强行挤掉 LLM）、`MANGA_OCR_GPU_WORKER=1`（GPU 版 MangaOCR 子进程始终启用，串行模式的短任务也用 GPU OCR；默认「自动」仍是超过 20 页才启用，因为实测 10 页时子进程启动约 18 秒反而更慢：42.8 → 54.1 秒）。机器没有 GPU 时 GPU 模式也会自动退回 CPU
 - 相关测试：tests/test_launchers.py（静态检查脚本内容：开关、Qwen 跳过、CRLF、批处理括号安全、ps1 大括号配对 / param 位置）
 - 状态：Done（脚本没有在 Windows 上实际执行过，需要你本机点一次确认）
 

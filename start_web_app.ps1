@@ -23,8 +23,8 @@ if ($Mode -eq "cpu") {
     Write-Host "模式: 纯 CPU —— 不使用 GPU，不启动 Qwen 大模型，翻译走 Google（已在运行的大模型仍会被使用）" -ForegroundColor Magenta
 } elseif ($Mode -eq "gpu") {
     Remove-Item Env:CPU_ONLY -ErrorAction SilentlyContinue
-    $env:LAMA_BACKEND = "auto"; $env:EXTRACT_DEVICE = "auto"; $env:MANGA_OCR_GPU_WORKER = "auto"
-    Write-Host "模式: GPU —— 显存够用时 LaMa / OCR / 检测模型使用 GPU" -ForegroundColor Magenta
+    $env:LAMA_BACKEND = "auto"; $env:EXTRACT_DEVICE = "auto"; $env:MANGA_OCR_GPU_WORKER = "1"
+    Write-Host "模式: GPU —— 显存够用时 LaMa / MangaOCR / 检测模型使用 GPU（串行模式的 OCR 也用 GPU）" -ForegroundColor Magenta
 } else {
     Write-Host "模式: 自动 —— 检测到 GPU 才使用" -ForegroundColor Magenta
 }

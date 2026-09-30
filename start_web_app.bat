@@ -22,8 +22,8 @@ if /i "%MODE%"=="cpu" (
     set "CPU_ONLY="
     set "LAMA_BACKEND=auto"
     set "EXTRACT_DEVICE=auto"
-    set "MANGA_OCR_GPU_WORKER=auto"
-    echo Mode: GPU - LaMa and the OCR / detector models use the GPU when it has room.
+    set "MANGA_OCR_GPU_WORKER=1"
+    echo Mode: GPU - LaMa, MangaOCR and the detector use the GPU when it has room, also in serial mode.
 ) else (
     echo Mode: auto - the GPU is used only when one is detected.
 )

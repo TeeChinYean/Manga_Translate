@@ -125,7 +125,7 @@ start_web_app.bat
 | 脚本 | 模式 | 说明 |
 |---|---|---|
 | `start_web_app.bat` | 自动 | 检测到 GPU 才用 GPU，没有就全用 CPU |
-| `start_gpu.bat` | GPU | 显存够用时 LaMa / OCR / 检测模型用 GPU，并启动本地 Qwen |
+| `start_gpu.bat` | GPU | 显存够用时 LaMa / MangaOCR / 检测模型用 GPU（串行模式的 OCR 也用，不受 20 页门槛限制），并启动本地 Qwen |
 | `start_cpu.bat` | 纯 CPU | 完全不用 GPU；不启动 Qwen，翻译走 Google |
 
 PowerShell 版本：`.\start_web_app.ps1 -Mode cpu`（或 `gpu` / `auto`）。
