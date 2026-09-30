@@ -1126,8 +1126,10 @@ class HighPerformanceTranslationEngine:
         logger.info("[Google API] Translation engine initialized - 30 concurrent workers, no model download needed.")
 
     def translate_batch(self, blocks, source_lang="English", target_lang="Simplified Chinese",
-                        context_chunk_size: int = 12):
+                        context_chunk_size: int = 12, extra_hint: str = ""):
         """
+        extra_hint: appended to the Japanese batch prompt (and a slightly higher temperature is
+        used) when lines are re-translated after the language check rejected them.
         context_chunk_size: how many Japanese lines go into one LLM call (more = more dialogue
         context). If a large chunk fails (e.g. exceeds the server context), it is split in half
         and retried down to MIN_CONTEXT_CHUNK before falling back to single-line / Google.
@@ -1217,6 +1219,8 @@ class HighPerformanceTranslationEngine:
                         prompt_lines.append(f"ID: {idx} | 原文: {raw_t}")
                     if glossary_prompt:
                         prompt_lines.append(glossary_prompt)
+                    if extra_hint:
+                        prompt_lines.append(extra_hint)
                     prompt_lines.append("\n请严格返回一个合法的 JSON 对象，键为传入的 ID，值为对应的纯中文翻译文本。例如：{\"0\": \"你好！\", \"1\": \"今天天气真好\"}")
                     user_prompt = "\n".join(prompt_lines)
                     
@@ -1228,7 +1232,7 @@ class HighPerformanceTranslationEngine:
                             {"role": "system", "content": system_prompt},
                             {"role": "user", "content": user_prompt}
                         ],
-                        "temperature": 0.2,
+                        "temperature": 0.4 if extra_hint else 0.2,
                         "max_tokens": _batch_max_tokens(len(chunk_indices)),
                         "response_format": _batch_response_format(chunk_indices)
                     }

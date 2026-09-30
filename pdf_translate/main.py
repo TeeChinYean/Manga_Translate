@@ -222,6 +222,35 @@ def strip_runtime_keys(obj):
     return obj
 
 
+def apply_language_check(items, engine, source_lang, target_lang, context_chunk_size=12):
+    """
+    Language check after the LLM (core/text_check.py). items: [(page_num, block)], each block with
+    "translated_text" set. Lines with kana / foreign letters are re-translated (max 2x, with a hint),
+    then whatever is still wrong is removed; the blocks are fixed in place.
+    Returns the report (one dict per touched line, see text_check.check_and_fix).
+    """
+    from core.text_check import check_and_fix
+    entries = [{"page": p, "id": b.get("id"),
+                "raw": f"{b.get('text', '')} {b.get('cleaned_text', '')}",
+                "text": b.get("translated_text", "") or "", "block": b} for p, b in items]
+
+    def retranslate(bad, hint):
+        temp = [{"id": i, "text": e["block"].get("text", "")} for i, e in enumerate(bad)]
+        results, _ = engine.translate_batch(temp, source_lang=source_lang, target_lang=target_lang,
+                                            context_chunk_size=context_chunk_size, extra_hint=hint)
+        return results
+
+    report = check_and_fix(entries, retranslate, source_lang, target_lang)
+    for e in entries:
+        if e["text"] != (e["block"].get("translated_text", "") or ""):
+            e["block"]["translated_text"] = e["text"]
+            e["block"]["translation_engine"] = (e["block"].get("translation_engine") or "") + " + 语言检查"
+    for r in report:
+        logger.info(f"[LangCheck] page {r['entry']['page']} #{r['entry']['id']}: {r['action']} "
+                    f"'{r['before']}' -> '{r['after']}'")
+    return report
+
+
 def build_failed_pages_warning(failed_pages) -> str:
     """Human-readable warning for pages whose extraction failed (BUG.md B4). Empty if none."""
     if not failed_pages:
@@ -319,6 +348,8 @@ async def translation_worker():
         # Re-insert mode: {page_num: [rows]} from a corrected Excel script; no LLM is used
         corrections = task.get("corrections")
         unmatched_rows = {}   # re-insert: {page_num: corrected rows that matched no bubble}
+        language_fixes = []   # language check reports (LLM translations that had to be fixed)
+        flagged_rows = []     # re-insert: corrected rows with foreign letters / symbols (only warned)
         
         status_db[task_id] = {
             "percent": 5,
@@ -520,6 +551,11 @@ async def translation_worker():
                             block["translated_text"] = texts.get(block["id"], "")
                             block["translation_engine"] = "人工校对 (Excel)"
                             translated_text_map[(p_num, block["id"])] = block["translated_text"]
+                    from core.text_check import flag_entries
+                    for page in to_render:
+                        flagged_rows.extend(flag_entries([
+                            {"page": page["page_num"], "id": b["id"], "raw": b.get("text", ""),
+                             "text": b.get("translated_text", "")} for b in page.get("blocks", [])]))
                 elif combined_blocks:
                     # Offload synchronous translation to thread pool so event loop is never frozen
                     translations, metrics = await asyncio.to_thread(
@@ -554,6 +590,19 @@ async def translation_worker():
                         orig_block["ocr_engine"] = temp_block.get("ocr_engine", orig_block.get("ocr_engine", "PaddleOCR (PP-OCRv4)"))
                         orig_block["translation_engine"] = temp_block.get("translation_engine", "Turbovec Qwen 3.5 4B")
                         translated_text_map[(page_num, orig_block_id)] = orig_block["translated_text"]
+
+                    # Language check: kana / foreign letters / stray symbols in the Chinese text
+                    try:
+                        fixes = await asyncio.to_thread(
+                            apply_language_check,
+                            [(block_refs[t["id"]][0], block_refs[t["id"]][1]) for t in combined_blocks],
+                            translation_engine, source_lang, target_lang, context_chunk_size)
+                    except Exception as lc_err:
+                        logger.warning(f"[LangCheck] skipped: {lc_err}")
+                        fixes = []
+                    for fx in fixes:
+                        translated_text_map[(fx["entry"]["page"], fx["entry"]["id"])] = fx["entry"]["text"]
+                    language_fixes.extend(fixes)
 
                 async with progress_lock:
                     translated_count += len(to_render)
@@ -736,6 +785,9 @@ async def translation_worker():
             if unmatched_rows:
                 from core.document_skill import build_unmatched_warning
                 extraction_warning = "；".join(w for w in (extraction_warning, build_unmatched_warning(unmatched_rows)) if w)
+            from core.text_check import build_language_warning, build_flagged_warning
+            extraction_warning = "；".join(w for w in (extraction_warning, build_language_warning(language_fixes),
+                                                     build_flagged_warning(flagged_rows)) if w)
             if extraction_warning:
                 logger.warning(f"Task {task_id}: {extraction_warning}")
 
