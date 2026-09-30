@@ -1502,7 +1502,7 @@ class FontBox(BaseModel):
 class FontSizeRequest(BaseModel):
     page_w: float
     page_h: float
-    text_direction: str = "horizontal"
+    text_direction: str = "auto"
     font_scale: float = 1.0
     font_name: str = ""
     boxes: List[FontBox]
@@ -1644,7 +1644,7 @@ async def upload_pdf_file(
     corrections_json: str = Form(""),
     base_task_id: str = Form(""),
     review_first: bool = Form(False),
-    text_direction: str = Form("horizontal"),
+    text_direction: str = Form("auto"),
     font_name: str = Form("")
 ):
     """

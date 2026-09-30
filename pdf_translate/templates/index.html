@@ -1079,8 +1079,8 @@
                 <div class="control-group" data-translate-only>
                     <label for="adjustTiming">调整检测框的时机 (Box Adjustment)</label>
                     <select id="adjustTiming">
-                        <option value="after" selected style="color:black">翻译结束后再调（默认）：出结果后点「调整检测框」，只重绘改过的页</option>
-                        <option value="before" style="color:black">先调框再继续：提取 + 翻译完成后暂停，调好再重绘一次（强制串行模式）</option>
+                        <option value="before" selected style="color:black">先调框再继续（默认）：提取 + 翻译完成后暂停，调好再重绘一次（强制串行模式）</option>
+                        <option value="after" style="color:black">翻译结束后再调：出结果后点「调整检测框」，只重绘改过的页</option>
                     </select>
                 </div>
 
@@ -1088,10 +1088,10 @@
                 <div class="control-group" data-translate-only>
                     <label for="textDirection">译文排版方向 (Text Direction)</label>
                     <select id="textDirection">
-                        <option value="horizontal" selected style="color:black">横排：从左到右（默认）</option>
+                        <option value="horizontal" style="color:black">横排：从左到右</option>
                         <option value="vertical" style="color:black">竖排：从上到下，列从左到右</option>
                         <option value="vertical_rtl" style="color:black">竖排：从上到下，列从右到左（日漫读序）</option>
-                        <option value="auto" style="color:black">自动：按原文文字的排列逐框判断（原文竖排 → 竖排，横排 → 横排）</option>
+                        <option value="auto" selected style="color:black">自动（默认）：按原文文字的排列逐框判断（原文竖排 → 竖排，横排 → 横排）</option>
                     </select>
                 </div>
 
