@@ -92,8 +92,9 @@ class LocalDocumentSkill:
         return path
 
 
-def read_corrections(xlsx_path: str) -> tuple[dict, dict]:
+def read_corrections(xlsx_path) -> tuple[dict, dict]:
     """
+    `xlsx_path`: a path or a binary file-like object (e.g. io.BytesIO of the upload).
     Returns (meta, corrections) where corrections = {page_num: [{"id", "bbox", "text"}, ...]}.
     Raises CorrectionsError for anything that is not a script from generate_bilingual_xlsx.
     """

@@ -18,6 +18,7 @@ if hasattr(sys.stderr, 'reconfigure'):
     except Exception:
         pass
 
+import io
 import os
 # torch.cuda.is_available() via NVML: no CUDA driver init in the web server process (B29)
 os.environ.setdefault("PYTORCH_NVML_BASED_CUDA_CHECK", "1")
@@ -1055,15 +1056,12 @@ async def _load_corrections(xlsx: UploadFile, pdf: UploadFile):
     data = await xlsx.read()
     if len(data) > MAX_XLSX_BYTES:
         raise HTTPException(status_code=400, detail="Excel 文件过大")
-    fd, tmp = tempfile.mkstemp(suffix=".xlsx", dir=UPLOAD_DIR)
+    # Parse from memory: a temp file stayed locked on Windows when openpyxl failed half-way
+    # (WinError 32 on unlink hid the real error), and nothing touches the disk this way.
     try:
-        with os.fdopen(fd, "wb") as f:
-            f.write(data)
-        meta, rows = read_corrections(tmp)
+        meta, rows = read_corrections(io.BytesIO(data))
     except CorrectionsError as e:
         raise HTTPException(status_code=400, detail=str(e))
-    finally:
-        os.unlink(tmp)
     if not rows:
         raise HTTPException(status_code=400, detail="Excel 台本里没有任何气泡")
     pdf_bytes = await pdf.read()
