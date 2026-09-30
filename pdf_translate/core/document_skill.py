@@ -184,7 +184,7 @@ def parse_corrections_json(text: str) -> dict:
             if len(txt) > MAX_EDITOR_TEXT:
                 raise CorrectionsError(f"第 {page} 页的框 #{bid} 译文过长")
             raw = "" if r.get("raw") is None else str(r["raw"])[:MAX_EDITOR_TEXT]
-            clean.append({"id": bid, "bbox": bbox, "text": txt, "raw": raw})
+            clean.append({"id": bid, "bbox": bbox, "text": txt, "raw": raw, "edited": bool(r.get("edited"))})
         total += len(clean)
         out[page] = clean
     if total > MAX_EDITOR_ROWS:
@@ -245,7 +245,7 @@ def blocks_from_corrections(rows: list) -> list:
                        "lines_bboxes": [[x0, y0, x1, y1]], "font_size": 12.0, "font_name": "Helvetica",
                        "color": (0.0, 0.0, 0.0), "width": x1 - x0, "height": y1 - y0,
                        "center_x": (x0 + x1) / 2.0, "center_y": (y0 + y1) / 2.0,
-                       "ocr_engine": "Excel 台本"})
+                       "ocr_engine": "Excel 台本", "user_edited": bool(r.get("edited"))})
     return blocks
 
 

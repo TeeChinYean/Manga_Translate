@@ -11,6 +11,7 @@ Pipeline per page:
 """
 
 import os
+import re
 import sys
 import asyncio
 import threading
@@ -361,6 +362,11 @@ def _contrast_color(bg: tuple) -> str:
 
 
 def _wrap_cjk(text: str, font, max_w: int) -> list:
+    """Wrap to `max_w`. A line break typed by the user (box editor) starts a new line."""
+    paragraphs = [p for p in re.split(r"\r\n|\r|\n", text or "") if p.strip()]
+    if len(paragraphs) > 1:
+        return [ln for p in paragraphs for ln in _wrap_cjk(p, font, max_w)]
+    text = paragraphs[0] if paragraphs else (text or "").strip("\r\n")
     CLOSING_PUNCT = {')', ']', '}', '>', '）', '】', '〉', '｝', '，', '。', '、', '；', '：', '？', '！', '”', '’'}
     lines, curr = [], ""
     for ch in text:
@@ -1494,7 +1500,8 @@ class PDFLayoutRenderer:
         known = [g for g in sizes if g > 0]
         page_glyph = int(np.median(known)) if known else 0
         plans, placed = [], []
-        dup = _nested_duplicates(boxes)
+        # Boxes the user drew / moved / re-typed in the box editor are always drawn (B38)
+        dup = {i for i in _nested_duplicates(boxes) if not blocks_to_render[i][5].get("user_edited")}
         for idx, item in enumerate(blocks_to_render):
             if idx in dup:
                 _rstat("typeset_skipped_nested", 0.0)
