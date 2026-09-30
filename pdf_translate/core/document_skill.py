@@ -19,6 +19,7 @@ META_SHEET = "meta"
 HEADERS = ["页码", "气泡", "原文 (OCR)", "译文 (可修改)", "x0", "y0", "x1", "y1"]
 COL_TRANSLATION = 4
 MATCH_MIN_IOU = 0.5
+HEADER_MAX_CHANGED = 2   # header cells that may differ before the sheet is rejected
 MAX_XLSX_BYTES = 20 * 1024 * 1024
 
 
@@ -112,8 +113,14 @@ def read_corrections(xlsx_path) -> tuple[dict, dict]:
 
         rows = wb[SCRIPT_SHEET].iter_rows(values_only=True)
         header = next(rows, None)
-        if not header or list(header[:4]) != HEADERS[:4]:
-            raise CorrectionsError("「台本」工作表的表头被修改了，请使用原始导出的文件")
+        # Columns are read by position, so a stray edit in one header cell (e.g. a translation
+        # pasted into A1) is harmless; only reject when the layout itself looks different.
+        header = list(header or [])[:len(HEADERS)]
+        header += [None] * (len(HEADERS) - len(header))
+        bad = [f"{chr(65 + i)}1" for i, (h, want) in enumerate(zip(header, HEADERS))
+               if str(h or "").strip() != want]
+        if len(bad) > HEADER_MAX_CHANGED:
+            raise CorrectionsError(f"「台本」工作表的表头被修改了（{', '.join(bad)}），请使用原始导出的文件")
         corrections = {}
         for r in rows:
             if not r or r[0] is None or r[1] is None:
