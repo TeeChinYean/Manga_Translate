@@ -161,6 +161,9 @@ def lama_uses_gpu() -> bool:
         return False
     if isinstance(_LAMA_SESSION, (_TorchLamaSession, _SubprocLamaSession)):
         return True
+    from core.hardware import cpu_only_forced
+    if cpu_only_forced():
+        return False
     try:
         import torch
         if not torch.cuda.is_available():

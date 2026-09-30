@@ -377,3 +377,11 @@
 - 实现要点：换行、分列和字号都来自服务器的排版代码；浏览器只负责画。浏览器用系统里的中文字体画，所以字形和最终 PDF 里的字体可能略有差别（字号、换行是一致的）；竖排的标点不会旋转，只是近似
 - 相关测试：tests/test_font_size.py（估算接口返回 lines / vertical、页面控件）；浏览器截图确认标签和预览可读
 - 状态：Done
+
+### [全局] 没有 GPU 时自动完全使用 CPU
+- 说明：启动时统一检测有没有 GPU，没有就所有环节走 CPU（LaMa 用 ONNX CPU、MangaOCR / 文字检测 / RapidOCR 走 CPU、不启动 GPU 子进程、不做显存探测）。也可以用环境变量 `CPU_ONLY=1` 在有 GPU 的机器上手动强制纯 CPU。启动日志会写一行 `[Hardware] ...` 说明结果
+- 涉及文件/模块：新增 `core/hardware.py`（`gpu_info / gpu_available / cpu_only_forced / describe`）；`core/extractor.py`（`_ort_gpu_provider`、`_torch_cuda_available`、`manga_gpu_worker_wanted`）、`core/renderer.py`（`lama_uses_gpu`）、`core/gpu_budget.py`（`free_vram_mb`、`plan_placement`）、`main.py`（启动日志；`CPU_ONLY=1` 时在导入 torch 之前设 `CUDA_VISIBLE_DEVICES=-1`，子进程也继承）
+- 实现要点：检测顺序 = `CPU_ONLY` → `torch.cuda.is_available()`（每次实时查，便宜）→ `nvidia-smi -L`（结果缓存）→ Windows 上「真实显卡 + onnxruntime DirectML」（排除 Microsoft Basic、远程 / 虚拟显示器；结果缓存）。以前 `onnxruntime-gpu` 装了但机器没有 GPU 时，会先尝试 CUDA provider 再回退；现在直接不试。翻译仍按原规则：有本地 LLM 用 Qwen，没有用 Google（LLM 是否用 GPU 由外部 llama-server 决定，不在本程序里）
+- 已知限制：Intel 核显 + DirectML 会被当成「有 GPU」（默认 `EXTRACT_DEVICE=cpu` 下仍然只有 LaMa 用 GPU）；不想用就设 `CPU_ONLY=1`
+- 相关测试：tests/test_hardware.py（10 项：各种探测来源、CPU_ONLY 压过一切、慢探测只跑一次、Windows 虚拟显卡过滤、ONNX provider 需要真 GPU、所有 GPU 入口在 CPU_ONLY 下关闭、显存预算无 GPU 时全 CPU）
+- 状态：Done

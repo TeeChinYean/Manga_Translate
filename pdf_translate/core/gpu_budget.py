@@ -148,6 +148,11 @@ def free_vram_mb(force: bool = False):
         if not force and time.time() - _CACHE["t"] < _CACHE_TTL_S:
             return _CACHE["free"], _CACHE["source"]
         free, source = None, "none"
+        from core.hardware import gpu_info
+        info = gpu_info()
+        if not info["gpu"]:            # no GPU (or CPU_ONLY=1): skip the nvidia-smi / PowerShell probes
+            _CACHE.update(t=time.time(), free=None, source=info["source"])
+            return None, info["source"]
         # nvidia-smi first: torch.cuda.mem_get_info() would create a CUDA context in this process
         for name, fn in (("nvidia-smi", _probe_nvidia_smi), ("torch.cuda", _probe_torch),
                          ("windows-counters", _probe_windows_counters)):
@@ -184,7 +189,8 @@ def plan_placement(capable: dict, free_mb=None, resident=(), source: str = "over
     if free_mb is None:
         free_mb, source = free_vram_mb()
     if free_mb is None:
-        plan.update(_reason="free VRAM unknown -> CPU", _free_mb=None)
+        plan.update(_reason="free VRAM unknown -> CPU" + (" (no GPU detected)" if source == "no GPU detected" else ""),
+                    _free_mb=None)
         return plan
 
     budget = free_mb - _reserve_mb()

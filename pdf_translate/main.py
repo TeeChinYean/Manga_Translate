@@ -22,6 +22,8 @@ import io
 import os
 # torch.cuda.is_available() via NVML: no CUDA driver init in the web server process (B29)
 os.environ.setdefault("PYTORCH_NVML_BASED_CUDA_CHECK", "1")
+if os.getenv("CPU_ONLY", "").strip().lower() in ("1", "true", "yes", "on"):
+    os.environ["CUDA_VISIBLE_DEVICES"] = "-1"     # CPU_ONLY=1: no library (torch, onnxruntime, child processes) may see the GPU
 import sys
 import time
 import warnings
@@ -349,6 +351,8 @@ async def preload_all_models():
 async def startup_event():
     global translation_engine
     logger.info("⚡ System Booting... Initializing Pipeline Components...")
+    from core.hardware import describe as describe_hardware
+    logger.info(f"[Hardware] {describe_hardware()}")
     clear_leftovers()
     
     # Try GPU speculative decoding, fallbacks gracefully to standard GPU FP16 or CPU Heuristics

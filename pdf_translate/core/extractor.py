@@ -55,7 +55,11 @@ _PLACEMENT_LOCK = threading.Lock()
 
 
 def _ort_gpu_provider():
-    """Best ONNX Runtime GPU provider available in this install, or None."""
+    """Best ONNX Runtime GPU provider available in this install, or None (also None on a machine
+    without a GPU: onnxruntime-gpu / -directml can be installed without one)."""
+    from core.hardware import gpu_available
+    if not gpu_available():
+        return None
     try:
         import onnxruntime as ort
         avail = ort.get_available_providers()
@@ -68,6 +72,9 @@ def _ort_gpu_provider():
 
 
 def _torch_cuda_available() -> bool:
+    from core.hardware import cpu_only_forced
+    if cpu_only_forced():
+        return False
     try:
         import torch
         return bool(torch.cuda.is_available())
@@ -510,6 +517,9 @@ def manga_gpu_worker_wanted(n_pages=None) -> bool:
     """MANGA_OCR_GPU_WORKER=1 / 0 forces on / off; default (auto): only for jobs with MORE than
     MANGA_OCR_GPU_MIN_PAGES pages. Measured on 第5巻: 10 p serial 42.8 s -> 54.1 s (child start
     ~18 s not amortised); 30 p overlap 173.2 s -> 144.5 s (extract 129.9 s -> 55.5 s)."""
+    from core.hardware import cpu_only_forced
+    if cpu_only_forced():
+        return False
     mode = os.getenv("MANGA_OCR_GPU_WORKER", "auto").strip().lower()
     if mode in ("1", "on", "true"):
         return True
