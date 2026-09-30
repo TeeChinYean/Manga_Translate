@@ -2,6 +2,11 @@
 # PDF 漫画翻译系统启动脚本 (PowerShell)
 # ==============================================================================
 
+param(
+    [ValidateSet("auto", "cpu", "gpu")]
+    [string]$Mode = "auto"    # cpu = 完全用 CPU；gpu = 优先用 GPU；auto = 检测到 GPU 才用
+)
+
 [Console]::OutputEncoding = [System.Text.Encoding]::UTF8
 $Host.UI.RawUI.WindowTitle = "PDF 漫画翻译系统 [Port 8000]"
 
@@ -13,6 +18,19 @@ Write-Host "   ⚡ PDF 漫画翻译与排版保真引擎 · Web 服务" -Foregro
 Write-Host "========================================================" -ForegroundColor Cyan
 Write-Host ""
 
+if ($Mode -eq "cpu") {
+    $env:CPU_ONLY = "1"; $env:LAMA_BACKEND = "onnx"; $env:EXTRACT_DEVICE = "cpu"; $env:MANGA_OCR_GPU_WORKER = "0"
+    Write-Host "模式: 纯 CPU —— 不使用 GPU，不启动 Qwen 大模型，翻译走 Google（已在运行的大模型仍会被使用）" -ForegroundColor Magenta
+} elseif ($Mode -eq "gpu") {
+    Remove-Item Env:CPU_ONLY -ErrorAction SilentlyContinue
+    $env:LAMA_BACKEND = "auto"; $env:EXTRACT_DEVICE = "auto"; $env:MANGA_OCR_GPU_WORKER = "auto"
+    Write-Host "模式: GPU —— 显存够用时 LaMa / OCR / 检测模型使用 GPU" -ForegroundColor Magenta
+} else {
+    Write-Host "模式: 自动 —— 检测到 GPU 才使用" -ForegroundColor Magenta
+}
+Write-Host ""
+
+if ($Mode -ne "cpu") {
 Write-Host "正在检测大模型推理服务状态 (Port 18088 / 18089)..." -ForegroundColor Yellow
 $llm18088 = Test-NetConnection -ComputerName 127.0.0.1 -Port 18088 -WarningAction SilentlyContinue -InformationLevel Quiet
 $llm18089 = Test-NetConnection -ComputerName 127.0.0.1 -Port 18089 -WarningAction SilentlyContinue -InformationLevel Quiet
@@ -39,6 +57,7 @@ if ($llm18088) {
     } else {
         Write-Host "   提示: 如需启用本地大模型，请确保 qwen_turbovec_rag 目录存在。" -ForegroundColor DarkYellow
     }
+}
 }
 
 Write-Host ""
