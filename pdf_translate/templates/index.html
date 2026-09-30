@@ -2126,6 +2126,7 @@
             be.preview = $be('bePreview').checked;
             be.fontScale = editData.font_scale || 1; be.fontName = editData.font_name || ''; be.sizes = {};    // sizes: page -> { box id -> { pt, estimate } }
             be.undo = []; be.sel = null; be.tool = 'select';
+            be.nextId = {};         // page -> next free box id (never goes back, also after delete / undo)
             be.initial = beSnapshot();
             be.initialBoxes = {};   // page -> { box id -> JSON }: which boxes the user touched
             be.order.forEach(n => { be.initialBoxes[n] = Object.fromEntries(be.pages[n].boxes.map(b => [b.id, JSON.stringify(b)])); });
@@ -2275,7 +2276,10 @@
         function beAddBox(r) {
             const p = beCur();
             bePushUndo();
-            const b = { id: p.boxes.reduce((m, k) => Math.max(m, k.id), 0) + 1, raw: '', text: '', isNew: true,
+            // A new id is never one that was used before on this page, even by a box deleted since (B39):
+            // the server pairs boxes with the earlier result by id.
+            be.nextId[be.page] = Math.max(be.nextId[be.page] || 0, p.boxes.reduce((m, k) => Math.max(m, k.id), 0) + 1);
+            const b = { id: be.nextId[be.page]++, raw: '', text: '', isNew: true,
                         dir: be.defaultDir || 'horizontal', fontSize: 0, font: '',
                         nx: r.x / be.cssW, ny: r.y / be.cssH, nw: r.w / be.cssW, nh: r.h / be.cssH };
             p.boxes.push(b);
@@ -2457,6 +2461,7 @@
         // OCR + translate one box (new box, or "re-recognise" after it was moved)
         async function beOcr(b) {
             const p = beCur(), page = be.page;
+            const typedBefore = b.text;     // what the box said when the request left
             be.busy = true; $be('beOcr').disabled = true; beUpdateBar();
             $be('beNote').textContent = '识别并翻译中…（首次会加载模型，约 5–15 秒）';
             let note = '';
@@ -2468,8 +2473,16 @@
                 });
                 const data = await res.json();
                 if (!res.ok) throw new Error(data.detail || '识别失败');
-                if (data.raw) { bePushUndo(); b.raw = data.raw; b.text = data.translated; }
-                note = data.note || '已识别，可在上面修改译文。';
+                if (data.raw && b.text !== typedBefore) {
+                    // The user typed while the box was being recognised: keep their text (B39)
+                    bePushUndo(); b.raw = data.raw;
+                    note = '识别完成，但你在等待时已经输入了译文，已保留你输入的译文（原文已更新）。';
+                } else if (data.raw) {
+                    bePushUndo(); b.raw = data.raw; b.text = data.translated;
+                    note = data.note || '已识别，可在上面修改译文。';
+                } else {
+                    note = data.note || '已识别，可在上面修改译文。';
+                }
             } catch (err) {
                 note = `识别失败：${err.message}。请手动输入译文。`;
             } finally {
