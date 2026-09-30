@@ -470,6 +470,104 @@ def _best_font(text: str, box_w: int, box_h: int, font_scale: float = 1.0, max_s
     return best_font, best_lines, best_fs
 
 
+# ── Vertical lettering (top -> bottom, columns left -> right) ─────────────────────────────
+V_PITCH = 1.1            # distance between two characters of a column, in font sizes
+V_COL = 1.25             # column width, in font sizes (same as the horizontal line height)
+V_CLOSING = set("，。、；：！？）】〉》」』”’．,.!?)")           # must not start a column
+V_SHIFT = set("，。、．,.")                                   # small marks sit at the upper right of the cell
+V_ROTATE = set("（）()《》〈〉「」『』【】“”‘’—―…⋯～~-ー[]<>")   # rotated 90 degrees clockwise, like vertical typesetting
+
+
+def _vertical_columns(text: str, per_col: int) -> list:
+    """Split text into columns of at most `per_col` characters. A typed line break starts a new column;
+    closing punctuation is pulled up to the end of the previous column instead of starting one."""
+    paras = [p.strip() for p in re.split(r"\r\n|\r|\n", text or "") if p.strip()]
+    cols = []
+    for para in paras:
+        cur, s = [], para
+        while s:
+            if cur and s[0] in V_CLOSING:      # would start a column: hang it at the end of the previous one
+                cur[-1] += s[0]
+                s = s[1:]
+                continue
+            cur.append(s[:per_col])
+            s = s[per_col:]
+        cols.extend(cur)
+    return cols or [""]
+
+
+def _best_font_vertical(text: str, box_w: int, box_h: int, font_scale: float = 1.0, max_size: int = 0,
+                        min_size: int = 10):
+    """Vertical counterpart of _best_font: (font, columns, font size). Columns run left -> right."""
+    import math
+    usable_w = max(box_w - int(box_w * 0.15), 20)
+    usable_h = max(box_h - int(box_h * 0.15), 20)
+    n = max(len(re.sub(r"\s", "", text or "")), 1)
+    est = int(math.sqrt((usable_w * usable_h) / (n * V_COL * V_PITCH)))
+    max_fs = min(int(est * 1.5), usable_w, usable_h, 120)
+    if max_size and max_size > 0:
+        max_fs = min(max_fs, int(max_size))
+    min_fs = max(6, int(min_size))
+
+    def layout(fs):
+        per_col = max(1, int(usable_h // (fs * V_PITCH)))
+        cols = _vertical_columns(text, per_col)
+        fits = (len(cols) * fs * V_COL <= usable_w + 5
+                and max(len(c) for c in cols) * fs * V_PITCH <= usable_h + fs * V_PITCH)   # +1 cell: pulled-up mark
+        return cols, fits
+
+    best_fs = min_fs
+    best_cols, _ = layout(min_fs)
+    low, high = min_fs, max_fs
+    while low <= high:
+        mid = (low + high) // 2
+        cols, fits = layout(mid)
+        if fits:
+            best_fs, best_cols, low = mid, cols, mid + 1
+        else:
+            high = mid - 1
+    if abs(font_scale - 1.0) > 0.01:
+        fs = max(8, min(120, int(best_fs * font_scale)))
+        if max_size and max_size > 0:
+            fs = min(fs, int(max_size))
+        return _get_font(fs), layout(fs)[0], fs
+    return _get_font(best_fs), best_cols, best_fs
+
+
+def _draw_vertical_text(img, cols, font, fs, left, top, fill, stroke_width, stroke_fill):
+    """Draw the columns of `_best_font_vertical` into `img` (in place)."""
+    draw = ImageDraw.Draw(img)
+    pitch, colw = fs * V_PITCH, fs * V_COL
+    for ci, col in enumerate(cols):
+        cx0 = left + ci * colw
+        for ri, ch in enumerate(col):
+            if ch.isspace():
+                continue
+            cy0 = top + ri * pitch
+            try:
+                bb = font.getbbox(ch)
+            except Exception:
+                bb = (0, 0, fs, fs)
+            gw, gh = bb[2] - bb[0], bb[3] - bb[1]
+            if ch in V_ROTATE:
+                try:
+                    size = int(fs * 2)
+                    layer = Image.new("RGBA", (size, size), (0, 0, 0, 0))
+                    ImageDraw.Draw(layer).text((size / 2, size / 2), ch, fill=fill, font=font, anchor="mm",
+                                               stroke_width=stroke_width, stroke_fill=stroke_fill)
+                    layer = layer.rotate(-90)
+                    img.paste(layer.convert("RGB"), (int(cx0 + colw / 2 - size / 2), int(cy0 + pitch / 2 - size / 2)),
+                              layer.split()[3])
+                    continue
+                except Exception:
+                    pass    # bitmap fonts have no anchors: draw it upright
+            if ch in V_SHIFT:
+                x, y = cx0 + colw * 0.5 + fs * 0.05 - bb[0], cy0 + fs * 0.05 - bb[1]
+            else:
+                x, y = cx0 + (colw - gw) / 2 - bb[0], cy0 + (pitch - gh) / 2 - bb[1]
+            draw.text((x, y), ch, fill=fill, font=font, stroke_width=stroke_width, stroke_fill=stroke_fill)
+
+
 # ── Typesetting helpers (BUG.md B21) ──────────────────────────────────────────
 MIN_FONT_PX = 9          # smallest lettering (was 10; text now gets more room first)
 TYPESET_MAX_TRIES = 30   # overlap-shrink attempts per block
@@ -1383,12 +1481,13 @@ class PDFLayoutRenderer:
     def cache_filename(self, page_num: int) -> str:
         """Cache file for a rendered page; depends on tuning params + renderer version (BUG.md B9)."""
         import hashlib
-        key = f"{RENDER_CACHE_VERSION}|{self.ink_thresh}|{self.dilate_iter}|{self.max_stroke_ratio:.3f}|{self.font_scale:.3f}"
+        key = f"{RENDER_CACHE_VERSION}|{self.ink_thresh}|{self.dilate_iter}|{self.max_stroke_ratio:.3f}|{self.font_scale:.3f}|{self.text_direction}"
         return f"page_{page_num}_{hashlib.sha1(key.encode()).hexdigest()[:10]}.jpg"
 
     def __init__(self, original_pdf_path=None, output_pdf_path=None,
                  ink_thresh: int = 95, dilate_iter: int = 2,
-                 max_stroke_ratio: float = 0.35, font_scale: float = 1.0):
+                 max_stroke_ratio: float = 0.35, font_scale: float = 1.0, text_direction: str = "horizontal"):
+        self.text_direction = "vertical" if text_direction == "vertical" else "horizontal"
         self.original_pdf_path = original_pdf_path
         self.output_pdf_path = output_pdf_path or (original_pdf_path.replace(".pdf", "_translated.pdf") if original_pdf_path else None)
         self.ink_thresh = int(ink_thresh)
@@ -1509,6 +1608,8 @@ class PDFLayoutRenderer:
             px0, py0, px1, py1, translated, block = item[:6]
             style = item[6] if len(item) > 6 else {}
             others = [bx for j, bx in enumerate(boxes) if j != idx and j not in dup]
+            vertical = self._is_vertical(block)
+            fit = _best_font_vertical if vertical else _best_font
             cands = _bubble_rects(gray, (px0, py0, px1, py1), others) if style.get("clean_bg") else None
             bubble = None
             if cands:
@@ -1516,8 +1617,8 @@ class PDFLayoutRenderer:
                 # large as fits (B25). No bubble (text on artwork): unchanged.
                 best_fs = -1
                 for c in cands:
-                    _f, _l, fs_c = _best_font(translated, c[2] - c[0], c[3] - c[1], font_scale=self.font_scale,
-                                              max_size=BUBBLE_MAX_FONT_PX, min_size=MIN_FONT_PX)
+                    _f, _l, fs_c = fit(translated, c[2] - c[0], c[3] - c[1], font_scale=self.font_scale,
+                                       max_size=BUBBLE_MAX_FONT_PX, min_size=MIN_FONT_PX)
                     if fs_c > best_fs:
                         best_fs, bubble = fs_c, c
                 px0, py0, px1, py1 = bubble
@@ -1534,28 +1635,42 @@ class PDFLayoutRenderer:
                 page_floor = int(page_glyph * PAGE_GLYPH_FLOOR)
                 cap = min(max(cap, page_floor), page_cap) if cap else page_cap
             for _attempt in range(TYPESET_MAX_TRIES):
-                font, lines, fs = _best_font(translated, bw, bh, font_scale=self.font_scale,
-                                             max_size=cap, min_size=MIN_FONT_PX)
-                lh = fs * 1.25
-                total_h = len(lines) * lh
-                widths = []
-                for line in lines:
-                    try:
-                        widths.append(font.getbbox(line)[2] - font.getbbox(line)[0])
-                    except Exception:
-                        widths.append(len(line) * fs * 0.9)
-                top = py0 + (bh - total_h) / 2
-                if total_h > bh:
-                    top = py0  # overflowing text grows downward, never above the bubble
-                rect = (px0 + (bw - max(widths)) / 2, top, px0 + (bw + max(widths)) / 2, top + total_h)
+                font, lines, fs = fit(translated, bw, bh, font_scale=self.font_scale,
+                                      max_size=cap, min_size=MIN_FONT_PX)
+                if vertical:   # columns left -> right, characters top -> bottom
+                    colw, pitch = fs * V_COL, fs * V_PITCH
+                    total_w, total_h = len(lines) * colw, max(len(c) for c in lines) * pitch
+                    widths = [colw] * len(lines)
+                    left = px0 + (bw - total_w) / 2 if total_w <= bw else px0
+                    top = py0 + (bh - total_h) / 2 if total_h <= bh else py0
+                    rect = (left, top, left + total_w, top + total_h)
+                else:
+                    lh = fs * 1.25
+                    total_h = len(lines) * lh
+                    widths = []
+                    for line in lines:
+                        try:
+                            widths.append(font.getbbox(line)[2] - font.getbbox(line)[0])
+                        except Exception:
+                            widths.append(len(line) * fs * 0.9)
+                    top = py0 + (bh - total_h) / 2
+                    if total_h > bh:
+                        top = py0  # overflowing text grows downward, never above the bubble
+                    rect = (px0 + (bw - max(widths)) / 2, top, px0 + (bw + max(widths)) / 2, top + total_h)
                 clash = any(_rects_overlap(rect, r) for r in placed)
                 if not clash or fs <= MIN_FONT_PX:
                     break
                 cap = max(MIN_FONT_PX, fs - 2)   # strictly shrinking; bounded loop (never hangs)
                 _rstat("typeset_shrunk_for_overlap", 0.0)
             placed.append(rect)
+            if vertical:
+                style = dict(style, vertical=True, vleft=left)
             plans.append((px0, py0, bw, bh, translated, block, style, font, lines, fs, widths, top))
         return plans
+
+    def _is_vertical(self, block) -> bool:
+        """Per-box direction (box editor) wins over the task's default."""
+        return (block.get("direction") or self.text_direction) == "vertical"
 
     def _draw_translations(self, healed, blocks_to_render):
         """Draw translated CJK text into `healed` in place (shared by page render and preview)."""
@@ -1588,6 +1703,9 @@ class PDFLayoutRenderer:
                 # bold). Over artwork / tone: keep a thin rim for legibility.
                 st_width = 0 if style.get("clean_bg") else max(1, int(fs / 14))
 
+                if style.get("vertical"):
+                    _draw_vertical_text(healed, lines, font, fs, style["vleft"], top, fg, st_width, st_fill)
+                    continue
                 lh = fs * 1.25
                 curr_y = top
                 for line, lw in zip(lines, widths):

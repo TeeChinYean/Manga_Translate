@@ -1083,6 +1083,15 @@
                     </select>
                 </div>
 
+                <!-- Direction of the translated lettering (each box can override it in the box editor) -->
+                <div class="control-group" data-translate-only>
+                    <label for="textDirection">译文排版方向 (Text Direction)</label>
+                    <select id="textDirection">
+                        <option value="horizontal" selected style="color:black">横排：从左到右（默认）</option>
+                        <option value="vertical" style="color:black">竖排：从上到下，列从左到右</option>
+                    </select>
+                </div>
+
                 <!-- Live Inpaint Tuning Bar Trigger -->
                 <div class="tune-summary-bar" id="openSidebarBtn" title="点击展开实时重绘与排版调优侧边栏">
                     <div class="tune-summary-left">
@@ -1371,6 +1380,12 @@
                     <div><b id="beBoxTitle"></b></div>
                     <div class="be-raw" id="beRaw"></div>
                     <textarea id="beText" placeholder="译文（留空 = 该气泡保留原图）"></textarea>
+                    <label style="font-size: 0.85rem; display: flex; align-items: center; gap: 8px;">此框排版方向
+                        <select id="beDir" style="flex: 1; padding: 6px 8px; background: rgba(255,255,255,0.08); border: 1px solid rgba(255,255,255,0.15); border-radius: 6px; color: var(--text-primary);">
+                            <option value="horizontal" style="color:black">横排（左→右）</option>
+                            <option value="vertical" style="color:black">竖排（上→下，列从左到右）</option>
+                        </select>
+                    </label>
                     <button class="btn" id="beOcr" type="button" style="padding: 8px 12px; font-size: 0.85rem;">🔍 识别并翻译此框</button>
                     <div class="be-hint" id="beNote"></div>
                 </div>
@@ -1550,6 +1565,7 @@
             formData.append('font_scale', tuningParams.font_scale);
             formData.append('pipeline_mode', document.getElementById('pipelineMode').value);
             if (document.getElementById('adjustTiming').value === 'before') formData.append('review_first', 'true');
+            formData.append('text_direction', document.getElementById('textDirection').value);
             for (const [k, v] of Object.entries(extraFields)) {
                 formData.append(k, v);
             }
@@ -2066,6 +2082,7 @@
                     w: p.w, h: p.h,
                     boxes: p.blocks.map(b => ({
                         id: b.id, raw: b.raw || '', text: b.text || '', isNew: false,
+                        dir: b.direction || editData.text_direction || 'horizontal',
                         nx: b.bbox[0] / p.w, ny: b.bbox[1] / p.h,
                         nw: (b.bbox[2] - b.bbox[0]) / p.w, nh: (b.bbox[3] - b.bbox[1]) / p.h,
                     })),
@@ -2073,6 +2090,7 @@
                 be.order.push(p.page);
             }
             be.order.sort((a, b) => a - b);
+            be.defaultDir = editData.text_direction || 'horizontal';   // direction of newly drawn boxes
             be.undo = []; be.sel = null; be.tool = 'select';
             be.initial = beSnapshot();
             be.initialBoxes = {};   // page -> { box id -> JSON }: which boxes the user touched
@@ -2112,7 +2130,7 @@
                 ctx.fillStyle = col + (sel ? '55' : '2a'); ctx.strokeStyle = sel ? '#ffffff' : col;
                 ctx.fillRect(x, y, w, h); ctx.strokeRect(x, y, w, h);
                 ctx.fillStyle = col; ctx.font = 'bold 12px sans-serif';
-                ctx.fillText('#' + b.id + (b.text ? '' : ' (空)'), x + 3, y + 13);
+                ctx.fillText('#' + b.id + (b.text ? '' : ' (空)') + (b.dir === 'vertical' ? ' 竖' : ''), x + 3, y + 13);
                 if (sel) {
                     ctx.fillStyle = '#ffffff'; ctx.strokeStyle = col; ctx.lineWidth = 2;
                     Object.values(beCorners(b)).forEach(([cx, cy]) => {
@@ -2220,6 +2238,7 @@
             const p = beCur();
             bePushUndo();
             const b = { id: p.boxes.reduce((m, k) => Math.max(m, k.id), 0) + 1, raw: '', text: '', isNew: true,
+                        dir: be.defaultDir || 'horizontal',
                         nx: r.x / be.cssW, ny: r.y / be.cssH, nw: r.w / be.cssW, nh: r.h / be.cssH };
             p.boxes.push(b);
             be.sel = b; beSetTool('select'); beFillForm(); beRedraw();
@@ -2241,6 +2260,7 @@
             $be('beBoxTitle').textContent = `框 #${b.id}` + (b.isNew ? '（新画）' : '');
             $be('beRaw').textContent = '原文：' + (b.raw || '（无）');
             $be('beText').value = b.text;
+            $be('beDir').value = b.dir || 'horizontal';
             $be('beNote').textContent = '';
             beUpdateBar();
         }
@@ -2250,6 +2270,11 @@
         $be('beText').addEventListener('change', () => {
             if (be.snapText && be.snapText !== beSnapshot()) bePushUndo(be.snapText);
             be.snapText = null; beUpdateBar();
+        });
+
+        $be('beDir').addEventListener('change', e => {
+            if (!be.sel || be.busy) return;
+            bePushUndo(); be.sel.dir = e.target.value; beRedraw();
         });
 
         // OCR + translate one box (new box, or "re-recognise" after it was moved)
@@ -2346,7 +2371,7 @@
                     const p = be.pages[n];
                     pages[n] = p.boxes.map(b => ({
                         id: b.id, text: b.text, raw: b.raw,
-                        edited: b.isNew || be.initialBoxes[n][b.id] !== JSON.stringify(b),
+                        edited: b.isNew || be.initialBoxes[n][b.id] !== JSON.stringify(b), direction: b.dir || 'horizontal',
                         bbox: [b.nx * p.w, b.ny * p.h, (b.nx + b.nw) * p.w, (b.ny + b.nh) * p.h].map(v => +v.toFixed(2)),
                     }));
                 }
@@ -2364,7 +2389,7 @@
                 const p = be.pages[n];
                 pages[n] = p.boxes.map(b => ({
                     id: b.id, text: b.text, raw: b.raw,
-                    edited: b.isNew || be.initialBoxes[n][b.id] !== JSON.stringify(b),
+                    edited: b.isNew || be.initialBoxes[n][b.id] !== JSON.stringify(b), direction: b.dir || 'horizontal',
                     bbox: [b.nx * p.w, b.ny * p.h, (b.nx + b.nw) * p.w, (b.ny + b.nh) * p.h].map(v => +v.toFixed(2)),
                 }));
             }

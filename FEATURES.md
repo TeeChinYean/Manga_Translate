@@ -316,3 +316,14 @@
 - 涉及文件/模块：`core/renderer.py`（`_layout_translations`、`_wrap_cjk`）、`core/document_skill.py`（`parse_corrections_json`、`blocks_from_corrections`）、`templates/index.html`（`beApply`）
 - 相关测试：tests/test_edit_render_fidelity.py
 - 状态：Done
+
+### [Home] 译文排版方向：横排 / 竖排（每个框可单独改）
+- 说明：设置区「译文排版方向」选默认方向——横排（从左到右，默认）或竖排（从上到下，列从左到右）；框编辑器里每个框还有「此框排版方向」下拉，可单独改成另一个方向（画布上竖排的框标「竖」）。两种方式都可用于「先调框」和「结束后调框」
+- 涉及文件/模块：`core/renderer.py`（`_vertical_columns` / `_best_font_vertical` / `_draw_vertical_text`、`_layout_translations` / `_draw_translations` 的竖排分支、`PDFLayoutRenderer(text_direction=)`、`_is_vertical`）、`core/document_skill.py`（`direction` 字段）、`main.py`（`text_direction` 上传参数、`build_edit_pages` / `plan_review` 带方向）、`templates/index.html`（`#textDirection`、`#beDir`）
+- 实现要点：
+  - 竖排规则：字从上到下，多列时从左到右排列；一列放不下就换列，字号取能放进气泡的最大值（与横排共用气泡内接矩形、原字号上限、重叠时缩小）；手打的换行 = 新起一列
+  - 标点：`，。、` 放在格子右上角；括号 / 引号 / 破折号 / 省略号 / 波浪线 顺时针旋转 90°（`「」` 变成竖排括号形状，`……` 变竖点）；`，。！？` 等收尾标点不会出现在列首，而是挂在上一列末尾
+  - 优先级：框上的 `direction` > 任务默认；编辑器打开时每个框都带有生效的方向（`edit_data.text_direction` 是新画框的默认）；改方向的框算「被改过」，重绘时不参与嵌套去重，只重绘改过的页
+  - 页缓存键包含方向；Excel 回填任务用上传表单里的默认方向（Excel 里没有方向列）；没被重绘的页保持上次的方向
+- 相关测试：tests/test_text_direction.py（分列 / 避头点 / 字号适配 / 竖排绘制方向与列顺序 / 旋转与上移标点 / 默认与单框覆盖 / JSON 与 edit_data 携带方向 / 上传参数 / 页面接线）、tests/test_review_first.py `test_text_direction_reaches_the_renderer_and_the_editor_data`（真实 worker）；无头 Chromium 对模拟服务器：设置区选竖排 → 上传字段正确 → 编辑器里单框改回横排 → 提交数据正确
+- 状态：Done（竖排字形在沙箱字体下检查过，真实漫画字体 / 效果待你实测，见「待确认问题」）

@@ -370,7 +370,7 @@ review_waits = {}      # task_id -> {"event": asyncio.Event, "payload": {page: r
 MOVE_TOL_PT = 1.0      # a box that moved / resized by more than this (PDF points) counts as changed
 
 
-def build_edit_pages(layout_pages: list, tmap: dict) -> list:
+def build_edit_pages(layout_pages: list, tmap: dict, default_dir: str = "horizontal") -> list:
     """Bubbles + translations of the given layout pages, in the shape the box editor loads."""
     out = []
     for p_data in layout_pages:
@@ -379,13 +379,14 @@ def build_edit_pages(layout_pages: list, tmap: dict) -> list:
             "w": float(p_data.get("page_width") or 0), "h": float(p_data.get("page_height") or 0),
             "blocks": [{"id": blk.get("id"), "bbox": [float(v) for v in blk.get("bbox")],
                         "raw": blk.get("cleaned_text", blk.get("text", "")),
-                        "text": tmap.get((p_data["page_num"], blk.get("id")), "")}
+                        "text": tmap.get((p_data["page_num"], blk.get("id")), ""),
+                        "direction": blk.get("direction") or default_dir}
                        for blk in p_data.get("blocks", []) if blk.get("bbox")],
         })
     return out
 
 
-def plan_review(pages: list, rows_by_page: dict, tmap: dict) -> dict:
+def plan_review(pages: list, rows_by_page: dict, tmap: dict, default_dir: str = "horizontal") -> dict:
     """
     Apply the user's box edits to the layout pages IN PLACE (before rendering).
     rows_by_page: {page: [{"id","bbox","text","raw","edited"}]} (only pages the user changed).
@@ -413,7 +414,8 @@ def plan_review(pages: list, rows_by_page: dict, tmap: dict) -> dict:
                 typed = r["text"] != tmap.get((num, r["id"]), "")
                 if moved and not typed:
                     need.append((num, blk))
-                if moved or typed:
+                turned = (r.get("direction") or default_dir) != (o.get("direction") or default_dir)
+                if moved or typed or turned:
                     blk["user_edited"] = True
             else:   # drawn by the user
                 blk["user_edited"] = True
@@ -589,13 +591,15 @@ async def translation_worker():
             max_stroke_ratio = float(task.get("max_stroke_ratio", 0.35))
             font_scale = float(task.get("font_scale", 1.0))
 
+            text_direction = "vertical" if task.get("text_direction") == "vertical" else "horizontal"
             renderer = PDFLayoutRenderer(
                 pdf_path,
                 None,
                 ink_thresh=ink_thresh,
                 dilate_iter=dilate_iter,
                 max_stroke_ratio=max_stroke_ratio,
-                font_scale=font_scale
+                font_scale=font_scale,
+                text_direction=text_direction
             )
             
             # Semaphore to restrict GPU inpainting to 1 concurrent task to guarantee 4GB VRAM safety
@@ -824,7 +828,8 @@ async def translation_worker():
                 review_waits[task_id] = wait
                 status_db[task_id] = {
                     "percent": 45, "stage": "翻译完成，等待你调整检测框（调好后点「继续重绘」）", "status": "review",
-                    "edit_data": {"pages": build_edit_pages(pages, translated_text_map), "source_lang": source_lang},
+                    "edit_data": {"pages": build_edit_pages(pages, translated_text_map, text_direction),
+                                  "source_lang": source_lang, "text_direction": text_direction},
                     "metrics": total_metrics}
                 logger.info(f"[Review] task {task_id}: waiting for the user (timeout {REVIEW_TIMEOUT_SEC}s)")
                 t_wait = time.monotonic()
@@ -846,7 +851,7 @@ async def translation_worker():
                                       "metrics": total_metrics}
                 if not rows:
                     return
-                plan = plan_review(pages, rows, translated_text_map)
+                plan = plan_review(pages, rows, translated_text_map, text_direction)
                 logger.info(f"[Review] task {task_id}: edited pages {plan['pages']}, removed {plan['removed']} box(es), "
                             f"{len(plan['need_ocr'])} box(es) to recognise again")
                 if plan["need_ocr"]:
@@ -1059,7 +1064,7 @@ async def translation_worker():
 
             # Bubbles + translations for the box editor (page image comes from /api/v1/edit/...)
             edit_pages = build_edit_pages([p for p in layout_data if p["page_num"] in selected_pages],
-                                          translated_text_map)
+                                          translated_text_map, text_direction)
             if base_result:   # earlier pages stay in the Excel script and stay editable
                 done = {ep["page"] for ep in edit_pages}
                 for bp, bdata in sorted(base_result["data"].items()):
@@ -1071,7 +1076,7 @@ async def translation_worker():
                         for b in bdata["blocks"]]})
                 edit_pages.sort(key=lambda ep: ep["page"])
                 script_pages.sort(key=lambda sp: sp["page_num"])
-            edit_data = {"pages": edit_pages, "source_lang": source_lang}
+            edit_data = {"pages": edit_pages, "source_lang": source_lang, "text_direction": text_direction}
 
             xlsx_path = None
             try:
@@ -1500,7 +1505,8 @@ async def upload_pdf_file(
     corrections: UploadFile = File(None),
     corrections_json: str = Form(""),
     base_task_id: str = Form(""),
-    review_first: bool = Form(False)
+    review_first: bool = Form(False),
+    text_direction: str = Form("horizontal")
 ):
     """
     Uploads the raw PDF file, assigns uuid, applies custom tuning parameters, and queues the task.
@@ -1574,6 +1580,8 @@ async def upload_pdf_file(
         "base_task_id": base,
         # pause after extraction + translation so the user can fix boxes before anything is rendered
         "review_first": bool(review_first) and correction_rows is None,
+        # lettering of the translation: "horizontal" (left -> right) or "vertical" (top -> bottom, columns left -> right)
+        "text_direction": "vertical" if text_direction == "vertical" else "horizontal",
     }
     
     status_db[task_id] = {

@@ -184,7 +184,9 @@ def parse_corrections_json(text: str) -> dict:
             if len(txt) > MAX_EDITOR_TEXT:
                 raise CorrectionsError(f"第 {page} 页的框 #{bid} 译文过长")
             raw = "" if r.get("raw") is None else str(r["raw"])[:MAX_EDITOR_TEXT]
-            clean.append({"id": bid, "bbox": bbox, "text": txt, "raw": raw, "edited": bool(r.get("edited"))})
+            direction = r.get("direction") if r.get("direction") in ("horizontal", "vertical") else ""
+            clean.append({"id": bid, "bbox": bbox, "text": txt, "raw": raw, "edited": bool(r.get("edited")),
+                          "direction": direction})
         total += len(clean)
         out[page] = clean
     if total > MAX_EDITOR_ROWS:
@@ -246,6 +248,8 @@ def blocks_from_corrections(rows: list) -> list:
                        "color": (0.0, 0.0, 0.0), "width": x1 - x0, "height": y1 - y0,
                        "center_x": (x0 + x1) / 2.0, "center_y": (y0 + y1) / 2.0,
                        "ocr_engine": "Excel 台本", "user_edited": bool(r.get("edited"))})
+        if r.get("direction") in ("horizontal", "vertical"):
+            blocks[-1]["direction"] = r["direction"]     # per-box lettering direction (box editor)
     return blocks
 
 
