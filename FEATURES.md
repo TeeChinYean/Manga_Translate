@@ -393,9 +393,9 @@
 - 相关测试：tests/test_launchers.py（静态检查脚本内容：开关、Qwen 跳过、CRLF、批处理括号安全、ps1 大括号配对 / param 位置）
 - 状态：Done（脚本没有在 Windows 上实际执行过，需要你本机点一次确认）
 
-### [Home] 默认值：排版方向「自动」、检测框「先调框再继续」
-- 说明：「译文排版方向」默认改为「自动」（按原文文字的排列逐框判断）；「调整检测框的时机」默认改为「先调框再继续」（放在第一个选项）。上传接口没带 `text_direction` 时也按「自动」处理，字号估算接口同理
-- 涉及文件/模块：`templates/index.html`（`#textDirection`、`#adjustTiming` 的选项顺序和 selected）、`main.py`（`upload` 的 `text_direction` 默认值、`FontSizeRequest.text_direction`）
-- 实现要点：「先调框再继续」会强制串行模式，每次翻译完都会暂停等你调框；不想暂停就把下拉切回「翻译结束后再调」。无效的方向值仍退回横排
-- 相关测试：tests/test_text_direction.py（`test_defaults_are_auto_direction_and_adjust_boxes_first`、上传默认值）
+### [Home] 默认值：排版方向「自动」
+- 说明：「译文排版方向」默认改为「自动」（按原文文字的排列逐框判断）。上传接口没带 `text_direction` 时也按「自动」处理，字号估算接口同理。「调整检测框的时机」曾短暂改成默认「先调框再继续」，已改回默认「翻译结束后再调」（用户要求）
+- 涉及文件/模块：`templates/index.html`（`#textDirection` 的 selected）、`main.py`（`upload` 的 `text_direction` 默认值、`FontSizeRequest.text_direction`）
+- 实现要点：无效的方向值仍退回横排；「先调框再继续」仍可在下拉里手动选，它会强制串行模式
+- 相关测试：tests/test_text_direction.py（`test_defaults_are_auto_direction_and_adjust_boxes_after`、上传默认值）
 - 状态：Done
