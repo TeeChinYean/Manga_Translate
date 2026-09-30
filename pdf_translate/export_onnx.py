@@ -75,8 +75,12 @@ def export_lama():
     logger.info("Attempting to export LaMa Inpainter to ONNX...")
     try:
         import sys
-        mit_path = os.path.abspath(os.path.join(os.path.dirname(__file__), "manga_translator_source", "manga-image-translator-main"))
-        sys.path.insert(0, mit_path)
+        # manga-image-translator (GPL-3.0) is NOT part of this repository: point MIT_SOURCE_DIR at your own checkout
+        mit_path = os.getenv("MIT_SOURCE_DIR", "")
+        if not mit_path or not os.path.isdir(mit_path):
+            logger.error("Set MIT_SOURCE_DIR to a checkout of https://github.com/zyddnys/manga-image-translator to export LaMa.")
+            return
+        sys.path.insert(0, os.path.abspath(mit_path))
         from manga_translator.inpainting import get_inpainter
         
         # Assume it's LaMa (Valid choices: default, lama_large, lama_mpe, sd, none, original)

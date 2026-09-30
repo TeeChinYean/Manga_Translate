@@ -327,3 +327,10 @@
   - 页缓存键包含方向；Excel 回填任务用上传表单里的默认方向（Excel 里没有方向列）；没被重绘的页保持上次的方向
 - 相关测试：tests/test_text_direction.py（分列 / 避头点 / 字号适配 / 竖排绘制方向与列顺序 / 旋转与上移标点 / 默认与单框覆盖 / JSON 与 edit_data 携带方向 / 上传参数 / 页面接线）、tests/test_review_first.py `test_text_direction_reaches_the_renderer_and_the_editor_data`（真实 worker）；无头 Chromium 对模拟服务器：设置区选竖排 → 上传字段正确 → 编辑器里单框改回横排 → 提交数据正确
 - 状态：Done（竖排字形在沙箱字体下检查过，真实漫画字体 / 效果待你实测，见「待确认问题」）
+
+### [Repo] 开源准备：MIT 许可证、第三方声明、去掉内置 GPL 源码
+- 说明：为公开仓库做的整理——加 `LICENSE`（MIT）；`THIRD_PARTY_NOTICES.md` 列出每个模型 / 库的用途、许可证、来源和是否已核对；README 去掉 Before/After 的漫画截图、补充免责声明（不含 / 不提供 / 不抓取漫画、需合法副本、非商业、AI 翻译可能有错）和许可说明；删除仓库里内置的 manga-image-translator 源码（GPL-3.0，174 个文件，代码并未引用）
+- 涉及文件/模块：`LICENSE`、`THIRD_PARTY_NOTICES.md`、`README.md`、`pdf_translate/export_onnx.py`（改为用环境变量 `MIT_SOURCE_DIR` 指向自己另外克隆的 manga-image-translator）、`tests/test_no_personal_paths.py`（不再需要排除第三方目录）
+- 实现要点：模型权重本来就不在仓库里（`.gitignore` 排除 `*.onnx/*.bin/...`）；PyMuPDF 是 AGPL-3.0，个人本地使用无额外要求，打包分发或做网络服务需看 THIRD_PARTY_NOTICES.md 的说明；已核对的许可证：comic-text-detector GPL-3.0、manga-ocr 与 manga-ocr-base Apache-2.0、EasyOCR / RapidOCR Apache-2.0、big-lama 权重页 Apache-2.0、Qwen3.5-4B Apache-2.0
+- 相关测试：tests/test_open_source_ready.py（LICENSE 为 MIT、第三方声明覆盖 README 提到的模型、仓库不含 GPL 源码和模型权重、README 无截图并链接许可证、export_onnx 不依赖内置源码），已接入 test_pre_commit
+- 状态：Done（公开前还有待确认项，见「待确认问题」）

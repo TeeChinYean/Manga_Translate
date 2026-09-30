@@ -37,21 +37,8 @@
 
 ### 效果
 
-**漫画例子：图书馆的大魔法师**（这漫画不错，但出得慢）
-
-<table>
-  <tr>
-    <td align="center" valign="top" width="50%">
-      <div><strong>Before</strong></div>
-      <img src="https://github.com/user-attachments/assets/262e0b53-1c8d-4d26-b0ef-9041e25a3bd3" alt="図書館の大魔術師 第１巻 conv 58" style="max-width:100%; height:auto; border-radius:8px;" />
-    </td>
-    <td align="center" valign="top" width="50%">
-      <div><strong>After</strong></div>
-       <img src="https://github.com/user-attachments/assets/17f2e9a0-4b0c-477d-9050-dabba4123438" alt="page_58_944999c6a5" style="max-width:100%; height:auto; border-radius:8px;" />
-    </td>
-  </tr>
-</table>
-
+> 出于版权考虑，仓库不放任何漫画页面的截图。用你自己购买的漫画跑一页就能看到效果：日文竖排气泡被擦掉，换成排好版的中文（横排或竖排可选），网点底纹保留。
+>
 > 翻译效果约 75–85% 对，部分字体可能会偏小、偏大或发生重叠。
 
 ---
@@ -87,9 +74,11 @@ flowchart TD
    - 本地通义千问 Qwen 大模型：[QwenLM/Qwen](https://github.com/QwenLM)
    - ACG 领域微调的二次元翻译模型：[SakuraLLM/Sakura-13B](https://github.com/SakuraLLM/Sakura-13B)
 5. **排版参考**：[manga-image-translator](https://github.com/zyddnys/manga-image-translator)
-   - 启发了气泡文本框处理和排版重绘的部分思路。
+   - 启发了气泡文本框处理和排版重绘的部分思路（本仓库不包含它的代码）。
 6. **PDF 解析底座**：[PyMuPDF (fitz)](https://github.com/pymupdf/PyMuPDF)
-   - 快速高效地把 PDF 解析成高清页面。
+   - 快速高效地把 PDF 解析成高清页面。（PyMuPDF 是 AGPL-3.0，见下方许可说明）
+
+> 各模型的许可证与出处见 [THIRD_PARTY_NOTICES.md](THIRD_PARTY_NOTICES.md)。本项目不包含、也不分发任何模型权重，请自行下载并遵守它们各自的许可证。
 
 ---
 
@@ -142,4 +131,13 @@ http://127.0.0.1:8000
 
 ## ⚖️ 免责声明
 
-本项目仅供个人对自己购买的正版漫画进行学习、研究与个人辅助阅读使用。请尊重原作者与出版社的版权，切勿用于商业用途或二次非法传播。
+本项目仅供个人对**自己合法购买的正版漫画**进行学习、研究与个人辅助阅读使用。
+
+- 本项目**不包含、不提供、也不抓取**任何漫画内容；如何取得 PDF 由使用者自行负责（例如自己拍照 / 扫描自己购买的书）。
+- 使用者须自行确保拥有所处理内容的合法使用权，并遵守所在地区的法律；请尊重原作者与出版社的版权，切勿用于商业用途，或把翻译结果二次传播 / 上传到网络。
+- 翻译由 AI 自动完成，可能有错，仅供辅助阅读。
+- 作者不对使用者的行为及其后果负责。
+
+## 📄 许可证
+
+本项目源代码使用 [MIT License](LICENSE)。它调用的第三方模型与库各有自己的许可证（见 [THIRD_PARTY_NOTICES.md](THIRD_PARTY_NOTICES.md)），其中 PyMuPDF 为 AGPL-3.0：个人本地使用无额外要求；若要打包分发或作为网络服务提供给他人，请先阅读该文件里的说明。
