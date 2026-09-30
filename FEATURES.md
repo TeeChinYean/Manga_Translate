@@ -222,3 +222,17 @@
   - .gitkeep 占位文件保留
 - 相关测试：tests/test_low_bugs.py（`test_clear_dir_contents_removes_files_and_dirs_but_keeps_gitkeep`、`test_cleanup_wiring`、`test_download_rejects_path_escape`）；TestClient 实测：第一次下载 200 且文件被删，第二次 404，`..%5Cmain.py` 400
 - 状态：Done
+
+### [Home] Excel 校对台本 + 校对回填（取代 Word / 隐藏 JSON 与调节面板）
+- 说明：翻译完成后提供「Excel 校对台本 (.xlsx)」（取代 Word .doc）。用户在 Excel 里修改「译文」一栏，再在页面切换到「✏️ 校对回填」，上传同一个 PDF + 改好的 Excel，系统不调用 LLM，直接把修改后的译文重新消字、排版进 PDF。页面上隐藏了「实时重绘调优」面板和 JSON 下载按钮（固定使用默认参数）；选择 PDF 时不再自动打开调节面板或跑预览
+- 涉及文件/模块：core/document_skill.py（`generate_bilingual_xlsx`、`read_corrections`、`match_corrections`）、main.py（上传接口可选 `corrections` 字段、`_load_corrections`、worker 回填分支）、templates/index.html（模式切换、Excel 上传区、按钮改名）、requirements.txt（openpyxl>=3.1）
+- 实现要点：
+  - 「台本」工作表：页码 / 气泡 / 原文 / 译文（可修改）+ 隐藏的 bbox 四栏；隐藏的 meta 工作表：PDF 的 MD5、源语言、重绘参数
+  - 回填时重新提取气泡，按「同页 + bbox IoU ≥ 0.5」匹配 Excel 行（id 只用于平局），所以 id 有变化也能对上；没匹配到的气泡保持原图
+  - 校验：只接受 .xlsx、≤20MB、必须有「台本」和 meta 工作表且表头未改；PDF 的 MD5 必须与台本一致，否则返回 400 并提示「PDF 与 Excel 台本不匹配」；上传的 xlsx 解析后立即删除
+  - 回填强制使用串行模式，页码与参数沿用台本里记录的值；跳过 LLM 启动和重启
+  - 译文单元格强制为文本类型，以「=」开头的译文不会变成公式
+  - main.py 不再写页缓存（每个任务结束都会删除，不可能被复用）；这也修复了真实测试里缓存目录缺失导致任务失败的问题
+- 相关测试：tests/test_excel_reinsert.py（导出→修改→读回、公式安全、id 变化 / bbox 偏移匹配、坏文件和外来文件拒绝、PDF 不匹配 400 且不留文件），已接入 test_pre_commit；真实测试：第5巻 第10页 5 个气泡，Excel 回填 5/5 匹配，45.9s 完成，未启动 LLM
+- 状态：Done
+

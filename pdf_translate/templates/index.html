@@ -238,7 +238,7 @@
             text-align: center;
         }
 
-        #fileInput {
+        #fileInput, #excelInput {
             display: none;
         }
 
@@ -952,6 +952,21 @@
             background: rgba(10, 12, 18, 0.95);
         }
 
+        /* Adjust (tuning) panel is hidden: defaults are always used */
+        .tune-summary-bar, .tuning-sidebar, .sidebar-backdrop { display: none !important; }
+
+        /* Mode switch: new translation / re-insert corrected Excel */
+        .mode-switch { display: flex; gap: 8px; width: 100%; }
+        .mode-btn {
+            flex: 1; padding: 10px 12px; border-radius: 10px; cursor: pointer; font-size: 0.9rem;
+            background: rgba(255, 255, 255, 0.04); border: 1px solid rgba(255, 255, 255, 0.1);
+            color: var(--text-secondary, #9ca3af); transition: all 0.2s ease;
+        }
+        .mode-btn.active {
+            background: rgba(99, 102, 241, 0.15); border-color: var(--accent-indigo); color: var(--text-primary);
+        }
+        .reinsert-steps { font-size: 0.82rem; line-height: 1.7; color: var(--text-secondary, #9ca3af); margin: 0; padding-left: 18px; }
+
         /* Tuning summary bar on main upload card */
         .tune-summary-bar {
             background: rgba(99, 102, 241, 0.06);
@@ -1033,6 +1048,11 @@
                     <p class="card-desc">选择源语言并拖入需要完美保留排版的 PDF 文件</p>
                 </div>
 
+                <div class="mode-switch">
+                    <button class="mode-btn active" id="modeTranslateBtn" type="button">🚀 新翻译</button>
+                    <button class="mode-btn" id="modeReinsertBtn" type="button">✏️ 校对回填 (Excel)</button>
+                </div>
+
                 <!-- Drag-drop area -->
                 <div class="upload-zone" id="dropZone" onclick="document.getElementById('fileInput').click()">
                     <div class="upload-icon">📥</div>
@@ -1041,8 +1061,23 @@
                     <input type="file" id="fileInput" accept=".pdf">
                 </div>
 
+                <!-- Re-insert mode: corrected Excel script -->
+                <div id="reinsertPanel" style="display: none; flex-direction: column; gap: 12px;">
+                    <ol class="reinsert-steps">
+                        <li>在上次翻译结果中下载「Excel 校对台本」</li>
+                        <li>在 Excel 里只修改「译文 (可修改)」一栏，保存</li>
+                        <li>在上方选择<b>同一个</b>原始 PDF，下方选择改好的 Excel</li>
+                        <li>点击「回填并重绘」，页码与参数自动沿用上次</li>
+                    </ol>
+                    <div class="upload-zone" id="excelZone" onclick="document.getElementById('excelInput').click()">
+                        <div class="upload-icon">📊</div>
+                        <div class="upload-text" id="excelStatusText">点击选择改好的 Excel 台本 (.xlsx)</div>
+                        <input type="file" id="excelInput" accept=".xlsx">
+                    </div>
+                </div>
+
                 <!-- Language config -->
-                <div class="control-group">
+                <div class="control-group" data-translate-only>
                     <label for="srcLang">文档源语言 (Source Language)</label>
                     <select id="srcLang">
                         <option value="English">🌐 英语 (English)</option>
@@ -1050,7 +1085,7 @@
                     </select>
                 </div>
 
-                <div class="control-group">
+                <div class="control-group" data-translate-only>
                     <label>目标语言 (Target Language)</label>
                     <select id="tgtLang" disabled>
                         <option value="Simplified Chinese">🇨🇳 简体中文 (Simplified Chinese)</option>
@@ -1058,14 +1093,14 @@
                 </div>
 
                 <!-- Page Range configuration -->
-                <div class="control-group">
+                <div class="control-group" data-translate-only>
                     <label for="pageRange">翻译页码范围 (Page Range)</label>
                     <input type="text" id="pageRange" placeholder="例如: 1-10, 15, 20-30 (留空为全部)"
                         style="width: 100%; padding: 12px; background: rgba(255, 255, 255, 0.05); border: 1px solid rgba(255, 255, 255, 0.1); border-radius: 8px; color: var(--text-primary); outline: none; transition: border 0.3s; font-size: 0.9rem;">
                 </div>
 
                 <!-- Pipeline scheduling mode (for A/B speed comparison) -->
-                <div class="control-group">
+                <div class="control-group" data-translate-only>
                     <label for="pipelineMode">流水线模式 (Pipeline Mode)</label>
                     <select id="pipelineMode">
                         <option value="auto" selected>自动（默认）：少于 20 页用串行，20 页以上用提取+翻译并行</option>
@@ -1188,9 +1223,9 @@
                         </div>
                         <button class="btn" id="downloadDocBtn"
                             style="width: 100%; padding:12px 24px; font-size:0.9rem; background: rgba(16, 185, 129, 0.15); border: 1px solid rgba(16, 185, 129, 0.3); color: #6ee7b7; display: none;">
-                            📝 下载 Word 校对台本 (.doc)
+                            📊 下载 Excel 校对台本 (.xlsx)
                         </button>
-                        <button class="btn" id="downloadJsonBtn"
+                        <button class="btn" id="downloadJsonBtn" hidden
                             style="width: 100%; padding:12px 24px; font-size:0.9rem; background: rgba(245, 158, 11, 0.15); border: 1px solid rgba(245, 158, 11, 0.3); color: #fcd34d; display: none;">
                             📊 下载提取数据与翻译映射 (JSON)
                         </button>
@@ -1443,14 +1478,45 @@
             }
             selectedFile = file;
             uploadStatusText.textContent = `已选择: ${file.name}`;
-            translateBtn.disabled = false;
             logToConsole(`[+] 成功载入源 PDF: ${file.name} (${(file.size / 1024 / 1024).toFixed(2)} MB)`, 'success');
             
-            // Auto open Tuning Sidebar & fetch real-time preview for page 1
-            if (typeof openTuningSidebar === 'function') {
-                openTuningSidebar(true);
-            }
+            updateTranslateBtn();
         }
+
+        // ── Mode: new translation / re-insert a corrected Excel script ──
+        let reinsertMode = false;
+        let selectedExcel = null;
+        const excelInput = document.getElementById('excelInput');
+        const translateBtnLabel = { translate: '🚀 开始超高速排版翻译', reinsert: '🔁 回填并重绘' };
+
+        function updateTranslateBtn() {
+            translateBtn.disabled = !selectedFile || (reinsertMode && !selectedExcel);
+        }
+
+        function setMode(reinsert) {
+            reinsertMode = reinsert;
+            document.getElementById('modeTranslateBtn').classList.toggle('active', !reinsert);
+            document.getElementById('modeReinsertBtn').classList.toggle('active', reinsert);
+            document.getElementById('reinsertPanel').style.display = reinsert ? 'flex' : 'none';
+            document.querySelectorAll('[data-translate-only]').forEach(el => { el.style.display = reinsert ? 'none' : ''; });
+            translateBtn.textContent = reinsert ? translateBtnLabel.reinsert : translateBtnLabel.translate;
+            updateTranslateBtn();
+        }
+        document.getElementById('modeTranslateBtn').addEventListener('click', () => setMode(false));
+        document.getElementById('modeReinsertBtn').addEventListener('click', () => setMode(true));
+
+        excelInput.addEventListener('change', () => {
+            const f = excelInput.files[0];
+            if (!f) return;
+            if (!f.name.toLowerCase().endsWith('.xlsx')) {
+                logToConsole('[-] 错误: 校对文件必须是 .xlsx', 'err');
+                return;
+            }
+            selectedExcel = f;
+            document.getElementById('excelStatusText').textContent = `已选择: ${f.name}`;
+            logToConsole(`[+] 已载入校对台本: ${f.name}`, 'success');
+            updateTranslateBtn();
+        });
 
         // Action Trigger
         translateBtn.addEventListener('click', async () => {
@@ -1494,6 +1560,9 @@
             formData.append('max_stroke_ratio', tuningParams.max_stroke_ratio);
             formData.append('font_scale', tuningParams.font_scale);
             formData.append('pipeline_mode', document.getElementById('pipelineMode').value);
+            if (reinsertMode && selectedExcel) {
+                formData.append('corrections', selectedExcel);
+            }
 
             try {
                 const response = await fetch('/api/v1/translate/upload', {
@@ -1508,7 +1577,7 @@
                     // Start listening to SSE updates
                     listenToTaskStatus(activeTaskId);
                 } else {
-                    logToConsole(`[-] 队列响应失败: ${data.message || '未知错误'}`, 'err');
+                    logToConsole(`[-] 队列响应失败: ${data.detail || data.message || data.error || '未知错误'}`, 'err');
                     translateBtn.style.display = 'block';
                     translateBtn.disabled = false;
                     cancelBtn.style.display = 'none';
@@ -1606,7 +1675,7 @@
                 const data = JSON.parse(e.data);
                 const downloadUrl = data.download_url;
                 const downloadZipUrl = data.download_zip_url;
-                const downloadDocUrl = data.download_doc_url;
+                const downloadDocUrl = data.download_xlsx_url;
 
                 clearInterval(timerInterval);
                 const finalTime = ((Date.now() - startTime) / 1000).toFixed(1);
@@ -1644,14 +1713,6 @@
                     oneShotDownload(downloadDocBtn, downloadDocUrl);
                 } else if (downloadDocBtn) {
                     downloadDocBtn.style.display = 'none';
-                }
-
-                const downloadJsonBtn = document.getElementById('downloadJsonBtn');
-                if (data.download_json_url && downloadJsonBtn) {
-                    downloadJsonBtn.style.display = 'block';
-                    oneShotDownload(downloadJsonBtn, data.download_json_url);
-                } else if (downloadJsonBtn) {
-                    downloadJsonBtn.style.display = 'none';
                 }
 
                 // Close SSE channel and reset buttons

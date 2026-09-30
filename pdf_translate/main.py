@@ -87,7 +87,7 @@ app = FastAPI(
 BASE_DIR = os.path.dirname(os.path.abspath(__file__))
 UPLOAD_DIR = os.path.join(BASE_DIR, "data", "uploads")
 STATIC_DIR = os.path.join(BASE_DIR, "static")
-CACHE_DIR = os.path.join(BASE_DIR, "data", "cache")  # per-task page cache, removed when the task ends
+CACHE_DIR = os.path.join(BASE_DIR, "data", "cache")  # page cache of the C# entry (core/pipeline.py); swept on startup
 
 os.makedirs(UPLOAD_DIR, exist_ok=True)
 os.makedirs(STATIC_DIR, exist_ok=True)
@@ -206,6 +206,7 @@ DOWNLOAD_MEDIA_TYPES = {
     ".json": "application/json",
     ".docx": "application/vnd.openxmlformats-officedocument.wordprocessingml.document",
     ".doc": "application/msword",
+    ".xlsx": "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
     ".txt": "text/plain; charset=utf-8",
     ".html": "text/html; charset=utf-8",
 }
@@ -314,7 +315,8 @@ async def translation_worker():
         except Exception as _te:
             logger.warning(f"[Terms] cannot load series terms: {_te}")
         page_range = task.get("page_range", "")
-        force_retranslate = bool(task.get("force_retranslate", False))
+        # Re-insert mode: {page_num: [rows]} from a corrected Excel script; no LLM is used
+        corrections = task.get("corrections")
         
         status_db[task_id] = {
             "percent": 5,
@@ -323,7 +325,7 @@ async def translation_worker():
             "metrics": None
         }
         
-        cache_base_dir = temp_dir = None
+        temp_dir = None
         try:
             if task_id in cancelled_tasks:
                 # Cancelled while still queued: do nothing (and do not touch earlier downloads)
@@ -338,7 +340,7 @@ async def translation_worker():
 
             logger.info(f"🚀 Processing Task {task_id} inside background loop...")
             
-            if source_lang == "Japanese":
+            if source_lang == "Japanese" and not corrections:
                 from core.engine import ensure_turbovec_llm_ready
                 await asyncio.to_thread(ensure_turbovec_llm_ready, True, 20)
             
@@ -384,21 +386,6 @@ async def translation_worker():
                 return hasher.hexdigest()
             
             pdf_hash = await asyncio.to_thread(get_pdf_hash, pdf_path)
-            cache_base_dir = os.path.join(CACHE_DIR, pdf_hash)
-            os.makedirs(cache_base_dir, exist_ok=True)
-            
-            # Clear cache for selected pages if force_retranslate is True
-            if force_retranslate:
-                import glob
-                for page_num in selected_pages:
-                    for cache_path in (glob.glob(os.path.join(cache_base_dir, f"page_{page_num}.jpg"))
-                                       + glob.glob(os.path.join(cache_base_dir, f"page_{page_num}_*.jpg"))):
-                        try:
-                            os.remove(cache_path)
-                            logger.info(f"Cleared cache for page {page_num}")
-                        except Exception as ex:
-                            logger.warning(f"Could not clear cache for page {page_num}: {ex}")
-
             layout_data = []
             total_selected_pages = len(selected_pages)
 
@@ -492,23 +479,6 @@ async def translation_worker():
             def _mark(name):
                 stage_times[name] = round(time.time() - t_pipeline0, 1)
 
-            async def _restore_cached(page) -> bool:
-                """Cached page: restore the rendered JPEG and skip translation + rendering."""
-                nonlocal translated_count, rendered_count
-                page_num = page["page_num"]
-                cache_path = os.path.join(cache_base_dir, renderer.cache_filename(page_num))
-                if not os.path.exists(cache_path):
-                    return False
-                logger.info(f"Page {page_num} found in cache. Skipping translation.")
-                temp_dest = os.path.join(temp_dir, f"rendered_page_{page_num}.jpg")
-                await asyncio.to_thread(shutil.copy, cache_path, temp_dest)
-                temp_paths[page_num] = temp_dest
-                async with progress_lock:
-                    translated_count += 1
-                    rendered_count += 1
-                    update_progress()
-                return True
-
             async def translate_pages(pages, context_chunk_size=12):
                 """
                 Translate the blocks of several pages in ONE engine call so the LLM sees the
@@ -519,8 +489,6 @@ async def translation_worker():
                 combined_blocks = []
                 block_refs = {}
                 for page in pages:
-                    if await _restore_cached(page):
-                        continue
                     to_render.append(page)
                     for block in page.get("blocks", []):
                         u_id = len(combined_blocks)
@@ -530,7 +498,17 @@ async def translation_worker():
                         combined_blocks.append(block_copy)
                         block_refs[u_id] = (page["page_num"], block, block["id"])
 
-                if combined_blocks:
+                if corrections is not None:
+                    # Re-insert: the corrected Excel rows are the translation (matched by bbox)
+                    from core.document_skill import match_corrections
+                    for page in to_render:
+                        p_num = page["page_num"]
+                        texts = match_corrections(page.get("blocks", []), corrections.get(p_num, []))
+                        for block in page.get("blocks", []):
+                            block["translated_text"] = texts.get(block["id"], "")
+                            block["translation_engine"] = "人工校对 (Excel)"
+                            translated_text_map[(p_num, block["id"])] = block["translated_text"]
+                elif combined_blocks:
                     # Offload synchronous translation to thread pool so event loop is never frozen
                     translations, metrics = await asyncio.to_thread(
                         translation_engine.translate_batch,
@@ -579,7 +557,6 @@ async def translation_worker():
                 nonlocal rendered_count
                 p_num = page["page_num"]
                 src_page = src_doc[p_num - 1]
-                cache_path = os.path.join(cache_base_dir, renderer.cache_filename(p_num))
                 await start_lama_preload()  # no-op once loaded
 
                 dest_path = await renderer.render_single_page_to_temp(
@@ -591,12 +568,6 @@ async def translation_worker():
                 )
 
                 if dest_path and os.path.exists(dest_path):
-                    page_blocks = page.get("blocks", [])
-                    has_translated = (not page_blocks) or any(
-                        translated_text_map.get((p_num, b["id"]), "").strip() for b in page_blocks
-                    )
-                    if has_translated:
-                        await asyncio.to_thread(shutil.copy, dest_path, cache_path)
                     temp_paths[p_num] = dest_path
 
                 async with progress_lock:
@@ -636,7 +607,7 @@ async def translation_worker():
                     _check_cancel()
                     pages.append(p)
                 pages.sort(key=lambda x: x["page_num"])
-                await unload_ocr_models(restart_llm=True)
+                await unload_ocr_models(restart_llm=not corrections)
                 if not lama_uses_gpu():
                     start_lama_preload()  # CPU is idle while the LLM translates (CPU LaMa only;
                                           # GPU LaMa waits until the LLM is done: B28)
@@ -791,37 +762,32 @@ async def translation_worker():
             out_doc.save(output_pdf_path, garbage=4, deflate=True)
             out_doc.close()
             
-            # --- SKILL: Word Processing Generation ---
-            doc_pages_data = []
+            # --- Bilingual proofreading script (Excel); can be edited and re-inserted ---
+            script_pages = []
             for p_data in layout_data:
                 p_num = p_data["page_num"]
                 if p_num not in selected_pages: continue
-                p_blocks = []
-                for blk in p_data.get("blocks", []):
-                    b_id = blk.get("id")
-                    b_raw = blk.get("cleaned_text", blk.get("text", ""))
+                p_blocks = [{
+                    "id": blk.get("id"),
+                    "raw": blk.get("cleaned_text", blk.get("text", "")),
                     # Key is (page_num, block_id) tuple — must match how translated_text_map is built
-                    b_trans = translated_text_map.get((p_num, b_id), "")
-                    ocr_eng = blk.get("ocr_engine", "MangaOCR (ViT)")
-                    trans_eng = blk.get("translation_engine", "Turbovec Qwen 3.5 4B")
-                    if b_raw or b_trans:
-                        p_blocks.append({
-                            "raw": b_raw,
-                            "translated": b_trans,
-                            "ocr_engine": ocr_eng,
-                            "translation_engine": trans_eng
-                        })
+                    "translated": translated_text_map.get((p_num, blk.get("id")), ""),
+                    "bbox": blk.get("bbox"),
+                } for blk in p_data.get("blocks", [])]
                 if p_blocks:
-                    doc_pages_data.append({"page_num": p_num, "blocks": p_blocks})
-            
-            doc_path = None
+                    script_pages.append({"page_num": p_num, "blocks": p_blocks})
+
+            xlsx_path = None
             try:
                 from core.document_skill import LocalDocumentSkill
-                doc_skill = LocalDocumentSkill(STATIC_DIR)
-                doc_path = doc_skill.generate_bilingual_doc(task_id, doc_pages_data, filename)
+                xlsx_path = LocalDocumentSkill(STATIC_DIR).generate_bilingual_xlsx(
+                    task_id, script_pages, filename,
+                    meta={"pdf_md5": pdf_hash, "source_lang": source_lang, "ink_thresh": ink_thresh,
+                          "dilate_iter": dilate_iter, "max_stroke_ratio": max_stroke_ratio,
+                          "font_scale": font_scale})
             except Exception as e:
-                logger.error(f"Failed to generate translation DOC script: {e}")
-            
+                logger.error(f"Failed to generate Excel script: {e}")
+
             # Generate JSON Output for Layout & Extracted Data
             out_json_filename = f"translated_{uuid.uuid4().hex[:8]}_{filename}.json"
             output_json_path = os.path.join(STATIC_DIR, out_json_filename)
@@ -843,8 +809,8 @@ async def translation_worker():
                         if page_num in temp_paths and os.path.exists(temp_paths[page_num]):
                             arcname = f"page_{page_num:03d}.jpg"
                             zip_f.write(temp_paths[page_num], arcname)
-                    if doc_path and os.path.exists(doc_path):
-                        zip_f.write(doc_path, os.path.basename(doc_path))
+                    if xlsx_path and os.path.exists(xlsx_path):
+                        zip_f.write(xlsx_path, os.path.basename(xlsx_path))
                     if os.path.exists(output_json_path):
                         zip_f.write(output_json_path, os.path.basename(output_json_path))
                             
@@ -852,7 +818,7 @@ async def translation_worker():
             
             download_url = f"/api/v1/download/{out_filename}"
             download_zip_url = f"/api/v1/download/{out_zip_filename}"
-            download_doc_url = f"/api/v1/download/{os.path.basename(doc_path)}" if doc_path else ""
+            download_xlsx_url = f"/api/v1/download/{os.path.basename(xlsx_path)}" if xlsx_path else ""
             download_json_url = f"/api/v1/download/{out_json_filename}"
             
             logger.info(f"✅ Task {task_id} completed successfully.")
@@ -865,7 +831,7 @@ async def translation_worker():
                 "failed_pages": [p for p, _ in failed_pages],
                 "download_url": download_url,
                 "download_zip_url": download_zip_url,
-                "download_doc_url": download_doc_url,
+                "download_xlsx_url": download_xlsx_url,
                 "download_json_url": download_json_url,
                 "metrics": total_metrics
             }
@@ -880,10 +846,9 @@ async def translation_worker():
                 "message": str(e)
             }
         finally:
-            # Page cache and rendered JPEGs never outlive the task (success, failure or cancel)
-            for d in (temp_dir, cache_base_dir):
-                if d:
-                    shutil.rmtree(d, ignore_errors=True)
+            # Rendered JPEGs never outlive the task (success, failure or cancel)
+            if temp_dir:
+                shutil.rmtree(temp_dir, ignore_errors=True)
             if os.path.exists(pdf_path):
                 try:
                     os.remove(pdf_path)
@@ -1071,6 +1036,32 @@ async def preview_render_page(
         logger.error(f"Failed to generate preview: {e}", exc_info=True)
         return {"success": False, "error": str(e)}
 
+async def _load_corrections(xlsx: UploadFile, pdf: UploadFile):
+    """Validate and parse a corrected Excel script; the xlsx never stays on disk."""
+    from core.document_skill import read_corrections, CorrectionsError, MAX_XLSX_BYTES
+    if not xlsx.filename.lower().endswith(".xlsx"):
+        raise HTTPException(status_code=400, detail="校对文件必须是 .xlsx（本系统导出的 Excel 台本）")
+    data = await xlsx.read()
+    if len(data) > MAX_XLSX_BYTES:
+        raise HTTPException(status_code=400, detail="Excel 文件过大")
+    fd, tmp = tempfile.mkstemp(suffix=".xlsx", dir=UPLOAD_DIR)
+    try:
+        with os.fdopen(fd, "wb") as f:
+            f.write(data)
+        meta, rows = read_corrections(tmp)
+    except CorrectionsError as e:
+        raise HTTPException(status_code=400, detail=str(e))
+    finally:
+        os.unlink(tmp)
+    if not rows:
+        raise HTTPException(status_code=400, detail="Excel 台本里没有任何气泡")
+    pdf_bytes = await pdf.read()
+    await pdf.seek(0)
+    if meta.get("pdf_md5") and hashlib.md5(pdf_bytes).hexdigest() != meta["pdf_md5"]:
+        raise HTTPException(status_code=400, detail="PDF 与 Excel 台本不匹配：请上传生成这份台本时使用的同一个 PDF")
+    return rows, meta
+
+
 @app.post("/api/v1/translate/upload")
 async def upload_pdf_file(
     file: UploadFile = File(...),
@@ -1085,14 +1076,32 @@ async def upload_pdf_file(
     pipeline_mode: str = Form(DEFAULT_PIPELINE_MODE),
     context_chunk_size: int = Form(DEFAULT_CONTEXT_CHUNK),
     translate_batch_lines: int = Form(DEFAULT_STREAM_BATCH_LINES),
-    series: str = Form("")
+    series: str = Form(""),
+    corrections: UploadFile = File(None)
 ):
     """
     Uploads the raw PDF file, assigns uuid, applies custom tuning parameters, and queues the task.
+    With `corrections` (the Excel script of an earlier run, edited by the user) the task
+    re-inserts those translations into the same PDF instead of translating again.
     """
     if not file.filename.endswith(".pdf"):
         return {"error": "Invalid format. Only PDF files are supported."}
-        
+
+    correction_rows = None
+    if corrections is not None and corrections.filename:
+        correction_rows, meta = await _load_corrections(corrections, file)
+        # Same pages and render parameters as the run that produced the script
+        page_range = ",".join(str(p) for p in sorted(correction_rows))
+        source_lang = meta.get("source_lang") or source_lang
+        try:
+            ink_thresh = int(float(meta.get("ink_thresh", ink_thresh)))
+            dilate_iter = int(float(meta.get("dilate_iter", dilate_iter)))
+            max_stroke_ratio = float(meta.get("max_stroke_ratio", max_stroke_ratio))
+            font_scale = float(meta.get("font_scale", font_scale))
+        except ValueError:
+            pass
+        pipeline_mode = "serial"
+
     task_id = str(uuid.uuid4())
     temp_filename = f"source_{task_id}_{file.filename}"
     temp_filepath = os.path.join(UPLOAD_DIR, temp_filename)
@@ -1121,6 +1130,7 @@ async def upload_pdf_file(
         "translate_batch_lines": translate_batch_lines,
         # optional: term dictionary name; empty = derived from the file name (volume removed)
         "series": (series or "").strip(),
+        "corrections": correction_rows,
     }
     
     status_db[task_id] = {
@@ -1179,7 +1189,7 @@ async def get_translation_status_stream(task_id: str):
                 last_percent = percent
                 
                 if status == "complete":
-                    yield f"event: complete\ndata: {json.dumps({'download_url': task_status.get('download_url'), 'download_zip_url': task_status.get('download_zip_url'), 'download_doc_url': task_status.get('download_doc_url'), 'download_json_url': task_status.get('download_json_url'), 'warning': task_status.get('warning', ''), 'failed_pages': task_status.get('failed_pages', []), 'stage_times': (task_status.get('metrics') or {}).get('stage_times'), 'pipeline_mode': (task_status.get('metrics') or {}).get('pipeline_mode'), 'extract_devices': (task_status.get('metrics') or {}).get('extract_devices'), 'translate_breakdown': (task_status.get('metrics') or {}).get('translate_breakdown'), 'render_breakdown': (task_status.get('metrics') or {}).get('render_breakdown'), 'extract_breakdown': (task_status.get('metrics') or {}).get('extract_breakdown'), 'model_usage': (task_status.get('metrics') or {}).get('model_usage')}, ensure_ascii=False)}\n\n"
+                    yield f"event: complete\ndata: {json.dumps({'download_url': task_status.get('download_url'), 'download_zip_url': task_status.get('download_zip_url'), 'download_xlsx_url': task_status.get('download_xlsx_url'), 'download_json_url': task_status.get('download_json_url'), 'warning': task_status.get('warning', ''), 'failed_pages': task_status.get('failed_pages', []), 'stage_times': (task_status.get('metrics') or {}).get('stage_times'), 'pipeline_mode': (task_status.get('metrics') or {}).get('pipeline_mode'), 'extract_devices': (task_status.get('metrics') or {}).get('extract_devices'), 'translate_breakdown': (task_status.get('metrics') or {}).get('translate_breakdown'), 'render_breakdown': (task_status.get('metrics') or {}).get('render_breakdown'), 'extract_breakdown': (task_status.get('metrics') or {}).get('extract_breakdown'), 'model_usage': (task_status.get('metrics') or {}).get('model_usage')}, ensure_ascii=False)}\n\n"
                     break
                 elif status == "failed":
                     yield f"event: error\ndata: {json.dumps({'message': task_status.get('message', 'Processing pipeline crashed.')})}\n\n"

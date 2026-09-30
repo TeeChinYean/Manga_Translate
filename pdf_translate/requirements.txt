@@ -12,6 +12,9 @@ easyocr>=1.7.0
 opencv-python>=4.7.0.72
 pillow>=9.5.0
 
+# Excel proofreading script (export + re-insert)
+openpyxl>=3.1
+
 # Scientific & Image Processing (Required for LaMa inpainting)
 numpy>=1.24.0
 scipy>=1.10.0

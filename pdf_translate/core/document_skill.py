@@ -1,82 +1,166 @@
+"""
+Bilingual proofreading script as Excel (.xlsx), and the reverse: read the corrected
+script back so the translation can be re-inserted into the same PDF.
+
+Sheet "台本": one row per speech bubble. Only the 译文 column is meant to be edited.
+The bubble bbox is kept in hidden columns so rows can be matched to the re-extracted
+bubbles even if block ids shift. Sheet "meta" (hidden) records the source PDF hash
+and the render parameters of the original run.
+"""
 import os
 import time
 
+from openpyxl import Workbook, load_workbook
+from openpyxl.cell.cell import TYPE_STRING
+from openpyxl.styles import Alignment, Font, PatternFill
+
+SCRIPT_SHEET = "台本"
+META_SHEET = "meta"
+HEADERS = ["页码", "气泡", "原文 (OCR)", "译文 (可修改)", "x0", "y0", "x1", "y1"]
+COL_TRANSLATION = 4
+MATCH_MIN_IOU = 0.5
+MAX_XLSX_BYTES = 20 * 1024 * 1024
+
+
+class CorrectionsError(ValueError):
+    """The uploaded Excel is not a proofreading script produced by this tool."""
+
+
+def _text_cell(ws, row, col, value):
+    # Always store as text: a translation starting with "=" must not become a formula
+    cell = ws.cell(row=row, column=col)
+    cell.value = "" if value is None else str(value)
+    cell.data_type = TYPE_STRING
+    return cell
+
+
 class LocalDocumentSkill:
-    """
-    Agent Skill: Word Processing & Document Generation
-    This skill takes the extracted Japanese text and translated Chinese text,
-    and generates a bilingual comparison document (.doc format using HTML tables)
-    for professional translators to do post-editing (MTPE).
-    
-    Zero third-party dependencies required.
-    """
-    
     def __init__(self, output_dir: str):
         self.output_dir = output_dir
         os.makedirs(output_dir, exist_ok=True)
-        
-    def generate_bilingual_doc(self, task_id: str, pages_data: list, original_filename: str) -> str:
+
+    def generate_bilingual_xlsx(self, task_id: str, pages_data: list, original_filename: str,
+                                meta: dict | None = None) -> str:
         """
-        pages_data format:
-        [
-            {
-                "page_num": 1,
-                "blocks": [
-                    {"raw": "こんにちは", "translated": "你好"}, ...
-                ]
-            }, ...
-        ]
+        pages_data: [{"page_num": 1, "blocks": [{"id": 3, "raw": "...", "translated": "...",
+                      "bbox": [x0, y0, x1, y1]}, ...]}, ...]
+        meta: extra key/value pairs for the hidden meta sheet (pdf_md5, render params, ...).
         """
-        doc_path = os.path.join(self.output_dir, f"script_{task_id}.doc")
-        
-        # We use an HTML-based .doc format. Microsoft Word opens this natively and perfectly
-        # formats it as a Word Document without needing python-docx dependency.
-        html_content = [
-            '<html><head><meta charset="utf-8">',
-            '<style>',
-            'body { font-family: "Microsoft YaHei", sans-serif; line-height: 1.6; padding: 20px; }',
-            'h1 { text-align: center; color: #333; }',
-            'table { width: 100%; border-collapse: collapse; margin-bottom: 30px; }',
-            'th, td { border: 1px solid #ccc; padding: 10px; text-align: left; vertical-align: top; }',
-            'th { background-color: #f2f2f2; font-weight: bold; }',
-            '.page-header { background-color: #e6f7ff; font-weight: bold; font-size: 1.1em; }',
-            '.badge-ocr { display: inline-block; background: #e0f2fe; color: #0284c7; padding: 2px 8px; border-radius: 4px; font-size: 0.85em; font-weight: bold; margin-bottom: 4px; }',
-            '.badge-llm { display: inline-block; background: #fef3c7; color: #d97706; padding: 2px 8px; border-radius: 4px; font-size: 0.85em; font-weight: bold; }',
-            '</style>',
-            f'<title>翻译台本 - {original_filename}</title>',
-            '</head><body>',
-            f'<h1>漫画翻译校对台本 (含模型调用追踪)</h1>',
-            f'<p><strong>来源文件：</strong>{original_filename}</p>',
-            f'<p><strong>生成时间：</strong>{time.strftime("%Y-%m-%d %H:%M:%S")}</p>',
-            '<table>',
-            '<tr><th width="10%">页码/气泡</th><th width="35%">原始日文 (OCR)</th><th width="35%">本地化中文翻译</th><th width="20%">所用模型与链路</th></tr>'
-        ]
-        
+        stem = os.path.splitext(original_filename)[0]
+        path = os.path.join(self.output_dir, f"script_{task_id[:8]}_{stem}.xlsx")
+
+        wb = Workbook()
+        ws = wb.active
+        ws.title = SCRIPT_SHEET
+        ws.append(HEADERS)
+        for c in ws[1]:
+            c.font = Font(bold=True)
+            c.fill = PatternFill("solid", fgColor="E6F7FF")
+        edit_fill = PatternFill("solid", fgColor="FFF7E0")
+        wrap = Alignment(wrap_text=True, vertical="top")
+
+        row = 2
         for page in pages_data:
-            p_num = page.get("page_num", "?")
-            blocks = page.get("blocks", [])
-            if not blocks:
-                continue
-                
-            # Add page header row
-            html_content.append(f'<tr class="page-header"><td colspan="4">第 {p_num} 页</td></tr>')
-            
-            for idx, blk in enumerate(blocks):
-                raw = blk.get("raw", "").replace("\n", "<br>")
-                trans = blk.get("translated", "").replace("\n", "<br>")
-                ocr_eng = blk.get("ocr_engine", "MangaOCR (ViT)")
-                trans_eng = blk.get("translation_engine", "Turbovec Qwen 3.5 4B")
-                
-                # Only show blocks that have actual text
-                if not raw.strip():
+            for blk in page.get("blocks", []):
+                if not str(blk.get("raw", "")).strip():
                     continue
-                    
-                model_col = f'<span class="badge-ocr">OCR: {ocr_eng}</span><br><span class="badge-llm">LLM: {trans_eng}</span>'
-                html_content.append(f'<tr><td>气泡 {idx+1}</td><td>{raw}</td><td>{trans}</td><td>{model_col}</td></tr>')
-                
-        html_content.append('</table></body></html>')
-        
-        with open(doc_path, 'w', encoding='utf-8') as f:
-            f.write("\n".join(html_content))
-            
-        return doc_path
+                ws.cell(row=row, column=1, value=int(page["page_num"]))
+                ws.cell(row=row, column=2, value=int(blk["id"]))
+                _text_cell(ws, row, 3, blk.get("raw", "")).alignment = wrap
+                t = _text_cell(ws, row, COL_TRANSLATION, blk.get("translated", ""))
+                t.alignment = wrap
+                t.fill = edit_fill
+                for i, v in enumerate(blk.get("bbox") or [0, 0, 0, 0]):
+                    ws.cell(row=row, column=5 + i, value=round(float(v), 2))
+                row += 1
+
+        ws.freeze_panes = "A2"
+        for col, width in zip("ABCD", (7, 7, 45, 45)):
+            ws.column_dimensions[col].width = width
+        for col in "EFGH":
+            ws.column_dimensions[col].hidden = True
+
+        ms = wb.create_sheet(META_SHEET)
+        ms.sheet_state = "hidden"
+        info = {"source_file": original_filename, "generated": time.strftime("%Y-%m-%d %H:%M:%S")}
+        info.update(meta or {})
+        for k, v in info.items():
+            ms.append([k])
+            _text_cell(ms, ms.max_row, 2, v)
+
+        wb.save(path)
+        return path
+
+
+def read_corrections(xlsx_path: str) -> tuple[dict, dict]:
+    """
+    Returns (meta, corrections) where corrections = {page_num: [{"id", "bbox", "text"}, ...]}.
+    Raises CorrectionsError for anything that is not a script from generate_bilingual_xlsx.
+    """
+    try:
+        wb = load_workbook(xlsx_path, read_only=True, data_only=True)
+    except Exception as e:
+        raise CorrectionsError(f"无法读取 Excel 文件: {e}")
+    try:
+        if SCRIPT_SHEET not in wb.sheetnames or META_SHEET not in wb.sheetnames:
+            raise CorrectionsError("这不是本系统导出的校对台本（缺少「台本」或 meta 工作表）")
+        meta = {}
+        for r in wb[META_SHEET].iter_rows(values_only=True):
+            if r and r[0]:
+                meta[str(r[0])] = "" if len(r) < 2 or r[1] is None else str(r[1])
+
+        rows = wb[SCRIPT_SHEET].iter_rows(values_only=True)
+        header = next(rows, None)
+        if not header or list(header[:4]) != HEADERS[:4]:
+            raise CorrectionsError("「台本」工作表的表头被修改了，请使用原始导出的文件")
+        corrections = {}
+        for r in rows:
+            if not r or r[0] is None or r[1] is None:
+                continue
+            try:
+                page, bid = int(r[0]), int(r[1])
+                bbox = [float(v) for v in r[4:8]] if len(r) >= 8 and None not in r[4:8] else None
+            except (TypeError, ValueError):
+                continue
+            text = "" if r[3] is None else str(r[3])
+            corrections.setdefault(page, []).append({"id": bid, "bbox": bbox, "text": text})
+        return meta, corrections
+    finally:
+        wb.close()
+
+
+def _iou(a, b) -> float:
+    ix = max(0.0, min(a[2], b[2]) - max(a[0], b[0]))
+    iy = max(0.0, min(a[3], b[3]) - max(a[1], b[1]))
+    inter = ix * iy
+    union = (a[2] - a[0]) * (a[3] - a[1]) + (b[2] - b[0]) * (b[3] - b[1]) - inter
+    return inter / union if union > 0 else 0.0
+
+
+def match_corrections(blocks: list, rows: list) -> dict:
+    """
+    Map re-extracted blocks of one page to corrected rows: best bbox IoU (>= MATCH_MIN_IOU),
+    same block id breaks ties. Each row is used once. Returns {block_id: text}.
+    Blocks without a match get nothing, so the renderer keeps their original text.
+    """
+    pairs = []
+    for bi, blk in enumerate(blocks):
+        for ri, row in enumerate(rows):
+            if row["bbox"] is not None:
+                score = _iou(blk["bbox"], row["bbox"])
+                if score < MATCH_MIN_IOU:
+                    continue
+            elif row["id"] == blk["id"]:
+                score = MATCH_MIN_IOU  # no bbox in the sheet: fall back to the id
+            else:
+                continue
+            pairs.append((score, row["id"] == blk["id"], bi, ri))
+    pairs.sort(reverse=True)
+    used_b, used_r, out = set(), set(), {}
+    for _, _, bi, ri in pairs:
+        if bi in used_b or ri in used_r:
+            continue
+        used_b.add(bi)
+        used_r.add(ri)
+        out[blocks[bi]["id"]] = rows[ri]["text"]
+    return out
