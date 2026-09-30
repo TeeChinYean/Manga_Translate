@@ -1374,11 +1374,42 @@ edit_lock = asyncio.Lock()  # one OCR/translation at a time
 MAX_EDIT_PAGE_PX = 1400
 
 
+def _remove_with_retry(path: str, tries: int = 4, delay: float = 0.1) -> bool:
+    """Delete a file, retrying briefly: on Windows an antivirus scan / indexer / a just-closed reader
+    can hold a fresh file for a moment (WinError 32). True when the file is gone."""
+    for attempt in range(tries):
+        try:
+            os.unlink(path)
+            return True
+        except FileNotFoundError:
+            return True
+        except OSError as e:
+            if attempt == tries - 1:
+                logger.warning(f"Could not remove {path}: {e} (will retry on the next editor session)")
+                return False
+            time.sleep(delay)
+    return False
+
+
+def sweep_stale_edit_files() -> None:
+    """Remove edit_*.pdf copies that no open editor session owns (left by a locked file or a crash)."""
+    keep = {os.path.abspath(i["pdf_path"]) for i in edit_sessions.values()}
+    try:
+        names = os.listdir(UPLOAD_DIR)
+    except OSError:
+        return
+    for name in names:
+        full = os.path.abspath(os.path.join(UPLOAD_DIR, name))
+        if name.startswith("edit_") and name.lower().endswith(".pdf") and full not in keep:
+            _remove_with_retry(full, tries=1)
+
+
 def close_edit_sessions() -> None:
     for sid in list(edit_sessions):
         info = edit_sessions.pop(sid, None)
         if info:
-            _remove_quietly(info["pdf_path"])
+            _remove_with_retry(info["pdf_path"])
+    sweep_stale_edit_files()
 
 
 def render_edit_page_png(pdf_path: str, page_num: int, max_px: int = MAX_EDIT_PAGE_PX):
@@ -1439,7 +1470,7 @@ async def edit_page_image(edit_id: str, page_num: int):
 async def edit_close(edit_id: str):
     info = edit_sessions.pop(edit_id, None)
     if info:
-        _remove_quietly(info["pdf_path"])
+        _remove_with_retry(info["pdf_path"])
     return {"status": "closed"}
 
 
