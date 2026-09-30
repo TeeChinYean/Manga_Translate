@@ -371,6 +371,7 @@ review_waits = {}      # task_id -> {"event": asyncio.Event, "payload": {page: r
 
 
 from core.document_skill import DIRECTIONS  # noqa: E402
+from core.fonts import list_fonts, normalize_font_id, resolve_font  # noqa: E402
 
 
 def normalize_direction(value) -> str:
@@ -392,7 +393,7 @@ def build_edit_pages(layout_pages: list, tmap: dict, default_dir: str = "horizon
             "blocks": [{"id": blk.get("id"), "bbox": [float(v) for v in blk.get("bbox")],
                         "raw": blk.get("cleaned_text", blk.get("text", "")),
                         "text": tmap.get((p_data["page_num"], blk.get("id")), ""),
-                        "direction": blk.get("direction") or default_dir,
+                        "direction": blk.get("direction") or default_dir, "font": blk.get("font") or "",
                         # lettering size: chosen by the user (0 = automatic), the size it was drawn at,
                         # and the inputs of that layout (original glyph size, bubble) for the live preview
                         "font_size": blk.get("font_size_pt") or 0, "fs_pt": blk.get("fs_pt"),
@@ -432,7 +433,8 @@ def plan_review(pages: list, rows_by_page: dict, tmap: dict, default_dir: str = 
                     need.append((num, blk))
                 turned = (r.get("direction") or default_dir) != (o.get("direction") or default_dir)
                 sized = float(r.get("font_size") or 0) != float(o.get("font_size_pt") or 0)
-                if moved or typed or turned or sized:
+                refont = (r.get("font") or "") != (o.get("font") or "")
+                if moved or typed or turned or sized or refont:
                     blk["user_edited"] = True
             else:   # drawn by the user
                 blk["user_edited"] = True
@@ -609,6 +611,7 @@ async def translation_worker():
             font_scale = float(task.get("font_scale", 1.0))
 
             text_direction = normalize_direction(task.get("text_direction"))
+            font_name = normalize_font_id(task.get("font_name"))
             renderer = PDFLayoutRenderer(
                 pdf_path,
                 None,
@@ -616,7 +619,8 @@ async def translation_worker():
                 dilate_iter=dilate_iter,
                 max_stroke_ratio=max_stroke_ratio,
                 font_scale=font_scale,
-                text_direction=text_direction
+                text_direction=text_direction,
+                font_path=resolve_font(font_name)
             )
             
             # Semaphore to restrict GPU inpainting to 1 concurrent task to guarantee 4GB VRAM safety
@@ -847,7 +851,7 @@ async def translation_worker():
                     "percent": 45, "stage": "翻译完成，等待你调整检测框（调好后点「继续重绘」）", "status": "review",
                     "edit_data": {"pages": build_edit_pages(pages, translated_text_map, text_direction),
                                   "source_lang": source_lang, "text_direction": text_direction,
-                                  "font_scale": font_scale},
+                                  "font_scale": font_scale, "font_name": font_name},
                     "metrics": total_metrics}
                 logger.info(f"[Review] task {task_id}: waiting for the user (timeout {REVIEW_TIMEOUT_SEC}s)")
                 t_wait = time.monotonic()
@@ -1095,7 +1099,7 @@ async def translation_worker():
                 edit_pages.sort(key=lambda ep: ep["page"])
                 script_pages.sort(key=lambda sp: sp["page_num"])
             edit_data = {"pages": edit_pages, "source_lang": source_lang, "text_direction": text_direction,
-                         "font_scale": font_scale}
+                         "font_scale": font_scale, "font_name": font_name}
 
             xlsx_path = None
             try:
@@ -1451,6 +1455,7 @@ class FontBox(BaseModel):
     bbox: list
     text: str = ""
     direction: str = ""
+    font: str = ""
     font_size: float = 0
     glyph_pt: float = 0
     bubble_pt: Optional[list] = None
@@ -1462,6 +1467,7 @@ class FontSizeRequest(BaseModel):
     page_h: float
     text_direction: str = "horizontal"
     font_scale: float = 1.0
+    font_name: str = ""
     boxes: List[FontBox]
 
 
@@ -1479,7 +1485,8 @@ def estimate_font_sizes(req: "FontSizeRequest") -> dict:
     scale = min(2.0, 1600.0 / max(1.0, req.page_h))
     W, H = max(1, int(req.page_w * scale)), max(1, int(req.page_h * scale))
     renderer = PDFLayoutRenderer(None, None, font_scale=min(max(float(req.font_scale or 1.0), 0.3), 3.0),
-                                 text_direction=normalize_direction(req.text_direction))
+                                 text_direction=normalize_direction(req.text_direction),
+                                 font_path=resolve_font(req.font_name))
     items, blocks = [], {}
     for b in req.boxes:
         text = (b.text or "").strip()[:MAX_EDITOR_TEXT]
@@ -1490,7 +1497,7 @@ def estimate_font_sizes(req: "FontSizeRequest") -> dict:
             continue
         known = (not b.moved) and (b.glyph_pt > 0 or bool(b.bubble_pt))
         bubble = [int(float(v) * scale) for v in b.bubble_pt] if (not b.moved and b.bubble_pt and len(b.bubble_pt) == 4) else None
-        blk = {"id": b.id, "direction": b.direction if b.direction in DIRECTIONS else "",
+        blk = {"id": b.id, "direction": b.direction if b.direction in DIRECTIONS else "", "font": b.font,
                "font_size_pt": clean_font_size(b.font_size), "user_edited": True}
         style = {"glyph_px": int(b.glyph_pt * scale) if not b.moved else 0, "clean_bg": False, "scale": scale,
                  "bubble": bubble, "orient": None}
@@ -1498,6 +1505,12 @@ def estimate_font_sizes(req: "FontSizeRequest") -> dict:
         blocks[b.id] = (blk, not known)
     renderer._layout_translations(Image.new("RGB", (W, H), "white"), items)
     return {bid: {"pt": blk.get("fs_pt"), "estimate": est} for bid, (blk, est) in blocks.items()}
+
+
+@app.get("/api/v1/fonts")
+async def get_fonts():
+    """Fonts the translation can be lettered with: [{"id", "name"}], "" = automatic."""
+    return {"fonts": await asyncio.to_thread(list_fonts)}
 
 
 @app.post("/api/v1/edit/fontsize")
@@ -1589,7 +1602,8 @@ async def upload_pdf_file(
     corrections_json: str = Form(""),
     base_task_id: str = Form(""),
     review_first: bool = Form(False),
-    text_direction: str = Form("horizontal")
+    text_direction: str = Form("horizontal"),
+    font_name: str = Form("")
 ):
     """
     Uploads the raw PDF file, assigns uuid, applies custom tuning parameters, and queues the task.
@@ -1665,6 +1679,8 @@ async def upload_pdf_file(
         "review_first": bool(review_first) and correction_rows is None,
         # lettering of the translation: "horizontal" (left -> right) or "vertical" (top -> bottom, columns left -> right)
         "text_direction": normalize_direction(text_direction),
+        # font of the translation ("" = automatic); only ids from core.fonts.catalog() are accepted
+        "font_name": normalize_font_id(font_name),
     }
     
     status_db[task_id] = {

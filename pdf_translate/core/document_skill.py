@@ -175,6 +175,8 @@ def parse_corrections_json(text: str) -> dict:
     if not isinstance(pages, dict) or not pages:
         raise CorrectionsError("框编辑数据里没有页面")
     out, total = {}, 0
+    from core.fonts import catalog
+    font_ids = {c["id"] for c in catalog()}       # a box can only use a font from the catalog
     for key, rows in pages.items():
         try:
             page = int(key)
@@ -201,7 +203,8 @@ def parse_corrections_json(text: str) -> dict:
             raw = "" if r.get("raw") is None else str(r["raw"])[:MAX_EDITOR_TEXT]
             direction = r.get("direction") if r.get("direction") in DIRECTIONS else ""
             clean.append({"id": bid, "bbox": bbox, "text": txt, "raw": raw, "edited": bool(r.get("edited")),
-                          "direction": direction, "font_size": clean_font_size(r.get("font_size"))})
+                          "direction": direction, "font_size": clean_font_size(r.get("font_size")),
+                          "font": r.get("font") if r.get("font") in font_ids else ""})
         total += len(clean)
         out[page] = clean
     if total > MAX_EDITOR_ROWS:
@@ -265,6 +268,8 @@ def blocks_from_corrections(rows: list) -> list:
                        "ocr_engine": "Excel 台本", "user_edited": bool(r.get("edited"))})
         if r.get("direction") in DIRECTIONS:
             blocks[-1]["direction"] = r["direction"]     # per-box lettering direction (box editor)
+        if r.get("font"):
+            blocks[-1]["font"] = r["font"]              # per-box font id (box editor); resolved by the renderer
         if clean_font_size(r.get("font_size")):
             blocks[-1]["font_size_pt"] = clean_font_size(r.get("font_size"))   # per-box lettering size (box editor)
     return blocks

@@ -391,15 +391,17 @@ def _wrap_cjk(text: str, font, max_w: int) -> list:
 
 from functools import lru_cache
 
-@lru_cache(maxsize=128)
-def _get_font(fs: int):
+@lru_cache(maxsize=256)
+def _get_font(fs: int, path: str = ""):
+    """Font of `fs` px. `path` is a font file chosen by the user; "" = the default (automatic) font."""
     try:
-        return ImageFont.truetype(_FONT_PATH, fs) if _FONT_PATH else ImageFont.load_default()
+        p = path or _FONT_PATH
+        return ImageFont.truetype(p, fs) if p else ImageFont.load_default()
     except Exception:
         return ImageFont.load_default()
 
 def _best_font(text: str, box_w: int, box_h: int, font_scale: float = 1.0, max_size: int = 0,
-               min_size: int = 10):
+               min_size: int = 10, font_path: str = ""):
     """
     Largest font that fits the box. `max_size` (original glyph size, px) caps it so the
     translation matches the source lettering instead of filling the bubble with huge text.
@@ -421,19 +423,19 @@ def _best_font(text: str, box_w: int, box_h: int, font_scale: float = 1.0, max_s
     min_fs = max(6, int(min_size))
     
     if max_fs <= min_fs:
-        font = _get_font(min_fs)
+        font = _get_font(min_fs, font_path)
         return font, _wrap_cjk(text, font, usable_w), min_fs
         
     low = min_fs
     high = max_fs
-    best_font = _get_font(min_fs)
+    best_font = _get_font(min_fs, font_path)
     best_lines = _wrap_cjk(text, best_font, usable_w)
     best_fs = min_fs
     
     # Binary search: O(log N) iterations (~7 steps) instead of O(N) linear decrements (~150 steps)
     while low <= high:
         mid = (low + high) // 2
-        font = _get_font(mid)
+        font = _get_font(mid, font_path)
         lines = _wrap_cjk(text, font, usable_w)
         line_height = mid * 1.25
         total_h = len(lines) * line_height
@@ -463,7 +465,7 @@ def _best_font(text: str, box_w: int, box_h: int, font_scale: float = 1.0, max_s
         scaled_fs = max(8, min(120, int(best_fs * font_scale)))
         if max_size and max_size > 0:
             scaled_fs = min(scaled_fs, int(max_size))  # the user scale must not undo the cap
-        scaled_font = _get_font(scaled_fs)
+        scaled_font = _get_font(scaled_fs, font_path)
         scaled_lines = _wrap_cjk(text, scaled_font, usable_w)
         return scaled_font, scaled_lines, scaled_fs
 
@@ -501,7 +503,7 @@ def _vertical_columns(text: str, per_col: int) -> list:
 
 
 def _best_font_vertical(text: str, box_w: int, box_h: int, font_scale: float = 1.0, max_size: int = 0,
-                        min_size: int = 10):
+                        min_size: int = 10, font_path: str = ""):
     """Vertical counterpart of _best_font: (font, columns, font size). Columns run left -> right."""
     import math
     usable_w = max(box_w - int(box_w * 0.15), 20)
@@ -534,8 +536,8 @@ def _best_font_vertical(text: str, box_w: int, box_h: int, font_scale: float = 1
         fs = max(8, min(120, int(best_fs * font_scale)))
         if max_size and max_size > 0:
             fs = min(fs, int(max_size))
-        return _get_font(fs), layout(fs)[0], fs
-    return _get_font(best_fs), best_cols, best_fs
+        return _get_font(fs, font_path), layout(fs)[0], fs
+    return _get_font(best_fs, font_path), best_cols, best_fs
 
 
 def _draw_vertical_text(img, cols, font, fs, left, top, fill, stroke_width, stroke_fill):
@@ -1523,12 +1525,14 @@ class PDFLayoutRenderer:
     def cache_filename(self, page_num: int) -> str:
         """Cache file for a rendered page; depends on tuning params + renderer version (BUG.md B9)."""
         import hashlib
-        key = f"{RENDER_CACHE_VERSION}|{self.ink_thresh}|{self.dilate_iter}|{self.max_stroke_ratio:.3f}|{self.font_scale:.3f}|{self.text_direction}"
+        key = f"{RENDER_CACHE_VERSION}|{self.ink_thresh}|{self.dilate_iter}|{self.max_stroke_ratio:.3f}|{self.font_scale:.3f}|{self.text_direction}|{self.font_path}"
         return f"page_{page_num}_{hashlib.sha1(key.encode()).hexdigest()[:10]}.jpg"
 
     def __init__(self, original_pdf_path=None, output_pdf_path=None,
                  ink_thresh: int = 95, dilate_iter: int = 2,
-                 max_stroke_ratio: float = 0.35, font_scale: float = 1.0, text_direction: str = "horizontal"):
+                 max_stroke_ratio: float = 0.35, font_scale: float = 1.0, text_direction: str = "horizontal",
+                 font_path: str = ""):
+        self.font_path = font_path or ""      # "" = automatic; a per-box `font` id (box editor) wins
         self.text_direction = text_direction if text_direction in TEXT_DIRECTIONS else "horizontal"
         self.original_pdf_path = original_pdf_path
         self.output_pdf_path = output_pdf_path or (original_pdf_path.replace(".pdf", "_translated.pdf") if original_pdf_path else None)
@@ -1656,6 +1660,7 @@ class PDFLayoutRenderer:
             others = [bx for j, bx in enumerate(boxes) if j != idx and j not in dup]
             resolved = self._resolve_direction(block, (px0, py0, px1, py1), orients[idx], page_prior)
             vertical, rtl = resolved != "horizontal", resolved == "vertical_rtl"
+            fp = self._font_for(block)
             fit = _best_font_vertical if vertical else _best_font
             if style.get("bubble"):      # bubble known from an earlier render (font-size preview)
                 cands = [tuple(int(v) for v in style["bubble"])]
@@ -1671,7 +1676,7 @@ class PDFLayoutRenderer:
                 best_fs = -1
                 for c in cands:
                     _f, _l, fs_c = fit(translated, c[2] - c[0], c[3] - c[1], font_scale=self.font_scale,
-                                       max_size=BUBBLE_MAX_FONT_PX, min_size=MIN_FONT_PX)
+                                       max_size=BUBBLE_MAX_FONT_PX, min_size=MIN_FONT_PX, font_path=fp)
                     if fs_c > best_fs:
                         best_fs, bubble = fs_c, c
                 px0, py0, px1, py1 = bubble
@@ -1689,10 +1694,11 @@ class PDFLayoutRenderer:
                 cap = min(max(cap, page_floor), page_cap) if cap else page_cap
             for _attempt in range(TYPESET_MAX_TRIES):
                 if forced_px:
-                    font, lines, fs = fit(translated, bw, bh, font_scale=1.0, max_size=forced_px, min_size=forced_px)
+                    font, lines, fs = fit(translated, bw, bh, font_scale=1.0, max_size=forced_px, min_size=forced_px,
+                                          font_path=fp)
                 else:
                     font, lines, fs = fit(translated, bw, bh, font_scale=self.font_scale,
-                                          max_size=cap, min_size=MIN_FONT_PX)
+                                          max_size=cap, min_size=MIN_FONT_PX, font_path=fp)
                 if rtl:
                     lines = lines[::-1]   # first column at the right, like the original manga
                 if vertical:   # columns left -> right, characters top -> bottom
@@ -1729,6 +1735,11 @@ class PDFLayoutRenderer:
                 style = dict(style, vertical=True, vleft=left)
             plans.append((px0, py0, bw, bh, translated, block, style, font, lines, fs, widths, top))
         return plans
+
+    def _font_for(self, block) -> str:
+        """Font file for a box: its own choice from the box editor, else the task's font ("" = automatic)."""
+        from core.fonts import resolve_font
+        return resolve_font(block.get("font")) or self.font_path
 
     def _resolve_direction(self, block, box=None, orient=None, prior=None) -> str:
         """
