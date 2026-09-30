@@ -592,6 +592,15 @@ async def translation_worker():
                 logger.info(f"[Pipeline] OCR models released: {sorted(released or [])} "
                             "(GPU ones always; CPU ones only when RAM is low, see OCR_UNLOAD).")
 
+            def hold_gpu_render() -> bool:
+                """Called after OCR unload: True = keep rendering until translation is done."""
+                from core.gpu_budget import lama_fits_beside_llm
+                d = lama_fits_beside_llm()
+                stage_times["lama_with_llm"] = bool(d["ok"])
+                total_metrics["lama_with_llm"] = d
+                logger.info(f"[Pipeline] GPU LaMa beside LLM: {'yes' if d['ok'] else 'no'} ({d['reason']})")
+                return not d["ok"]
+
             def _check_cancel():
                 if task_id in cancelled_tasks:
                     raise PipelineCancelled("Task cancelled by user.")
@@ -681,8 +690,10 @@ async def translation_worker():
                         page_lines=lambda page: len(page.get("blocks", [])),
                         # Several pages at once: CPU stages overlap while one page waits for LaMa
                         render_concurrency=RENDER_CONCURRENCY,
-                        # GPU LaMa: never next to a translating LLM on the 4 GB card (B28)
-                        hold_render_until_translate_done=lama_uses_gpu() and pipeline_mode == "overlap",
+                        # GPU LaMa: next to the translating LLM only if it fits once OCR is
+                        # unloaded (fixed-ctx LLM), else wait for translation (B28)
+                        hold_render_until_translate_done=hold_gpu_render
+                        if lama_uses_gpu() and pipeline_mode == "overlap" else False,
                     )
             except PipelineCancelled:
                 raise Exception("Task cancelled by user.")

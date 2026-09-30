@@ -18,7 +18,7 @@ Guarantees:
 """
 
 import asyncio
-from typing import Any, AsyncIterator, Awaitable, Callable, Optional
+from typing import Any, AsyncIterator, Awaitable, Callable, Optional, Union
 
 _DONE = object()
 
@@ -53,7 +53,7 @@ async def run_three_stage_pipeline(
     batch_lines: int = 0,
     page_lines: Callable[[Any], int] = lambda page: 1,
     render_concurrency: int = 1,
-    hold_render_until_translate_done: bool = False,
+    hold_render_until_translate_done: Union[bool, Callable[[], bool]] = False,
 ) -> None:
     """
     Run producer -> translator -> renderer concurrently with bounded queues.
@@ -77,6 +77,9 @@ async def run_three_stage_pipeline(
     - `hold_render_until_translate_done`: rendering starts only after ALL translation finished
       (extract + translate still overlap). For GPU LaMa: it must not share the 4 GB card with
       the LLM while the LLM is still translating (B28). The translated queue is unbounded.
+      May be a (blocking) callable: it is evaluated once, in a thread, after the producer is
+      done and `on_source_done()` has run; False then releases rendering at once (e.g. the GPU
+      has room for LaMa next to the fixed-size LLM once the OCR models are unloaded).
 
     Raises the first stage exception, or PipelineCancelled if cancelled.
     """
@@ -87,13 +90,14 @@ async def run_three_stage_pipeline(
     # held to the translation pace and the OCR child stayed alive longer (30 p: extract_done
     # 61.5 s serial vs 114.8 s overlap). Pages are small dicts, so unbounded is fine.
     q_extracted: asyncio.Queue = asyncio.Queue(maxsize=0 if hold_render_until_source_done else queue_size)
-    hold_any = hold_render_until_source_done or hold_render_until_translate_done
+    hold_translate = callable(hold_render_until_translate_done) or bool(hold_render_until_translate_done)
+    hold_any = hold_render_until_source_done or hold_translate
     q_translated: asyncio.Queue = asyncio.Queue(maxsize=0 if hold_any else queue_size)
     render_gate = asyncio.Event()
     if not hold_render_until_source_done:
         render_gate.set()
     translate_gate = asyncio.Event()
-    if not hold_render_until_translate_done:
+    if not hold_translate:
         translate_gate.set()
     state = {"cancelled": False}
 
@@ -139,6 +143,12 @@ async def run_three_stage_pipeline(
             if on_source_done is not None and not abort.is_set():
                 try:
                     await on_source_done()
+                except Exception as ex:
+                    fail(ex)
+            if callable(hold_render_until_translate_done) and not abort.is_set():
+                try:
+                    if not await asyncio.to_thread(hold_render_until_translate_done):
+                        translate_gate.set()
                 except Exception as ex:
                     fail(ex)
             render_gate.set()

@@ -242,3 +242,15 @@
 - 实现要点：后端 SSE 仍可能携带 `data.metrics`，前端直接忽略，无需改后端
 - 相关测试：tests/test_low_bugs.py `test_llm_metrics_board_removed_from_page`
 - 状态：Done
+
+### OCR 结束后显存够就让 GPU LaMa 与翻译同时重绘（overlap 模式）
+- 说明：LLM（llama-server）启动时按固定 -c 分配 KV cache，提示缓存在主机内存（--cache-ram），翻译过程中显存不增长。以前 overlap + GPU LaMa 一律等全部翻译结束才重绘（B28）；现在 OCR 模型卸载后测一次空闲显存，够就立刻开始重绘，边翻译边重绘
+- 涉及文件/模块：core/async_stages.py（`hold_render_until_translate_done` 可传函数，OCR 卸载后在线程里调用一次，返回 False 即放行重绘）、core/gpu_budget.py（`lama_fits_beside_llm()`）、main.py（`hold_gpu_render`）
+- 实现要点：
+  - 空闲显存用 nvidia-smi 连续取样直到稳定（MangaOCR GPU 子进程刚退出时数字会变），需要 LaMa 子进程 700MB（B29 实测整个子进程 ~670MB）+ 余量 100MB；本机 LLM 驻留时空闲 822MB → 可以
+  - 测不到显存 → 保守等待翻译结束
+  - 环境变量：`LAMA_WITH_LLM`=auto（默认）/0（总是等）/1（不检查直接放行）；`LAMA_GPU_CHILD_MB`、`LAMA_WITH_LLM_MARGIN_MB` 可调
+  - 决定结果写入 stage_times.lama_with_llm 与 total_metrics.lama_with_llm，便于对比
+- 风险：若 WDDM 仍把 LLM 显存挤到共享内存，overlap 中途不能重启 LLM，剩余翻译会变慢；需实测确认（见待确认问题）
+- 相关测试：tests/test_async_stages.py（放行时重绘早于最后一批翻译 / 返回 True 仍等待 / 检查函数出错会抛出）、tests/test_gpu_budget.py `test_lama_beside_llm_decision`
+- 状态：Done（待实测 A/B）

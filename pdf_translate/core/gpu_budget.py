@@ -218,3 +218,57 @@ def is_gpu_oom(exc: BaseException) -> bool:
     keys = ("out of memory", "outofmemory", "cuda error", "cudnn", "e_outofmemory",
             "887a0005", "887a0006", "dml", "directml", "failed to allocate", "device removed")
     return any(k in msg for k in keys)
+
+
+# ── GPU LaMa next to the LLM ──────────────────────────────────────────────────
+# llama-server allocates its KV cache for a fixed -c at launch (--fit leaves ~vram_reserve_mb
+# free) and keeps the prompt cache in host RAM (--cache-ram), so its VRAM does not grow while it
+# translates. Once the OCR models are unloaded, the LaMa child may start next to it if it fits.
+# Measured (B29, RTX 3050 4 GB): LLM 3141 MB, LaMa child peak 3809 MB total -> ~670 MB.
+LAMA_GPU_CHILD_MB = 700
+
+
+def lama_beside_llm_mode() -> str:
+    """LAMA_WITH_LLM: auto (default, VRAM check) | 0 (always wait for translation) | 1 (never wait)."""
+    m = os.getenv("LAMA_WITH_LLM", "auto").strip().lower()
+    return m if m in ("auto", "0", "1") else "auto"
+
+
+def _stable_free_mb(samples: int = 6, interval_s: float = 0.5, tol_mb: float = 32.0):
+    """Free VRAM once the number settles (a just-stopped child can take a moment to release)."""
+    prev, source = None, "none"
+    for _ in range(samples):
+        cur, source = free_vram_mb(force=True)
+        if cur is None:
+            return None, source
+        if prev is not None and abs(cur - prev) <= tol_mb:
+            return min(cur, prev), source
+        prev = cur
+        time.sleep(interval_s)
+    return prev, source
+
+
+def lama_fits_beside_llm(free_mb=None) -> dict:
+    """Decide whether GPU LaMa may render while the LLM is still translating.
+    Returns {"ok": bool, "free_mb", "need_mb", "reason"}. Unknown free VRAM -> not ok."""
+    mode = lama_beside_llm_mode()
+    need = LAMA_GPU_CHILD_MB
+    try:
+        need = int(os.getenv("LAMA_GPU_CHILD_MB", str(need)))
+    except ValueError:
+        pass
+    try:
+        margin = max(0, int(os.getenv("LAMA_WITH_LLM_MARGIN_MB", "100")))
+    except ValueError:
+        margin = 100
+    if mode in ("0", "1"):
+        return {"ok": mode == "1", "free_mb": None, "need_mb": need + margin,
+                "reason": f"LAMA_WITH_LLM={mode}"}
+    source = "override"
+    if free_mb is None:
+        free_mb, source = _stable_free_mb()
+    if free_mb is None:
+        return {"ok": False, "free_mb": None, "need_mb": need + margin, "reason": "free VRAM unknown"}
+    ok = free_mb >= need + margin
+    return {"ok": ok, "free_mb": int(free_mb), "need_mb": need + margin,
+            "reason": f"free={int(free_mb)}MB via {source}, need={need}+{margin}MB"}
