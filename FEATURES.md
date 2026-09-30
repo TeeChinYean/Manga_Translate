@@ -211,3 +211,14 @@
   - 任务是一个接一个执行的，所以切换全局词库是安全的
 - 相关测试：tests/test_terms.py（系列名解析、不同漫画互不影响、自动词条只写入当前漫画、local_translator 不再有写死的名字）
 - 状态：Done
+
+### 任务结束后自动清理缓存与输出文件（static / cache / uploads / 临时渲染目录）
+- 说明：不再在磁盘上累积文件。页缓存 data/cache/<pdf-hash>/ 和临时渲染目录 pdf_render_* 在任务结束时（成功、失败或取消）删除；static/ 里的输出文件（PDF / ZIP / DOC / JSON）下载一次后立即删除，没下载的在下一个任务开始时删除；如果下载后突然关机或服务崩溃，下次启动时清空 static/、data/cache/、data/uploads/ 和残留的 pdf_render_* 目录
+- 涉及文件/模块：main.py（`clear_dir_contents`、`clear_leftovers`（startup 调用）、worker `finally`、下载接口 `BackgroundTask(_remove_quietly)`）、core/pipeline.py（C# 入口同样在 `finally` 删除页缓存和临时目录）、templates/index.html（`oneShotDownload`：按钮点一次后变灰，因为文件已被删除）
+- 实现要点：
+  - 取代 B10 的「static 保留最新 20 个文件」策略；之前任务的下载链接不再保留
+  - 页缓存只在任务内有效，同一 PDF 再次翻译会重新翻译所有页（用户确认）
+  - 下载接口因为会删除文件，新增路径校验：只允许 STATIC_DIR 下一层的普通文件，拒绝 `..\xxx`、`..`、`.gitkeep`（返回 400）
+  - .gitkeep 占位文件保留
+- 相关测试：tests/test_low_bugs.py（`test_clear_dir_contents_removes_files_and_dirs_but_keeps_gitkeep`、`test_cleanup_wiring`、`test_download_rejects_path_escape`）；TestClient 实测：第一次下载 200 且文件被删，第二次 404，`..%5Cmain.py` 400
+- 状态：Done

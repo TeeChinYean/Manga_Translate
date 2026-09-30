@@ -65,6 +65,7 @@ except ImportError:
 
 from fastapi import FastAPI, UploadFile, File, Form, HTTPException
 from fastapi.responses import HTMLResponse, StreamingResponse, FileResponse
+from starlette.background import BackgroundTask
 
 import fitz
 
@@ -86,6 +87,7 @@ app = FastAPI(
 BASE_DIR = os.path.dirname(os.path.abspath(__file__))
 UPLOAD_DIR = os.path.join(BASE_DIR, "data", "uploads")
 STATIC_DIR = os.path.join(BASE_DIR, "static")
+CACHE_DIR = os.path.join(BASE_DIR, "data", "cache")  # per-task page cache, removed when the task ends
 
 os.makedirs(UPLOAD_DIR, exist_ok=True)
 os.makedirs(STATIC_DIR, exist_ok=True)
@@ -167,24 +169,35 @@ RENDER_CONCURRENCY = max(1, int(os.getenv("RENDER_CONCURRENCY", "3")))  # pages 
 DEFAULT_STREAM_BATCH_LINES = max(0, int(os.getenv("TRANSLATE_BATCH_LINES", str(DEFAULT_CONTEXT_CHUNK))))
 
 
-STATIC_KEEP_FILES = 20  # ~5 tasks (pdf + zip + doc + json each)
-
-
-def prune_static_outputs(static_dir: str, keep: int = STATIC_KEEP_FILES) -> int:
-    """Delete all but the newest `keep` output files in static_dir. Returns how many were removed."""
+def clear_dir_contents(path: str) -> int:
+    """Delete every file and sub-directory in `path` except .git* placeholders. Returns how many were removed."""
     try:
-        entries = [os.path.join(static_dir, f) for f in os.listdir(static_dir) if not f.startswith(".git")]
+        names = [n for n in os.listdir(path) if not n.startswith(".git")]
     except OSError:
         return 0
-    files = sorted((p for p in entries if os.path.isfile(p)), key=os.path.getmtime, reverse=True)
     removed = 0
-    for path in files[keep:]:
+    for name in names:
+        full = os.path.join(path, name)
         try:
-            os.unlink(path)
+            if os.path.isdir(full):
+                shutil.rmtree(full)
+            else:
+                os.unlink(full)
             removed += 1
         except OSError as e:
-            logger.warning(f"Failed to remove old output {path}: {e}")
+            logger.warning(f"Failed to remove {full}: {e}")
     return removed
+
+
+def clear_leftovers() -> None:
+    """Startup sweep: outputs, page cache, uploads and render temp dirs left by a crash or sudden shutdown."""
+    for d in (STATIC_DIR, CACHE_DIR, UPLOAD_DIR):
+        n = clear_dir_contents(d)
+        if n:
+            logger.info(f"[Cleanup] removed {n} leftover item(s) from {d}")
+    import glob
+    for d in glob.glob(os.path.join(tempfile.gettempdir(), "pdf_render_*")):
+        shutil.rmtree(d, ignore_errors=True)
 
 
 DOWNLOAD_MEDIA_TYPES = {
@@ -268,6 +281,7 @@ async def preload_all_models():
 async def startup_event():
     global translation_engine
     logger.info("⚡ System Booting... Initializing Pipeline Components...")
+    clear_leftovers()
     
     # Try GPU speculative decoding, fallbacks gracefully to standard GPU FP16 or CPU Heuristics
     translation_engine = HighPerformanceTranslationEngine(use_gpu=True)
@@ -309,6 +323,7 @@ async def translation_worker():
             "metrics": None
         }
         
+        cache_base_dir = temp_dir = None
         try:
             if task_id in cancelled_tasks:
                 # Cancelled while still queued: do nothing (and do not touch earlier downloads)
@@ -327,8 +342,8 @@ async def translation_worker():
                 from core.engine import ensure_turbovec_llm_ready
                 await asyncio.to_thread(ensure_turbovec_llm_ready, True, 20)
             
-            # Output files: keep the most recent runs so earlier download links keep working (B10)
-            prune_static_outputs(STATIC_DIR, keep=STATIC_KEEP_FILES)
+            # Outputs of the previous task are dropped once a new task starts (downloaded ones are already gone)
+            clear_dir_contents(STATIC_DIR)
             
             # Step 1: Intelligent Layout Extraction (CPU Parallel)
             status_db[task_id] = {
@@ -369,7 +384,7 @@ async def translation_worker():
                 return hasher.hexdigest()
             
             pdf_hash = await asyncio.to_thread(get_pdf_hash, pdf_path)
-            cache_base_dir = os.path.join(BASE_DIR, "data", "cache", pdf_hash)
+            cache_base_dir = os.path.join(CACHE_DIR, pdf_hash)
             os.makedirs(cache_base_dir, exist_ok=True)
             
             # Clear cache for selected pages if force_retranslate is True
@@ -835,9 +850,6 @@ async def translation_worker():
                             
             await asyncio.to_thread(write_zip)
             
-            # Clean up temp files
-            shutil.rmtree(temp_dir, ignore_errors=True)
-            
             download_url = f"/api/v1/download/{out_filename}"
             download_zip_url = f"/api/v1/download/{out_zip_filename}"
             download_doc_url = f"/api/v1/download/{os.path.basename(doc_path)}" if doc_path else ""
@@ -868,6 +880,10 @@ async def translation_worker():
                 "message": str(e)
             }
         finally:
+            # Page cache and rendered JPEGs never outlive the task (success, failure or cancel)
+            for d in (temp_dir, cache_base_dir):
+                if d:
+                    shutil.rmtree(d, ignore_errors=True)
             if os.path.exists(pdf_path):
                 try:
                     os.remove(pdf_path)
@@ -1175,18 +1191,30 @@ async def get_translation_status_stream(task_id: str):
 
     return StreamingResponse(sse_event_generator(), media_type="text/event-stream")
 
+def _remove_quietly(path: str) -> None:
+    try:
+        os.unlink(path)
+    except OSError as e:
+        logger.warning(f"Could not remove downloaded file {path}: {e}")
+
+
 @app.get("/api/v1/download/{filename}")
 async def download_translated_file(filename: str):
     """
     Streams file bytes securely for download.
     """
     filepath = os.path.join(STATIC_DIR, filename)
-    if os.path.exists(filepath):
+    # Only plain files directly inside STATIC_DIR (the file is deleted after sending, so no "..\\" escapes)
+    if os.path.dirname(os.path.realpath(filepath)) != os.path.realpath(STATIC_DIR) or filename.startswith("."):
+        raise HTTPException(status_code=400, detail="Invalid file name.")
+    if os.path.isfile(filepath):
         media_type = DOWNLOAD_MEDIA_TYPES.get(os.path.splitext(filename)[1].lower(), "application/octet-stream")
+        # One-shot download: the file is deleted as soon as it has been sent
         return FileResponse(
             path=filepath,
             filename=filename,
-            media_type=media_type
+            media_type=media_type,
+            background=BackgroundTask(_remove_quietly, filepath)
         )
     else:
         raise HTTPException(status_code=404, detail="Requested file not found on disk.")

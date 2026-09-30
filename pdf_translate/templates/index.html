@@ -1367,6 +1367,14 @@
         const outFileName = document.getElementById('outFileName');
         const outputPanel = document.getElementById('outputPanel');
         const downloadBtn = document.getElementById('downloadBtn');
+        // The server deletes each output file once it has been downloaded, so each button works once per task
+        function oneShotDownload(btn, url) {
+            btn.disabled = false;
+            btn.onclick = () => {
+                window.location.href = url;
+                btn.disabled = true;
+            };
+        }
         const downloadZipBtn = document.getElementById('downloadZipBtn');
         const cancelBtn = document.getElementById('cancelBtn');
         const srcLangSelect = document.getElementById('srcLang');
@@ -1622,14 +1630,10 @@
                 outputPanel.style.display = 'flex';
 
                 // Attach downloader triggers
-                downloadBtn.onclick = () => {
-                    window.location.href = downloadUrl;
-                };
+                oneShotDownload(downloadBtn, downloadUrl);
                 if (downloadZipUrl) {
                     downloadZipBtn.style.display = 'block';
-                    downloadZipBtn.onclick = () => {
-                        window.location.href = downloadZipUrl;
-                    };
+                    oneShotDownload(downloadZipBtn, downloadZipUrl);
                 } else {
                     downloadZipBtn.style.display = 'none';
                 }
@@ -1637,9 +1641,7 @@
                 const downloadDocBtn = document.getElementById('downloadDocBtn');
                 if (downloadDocUrl && downloadDocBtn) {
                     downloadDocBtn.style.display = 'block';
-                    downloadDocBtn.onclick = () => {
-                        window.location.href = downloadDocUrl;
-                    };
+                    oneShotDownload(downloadDocBtn, downloadDocUrl);
                 } else if (downloadDocBtn) {
                     downloadDocBtn.style.display = 'none';
                 }
@@ -1647,9 +1649,7 @@
                 const downloadJsonBtn = document.getElementById('downloadJsonBtn');
                 if (data.download_json_url && downloadJsonBtn) {
                     downloadJsonBtn.style.display = 'block';
-                    downloadJsonBtn.onclick = () => {
-                        window.location.href = data.download_json_url;
-                    };
+                    oneShotDownload(downloadJsonBtn, data.download_json_url);
                 } else if (downloadJsonBtn) {
                     downloadJsonBtn.style.display = 'none';
                 }

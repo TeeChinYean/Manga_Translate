@@ -59,6 +59,7 @@ async def _run_pipeline_async(pdf_path, page_range_str, source_lang, target_lang
         except Exception as cb_err:
             print(f"[Pipeline] ⚠️  progress_callback 已失效 (C# 可能已关闭): {cb_err}")
 
+    temp_dir = cache_base_dir = None
     try:
         _safe_callback(10, "C# 正在内存级融合 PyTorch...", "processing")
         
@@ -357,13 +358,7 @@ async def _run_pipeline_async(pdf_path, page_range_str, source_lang, target_lang
         if text_cache_dirty:
             _save_text_cache(cache_base_dir, text_cache)
             print(f"[Pipeline] 💾 翻译缓存已更新 ({len(text_cache)} 条)")
-        
-        # Clean up temp dir
-        try:
-            shutil.rmtree(temp_dir)
-        except Exception:
-            pass
-            
+
         failed = sorted(extractor.failed_pages)
         if failed:
             nums = ", ".join(str(p) for p, _ in failed)
@@ -376,6 +371,10 @@ async def _run_pipeline_async(pdf_path, page_range_str, source_lang, target_lang
         traceback.print_exc()
         progress_callback(100, f"执行崩溃: {str(e)}", "failed")
     finally:
+        # Rendered JPEGs and the page/text cache never outlive the task
+        for d in (temp_dir, cache_base_dir):
+            if d:
+                shutil.rmtree(d, ignore_errors=True)
         # Unload models and clear VRAM cache
         try:
             import torch
