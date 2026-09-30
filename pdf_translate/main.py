@@ -1435,15 +1435,17 @@ async def edit_open(file: UploadFile = File(...), task_id: str = Form("")):
     close_edit_sessions()
     edit_id = uuid.uuid4().hex[:10]
     path = os.path.join(UPLOAD_DIR, f"edit_{edit_id}.pdf")
-    with open(path, "wb") as f:
-        f.write(await file.read())
+    data = await file.read()
+    # Validate in memory BEFORE writing: on Windows a failed fitz.open(path) can keep the file
+    # locked (WinError 32), which left a broken edit_*.pdf behind (B39).
     try:
-        doc = fitz.open(path)
+        doc = fitz.open(stream=data, filetype="pdf")
         total = len(doc)
         doc.close()
     except Exception as ex:
-        _remove_quietly(path)
         raise HTTPException(status_code=400, detail=f"Invalid PDF file: {ex}")
+    with open(path, "wb") as f:
+        f.write(data)
     edit_sessions[edit_id] = {"pdf_path": path, "total_pages": total}
     return {"edit_id": edit_id, "total_pages": total,
             "base_available": bool(task_id) and last_result.get("task_id") == task_id}
