@@ -298,3 +298,21 @@
   - 上次结果已过期（服务器重启 / 已开始新任务）时，`/edit/open` 返回 `base_available: false`，编辑器自动改为重绘全部页；带过期 `base_task_id` 提交会得到 409
 - 相关测试：tests/test_box_editor.py（JSON 校验、页面图片 / 会话生命周期、OCR 接口含语言检查与出错分支、`ocr_region` 裁剪、JSON 回填入队、页面接线），已接入 test_pre_commit；另外用无头 Chromium 对真实 `main.app` 做了端到端操作：移动 +30px、缩放 +20px、撤销、改译文、画新框自动识别、删除、翻页、提交 —— 入队的 bbox / 译文全部正确
 - 状态：Done（未在真实漫画 + 模型上实测重绘效果，见「待确认问题」）
+
+### [Home] 先调框再继续（提取 + 翻译后暂停）
+- 说明：开始翻译前在设置区选「调整检测框的时机」：默认「翻译结束后再调」；选「先调框再继续」时，任务在**提取和翻译都完成、但还没重绘**时暂停，自动弹出框编辑器（框 + 原文 + 译文都可改），点「继续重绘」后按调整后的框**只重绘一次**；「不调整，直接重绘」等于原样继续。这样最慢的重绘不会先做一遍又重做
+- 涉及文件/模块：`main.py`（`review_first` 上传参数、`review_pause` / `plan_review` / `review_reocr` / `build_edit_pages`、`POST /api/v1/translate/review/{task_id}`、SSE `review` 事件、取消支持 `review` 状态）、`templates/index.html`（`#adjustTiming`、编辑器 review 模式：`beOpen({taskId, editData})`、`beReviewSend`）、`core/document_skill.py` / `core/renderer.py`（`edited` / `user_edited`）
+- 实现要点：
+  - 只有 serial 模式存在「全部翻译完、还没开始重绘」这一刻，所以选「先调框」会强制串行（页面选项里有说明）；Excel 回填任务不受影响（本来就不提取 / 翻译）
+  - 暂停期间 `status_db[task_id].status = "review"`，`edit_data` 随 SSE `review` 事件下发（与完成后编辑器数据同格式）；等待用 `asyncio.Event`，每 0.5 秒检查取消；`REVIEW_TIMEOUT_SEC`（默认 3600 秒）没人回应就按原结果继续，不会卡住队列
+  - 继续时编辑器只提交改过的页；服务器 `plan_review` 原地改 layout：删除的框去掉、画的新框加入、移动 / 缩放超过 1pt 的框换新位置；**移动过且译文没动**的框、以及**新画但没有任何文字**的框，用 `review_reocr` 对新框区域重新 OCR → 翻译 → 语言检查；手动改过译文的框保留手打内容；没读到文字的框保留原图并在完成提示里列出
+  - 页面图片沿用编辑会话（浏览器再上传一次 PDF），编辑器打开失败时自动发 `skip`，任务不会一直等
+  - 完成后的结果、Excel 台本、last_result 与普通任务完全一致，之后仍可「结束后再调框」
+- 相关测试：tests/test_review_first.py（13 项：`plan_review` 的移动 / 删除 / 新框 / 忽略未知页、`review_reocr`、真实 `translation_worker` 带假提取 / 假引擎 / 假渲染器的暂停→继续 / 跳过 / 400 后仍在等待 / 取消 / 超时、上传参数、SSE `review` 事件只发一次、页面接线），已接入 test_pre_commit；无头 Chromium 对模拟服务器端到端：选项→暂停弹出编辑器→拖动框→继续（提交数据正确）、不调整直接重绘、默认模式不弹
+- 状态：Done（未在真实漫画 + 模型上实测，见「待确认问题」）
+
+### [Box Editor] 重绘时保留用户改的译文（B38）
+- 说明：编辑器里新画 / 移动 / 改字的框带 `edited` 标记，重绘时不参与「嵌套框去重」，一定会画出；译文里手打的换行会分行
+- 涉及文件/模块：`core/renderer.py`（`_layout_translations`、`_wrap_cjk`）、`core/document_skill.py`（`parse_corrections_json`、`blocks_from_corrections`）、`templates/index.html`（`beApply`）
+- 相关测试：tests/test_edit_render_fidelity.py
+- 状态：Done
