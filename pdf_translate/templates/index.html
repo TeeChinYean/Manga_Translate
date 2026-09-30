@@ -1374,6 +1374,8 @@
             <button class="btn" id="bePrev" type="button">◀</button>
             <span id="bePageLabel">1 / 1</span>
             <button class="btn" id="beNext" type="button">▶</button>
+            <label style="font-size: 0.85rem; display: flex; align-items: center; gap: 4px; cursor: pointer;" title="在每个框里按最终字号画出译文">
+                <input type="checkbox" id="bePreview" checked> 预览译文</label>
             <span class="be-sep"></span>
             <button class="btn" id="beCancel" type="button">取消</button>
             <button class="btn" id="beApply" type="button" disabled
@@ -2121,6 +2123,7 @@
             }
             be.order.sort((a, b) => a - b);
             be.defaultDir = editData.text_direction || 'horizontal';   // direction of newly drawn boxes
+            be.preview = $be('bePreview').checked;
             be.fontScale = editData.font_scale || 1; be.fontName = editData.font_name || ''; be.sizes = {};    // sizes: page -> { box id -> { pt, estimate } }
             be.undo = []; be.sel = null; be.tool = 'select';
             be.initial = beSnapshot();
@@ -2161,7 +2164,8 @@
                 ctx.fillStyle = col + (sel ? '55' : '2a'); ctx.strokeStyle = sel ? '#ffffff' : col;
                 ctx.fillRect(x, y, w, h); ctx.strokeRect(x, y, w, h);
                 ctx.fillStyle = col; ctx.font = 'bold 12px sans-serif';
-                ctx.fillText('#' + b.id + (b.text ? '' : ' (空)') + (b.dir === 'auto' ? ' 自动' : b.dir === 'vertical_rtl' ? ' 竖←' : b.dir === 'vertical' ? ' 竖' : '') + (b.text ? beSizeTag(b) : ''), x + 3, y + 13);
+                if (b.text && be.preview) beDrawPreview(ctx, b, x, y, w, h);
+                beDrawTag(ctx, b, x, y);
                 if (sel) {
                     ctx.fillStyle = '#ffffff'; ctx.strokeStyle = col; ctx.lineWidth = 2;
                     Object.values(beCorners(b)).forEach(([cx, cy]) => {
@@ -2347,6 +2351,45 @@
             } catch (e) { /* the numbers are only a hint */ }
         }
 
+        // Label of a box: number / direction on a dark chip, the final size in yellow (readable on any page)
+        function beDrawTag(ctx, b, x, y) {
+            const head = '#' + b.id + (b.text ? '' : ' (空)')
+                + (b.dir === 'auto' ? ' 自动' : b.dir === 'vertical_rtl' ? ' 竖←' : b.dir === 'vertical' ? ' 竖' : '');
+            const size = b.text ? beSizeTag(b).trim() : '';
+            ctx.font = 'bold 12px sans-serif';
+            const w1 = ctx.measureText(head).width, w2 = size ? ctx.measureText(size).width + 6 : 0;
+            ctx.fillStyle = 'rgba(15,23,42,0.88)';
+            ctx.fillRect(x, y, w1 + w2 + 8, 18);
+            ctx.fillStyle = '#ffffff'; ctx.fillText(head, x + 4, y + 13);
+            if (size) { ctx.fillStyle = '#fde047'; ctx.fillText(size, x + 4 + w1 + 6, y + 13); }
+        }
+
+        // The translation drawn inside the box at its final size (the server sends the wrapped lines / columns)
+        function beDrawPreview(ctx, b, x, y, w, h) {
+            const s = (be.sizes[be.page] || {})[b.id], p = beCur();
+            if (!s || !s.pt || !s.lines || !s.lines.length || !p) return;
+            const fs = s.pt * be.cssW / p.w;
+            if (fs < 3) return;
+            ctx.save();
+            ctx.font = `${fs}px "Microsoft YaHei", "Noto Sans CJK SC", "PingFang SC", sans-serif`;
+            ctx.textBaseline = 'top'; ctx.textAlign = 'center';
+            ctx.lineJoin = 'round'; ctx.lineWidth = Math.max(2, fs / 6);
+            ctx.strokeStyle = 'rgba(15,23,42,0.9)'; ctx.fillStyle = '#ffffff';
+            const put = (ch, cx, cy) => { ctx.strokeText(ch, cx, cy); ctx.fillText(ch, cx, cy); };
+            if (s.vertical) {
+                const colw = fs * 1.25, pitch = fs * 1.1, cols = s.lines;
+                const totalW = cols.length * colw, longest = Math.max(...cols.map(c => [...c].length));
+                const left = totalW <= w ? x + (w - totalW) / 2 : x;
+                const top = longest * pitch <= h ? y + (h - longest * pitch) / 2 : y;
+                cols.forEach((col, i) => [...col].forEach((ch, j) => put(ch, left + i * colw + colw / 2, top + j * pitch)));
+            } else {
+                const lh = fs * 1.25, total = s.lines.length * lh;
+                const top = total <= h ? y + (h - total) / 2 : y;
+                s.lines.forEach((line, i) => put(line, x + w / 2, top + i * lh));
+            }
+            ctx.restore();
+        }
+
         function beSizeTag(b) {
             const s = (be.sizes[be.page] || {})[b.id];
             if (b.fontSize) return ` ${b.fontSize}pt`;
@@ -2383,6 +2426,7 @@
         $be('beFontAuto').addEventListener('click', () => beSetFont(0));
         $be('beFontUp').addEventListener('click', () => beSetFont(Math.round(beCurPt()) + 1));
         $be('beFontDown').addEventListener('click', () => beSetFont(Math.round(beCurPt()) - 1));
+        $be('bePreview').addEventListener('change', e => { be.preview = e.target.checked; beDraw(); });
         $be('beFace').addEventListener('change', e => {
             if (!be.sel || be.busy) return;
             bePushUndo(); be.sel.font = e.target.value; beRedraw();

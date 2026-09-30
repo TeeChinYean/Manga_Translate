@@ -1503,8 +1503,13 @@ def estimate_font_sizes(req: "FontSizeRequest") -> dict:
                  "bubble": bubble, "orient": None}
         items.append((x0, y0, x1, y1, text, blk, style))
         blocks[b.id] = (blk, not known)
-    renderer._layout_translations(Image.new("RGB", (W, H), "white"), items)
-    return {bid: {"pt": blk.get("fs_pt"), "estimate": est} for bid, (blk, est) in blocks.items()}
+    plans = renderer._layout_translations(Image.new("RGB", (W, H), "white"), items)
+    by_id = {p[5].get("id"): p for p in plans}
+    return {bid: {"pt": blk.get("fs_pt"), "estimate": est,
+                  # the wrapped lines / columns, so the editor can draw the text at its final size
+                  "lines": list(by_id[bid][8]) if bid in by_id else [],
+                  "vertical": bool(by_id[bid][6].get("vertical")) if bid in by_id else False}
+            for bid, (blk, est) in blocks.items()}
 
 
 @app.get("/api/v1/fonts")
