@@ -1076,7 +1076,9 @@ async def _load_corrections(xlsx: UploadFile, pdf: UploadFile):
     pdf_bytes = await pdf.read()
     await pdf.seek(0)
     if meta.get("pdf_md5") and hashlib.md5(pdf_bytes).hexdigest() != meta["pdf_md5"]:
-        raise HTTPException(status_code=400, detail="PDF 与 Excel 台本不匹配：请上传生成这份台本时使用的同一个 PDF")
+        want = meta.get("source_file") or "生成这份台本时使用的 PDF"
+        hint = "（请上传原始 PDF，不是 translated_ 开头的翻译结果）" if pdf.filename.startswith("translated_") else ""
+        raise HTTPException(status_code=400, detail=f"PDF 与 Excel 台本不匹配：应上传「{want}」{hint}")
     return rows, meta
 
 
