@@ -920,10 +920,11 @@ class PDFLayoutExtractor:
         structured_data.sort(key=lambda x: x["page_num"])
         return structured_data
 
-    async def extract_layout_stream(self, page_range_list=None, source_lang="Japanese"):
+    async def extract_layout_stream(self, page_range_list=None, source_lang="Japanese", mask_only=False):
         """
         Extracts high-fidelity layout data page by page and yields them asynchronously as they complete.
         This allows pipelining extraction with translation.
+        `mask_only`: no OCR, only the detector text mask per page (blocks=[]), for re-insert.
         """
         import asyncio
         import concurrent.futures
@@ -944,6 +945,8 @@ class PDFLayoutExtractor:
                 async def _extract(page_num):
                     try:
                         res = await loop.run_in_executor(
+                            executor, self._text_mask_single_page, self.pdf_path, page_num
+                        ) if mask_only else await loop.run_in_executor(
                             executor, self._extract_single_page, self.pdf_path, page_num, source_lang
                         )
                         return page_num, res, None
@@ -959,6 +962,38 @@ class PDFLayoutExtractor:
                         continue
                     yield result
  
+    def _text_mask_single_page(self, pdf_path, page_num):
+        """Page size + comic-text-detector pixel mask only (same raster as _extract_single_page).
+        The renderer uses the mask to erase whole glyphs incl. furigana (B15)."""
+        _t_page = _time.time()
+        doc = fitz.open(pdf_path)
+        try:
+            page = doc[page_num - 1]
+            page_width, page_height = float(page.rect.width), float(page.rect.height)
+            scale = 850.0 / max(1.0, page_height)
+            pix = page.get_pixmap(matrix=fitz.Matrix(scale, scale), alpha=False)
+            img_np = np.frombuffer(pix.samples, dtype=np.uint8).reshape((pix.height, pix.width, 3))
+        finally:
+            doc.close()
+        result = {"page_num": page_num, "blocks": [], "page_width": page_width, "page_height": page_height}
+        session = _get_comic_detector()
+        if session is None:
+            return result   # renderer falls back to the ink-threshold stroke mask
+        seg_holder = []
+        try:
+            _detect_with_comic_detector(img_np, session, out_seg=seg_holder)
+        except Exception as det_err:
+            if not _demote_to_cpu("comic_detector", det_err):
+                raise
+            seg_holder.clear()
+            _detect_with_comic_detector(img_np, _get_comic_detector(), out_seg=seg_holder)
+        if seg_holder:
+            ok, png = cv2.imencode(".png", seg_holder[0])
+            if ok:
+                result["_text_mask_png"] = png.tobytes()
+        _xstat("page_total", _time.time() - _t_page)
+        return result
+
     def _extract_single_page(self, pdf_path, page_num, source_lang="Japanese"):
         """
         Thread-safe dual-engine page extraction:

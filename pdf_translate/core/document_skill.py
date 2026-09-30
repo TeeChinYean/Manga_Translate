@@ -131,7 +131,8 @@ def read_corrections(xlsx_path) -> tuple[dict, dict]:
             except (TypeError, ValueError):
                 continue
             text = "" if r[3] is None else str(r[3])
-            corrections.setdefault(page, []).append({"id": bid, "bbox": bbox, "text": text})
+            raw = "" if r[2] is None else str(r[2])
+            corrections.setdefault(page, []).append({"id": bid, "bbox": bbox, "text": text, "raw": raw})
         return meta, corrections
     finally:
         wb.close()
@@ -175,6 +176,23 @@ def match_corrections(blocks: list, rows: list, unmatched: list | None = None) -
     if unmatched is not None:
         unmatched.extend(r for ri, r in enumerate(rows) if ri not in used_r and str(r["text"]).strip())
     return out
+
+
+def blocks_from_corrections(rows: list) -> list:
+    """Bubbles of one page rebuilt from the Excel rows (re-insert without OCR). Rows without
+    a bbox cannot be placed and are left out (reported as unmatched by match_corrections)."""
+    blocks = []
+    for r in rows:
+        if not r.get("bbox"):
+            continue
+        x0, y0, x1, y1 = r["bbox"]
+        raw = r.get("raw", "")
+        blocks.append({"id": r["id"], "text": raw, "cleaned_text": raw, "bbox": [x0, y0, x1, y1],
+                       "lines_bboxes": [[x0, y0, x1, y1]], "font_size": 12.0, "font_name": "Helvetica",
+                       "color": (0.0, 0.0, 0.0), "width": x1 - x0, "height": y1 - y0,
+                       "center_x": (x0 + x1) / 2.0, "center_y": (y0 + y1) / 2.0,
+                       "ocr_engine": "Excel 台本"})
+    return blocks
 
 
 def build_unmatched_warning(unmatched_by_page: dict) -> str:

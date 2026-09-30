@@ -261,3 +261,11 @@
 - 实现要点：译文清空的行不算未匹配；与提取失败提示用「；」合并，前端沿用现有 `data.warning` 显示
 - 相关测试：tests/test_excel_reinsert.py `test_unmatched_rows_are_reported`
 - 状态：Done
+
+### Excel 回填跳过 OCR 与翻译，只跑文字遮罩检测
+- 说明：回填时气泡直接取自 Excel（隐藏列 E–H 的坐标、C 列原文、D 列译文），不再跑 MangaOCR / PaddleOCR，也不调用 LLM；每页只栅格化并跑 comic-text-detector 生成文字像素遮罩，擦除效果和正常翻译一样（振假名、描边、抗锯齿边缘，B15）
+- 涉及文件/模块：core/extractor.py（`extract_layout_stream(mask_only=True)` → `_text_mask_single_page`）、core/document_skill.py（`blocks_from_corrections`，`read_corrections` 行里多了 `raw`）、main.py（回填时用 Excel 的行作为 blocks，不启动 MangaOCR GPU 子进程）
+- 实现要点：坐标与 Excel 完全一致，bbox 匹配 IoU=1；没有坐标的行放不进页面，按「未匹配」提示
+- 实测：第１巻 p1-3 回填 10.1s（遮罩 3.0s，翻译 0s，重绘 7.1s），第 1 页译文正确写入
+- 相关测试：tests/test_excel_reinsert.py `test_reinsert_skips_ocr_and_uses_excel_positions`、`test_mask_only_page_has_mask_and_no_ocr`
+- 状态：Done

@@ -466,7 +466,12 @@ async def translation_worker():
 
             async def extracted_pages():
                 nonlocal extracted_count
-                async for chunk_page in extractor.extract_layout_stream(page_range_list=selected_pages, source_lang=source_lang):
+                async for chunk_page in extractor.extract_layout_stream(page_range_list=selected_pages, source_lang=source_lang,
+                                                                       mask_only=corrections is not None):
+                    if corrections is not None:
+                        # Re-insert: no OCR, the bubbles are the Excel rows (positions + text)
+                        from core.document_skill import blocks_from_corrections
+                        chunk_page["blocks"] = blocks_from_corrections(corrections.get(chunk_page["page_num"], []))
                     layout_data.append(chunk_page)
                     async with progress_lock:
                         extracted_count += 1
@@ -617,7 +622,8 @@ async def translation_worker():
                 # MangaOCR on the GPU in a child process for the extraction stage only (B30);
                 # it is stopped by unload_ocr_models() before the LLM translates.
                 from core.extractor import start_manga_gpu_worker
-                await asyncio.to_thread(start_manga_gpu_worker, total_selected_pages)
+                if corrections is None:   # re-insert runs no OCR
+                    await asyncio.to_thread(start_manga_gpu_worker, total_selected_pages)
                 pages = []
                 async for p in extracted_pages():
                     _check_cancel()
