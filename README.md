@@ -119,7 +119,7 @@ flowchart TD
 
 **CPU / GPU**
 - **自动检测 GPU**：有 GPU 才用，没有就整套流程全走 CPU（LaMa 用 ONNX CPU，OCR 和检测也走 CPU）。
-- **手动切换**：`start_cpu.bat`（纯 CPU）、`start_gpu.bat`（优先 GPU），或设环境变量 `CPU_ONLY=1`。详见下面「一键启动」。
+- **手动切换**：`start_web_app.bat cpu`（纯 CPU）、`start_web_app.bat gpu`（优先 GPU），或设环境变量 `CPU_ONLY=1`。详见下面「一键启动」。
 
 ---
 
@@ -144,11 +144,11 @@ start_web_app.bat
 
 也可以直接选模式启动：
 
-| 脚本 | 模式 | 说明 |
+| 命令 | 模式 | 说明 |
 |---|---|---|
 | `start_web_app.bat` | 自动 | 检测到 GPU 才用 GPU，没有就全用 CPU |
-| `start_gpu.bat` | GPU | 显存够用时 LaMa / MangaOCR / 检测模型用 GPU（串行模式的 OCR 也用，不受 20 页门槛限制），并启动本地 Qwen |
-| `start_cpu.bat` | 纯 CPU | 完全不用 GPU；不启动 Qwen，翻译走 Google |
+| `start_web_app.bat gpu` | GPU | 显存够用时 LaMa / MangaOCR / 检测模型用 GPU（串行模式的 OCR 也用，不受 20 页门槛限制），并启动本地 Qwen |
+| `start_web_app.bat cpu` | 纯 CPU | 完全不用 GPU；不启动 Qwen，翻译走 Google |
 
 PowerShell 版本：`.\start_web_app.ps1 -Mode cpu`（或 `gpu` / `auto`）。
 

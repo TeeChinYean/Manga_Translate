@@ -9,7 +9,6 @@ echo ========================================================
 echo.
 
 :: 0. Mode:  start_web_app.bat [cpu ^| gpu]   (no argument = auto: GPU only when one is detected)
-::            start_cpu.bat / start_gpu.bat call this file with the argument.
 set "MODE=%~1"
 if "%MODE%"=="" set "MODE=auto"
 if /i "%MODE%"=="cpu" (
