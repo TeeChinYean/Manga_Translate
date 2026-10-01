@@ -62,3 +62,14 @@ pdf_translate/data/llm_vram_best.json
 # Isolated CUDA test environment (scratch/setup_cuda_venv.bat)
 .venv-cuda/
 .venv-torch/
+
+# Private working notes (bug log, goals) - kept out of the public repository
+BUG.md
+BUG_2.md
+BUG_[0-9]*.md
+GOAL.md
+
+# Tests and local test runners are not published
+tests/
+pdf_translate/test_*.py
+pre_commit_check.bat
