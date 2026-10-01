@@ -993,16 +993,6 @@
 <body>
 
     <div class="app-container">
-        <!-- Header -->
-        <header>
-            <div class="logo-section">
-                <h1 class="logo-title">
-                    ⚡ ANTIGRAVITY <span class="badge">PRO</span>
-                </h1>
-                <p class="logo-tagline">PDF 布局翻译| Layout-Preserving PDF Translator</p>
-            </div>
-        </header>
-
         <!-- Main Workspace -->
         <div class="workspace-grid">
             <!-- Left Panel: Control Inputs -->
@@ -1068,10 +1058,10 @@
                 <div class="control-group" data-translate-only>
                     <label for="pipelineMode">流水线模式 (Pipeline Mode)</label>
                     <select id="pipelineMode">
-                        <option value="auto" selected>自动（默认）：少于 20 页用串行，20 页以上用提取+翻译并行</option>
-                        <option value="serial">串行：提取 → 翻译(大上下文) → 重绘</option>
-                        <option value="stream">全并发：提取 / 翻译 / 重绘同时进行</option>
-                        <option value="overlap">提取+翻译 → 卸载 OCR → 重绘+翻译</option>
+                        <option value="auto" selected style="color:black">自动（默认）：少于 20 页用串行，20 页以上用提取+翻译并行</option>
+                        <option value="serial" style="color:black">串行：提取 → 翻译(大上下文) → 重绘</option>
+                        <option value="stream" style="color:black">全并发：提取 / 翻译 / 重绘同时进行</option>
+                        <option value="overlap" style="color:black">提取+翻译 → 卸载 OCR → 重绘+翻译</option>
                     </select>
                 </div>
 
@@ -1713,7 +1703,7 @@
                 document.getElementById('elapsedTimerVal').style.color = 'var(--accent-emerald)';
 
                 progressBarFill.style.width = '100%';
-                logToConsole(`[✓] 恭喜！布局保真 PDF 翻译重构成功！全部流程总耗时 ${finalTime} 秒`, 'success');
+                logToConsole(`[✓] 恭喜！PDF 翻译重构成功！全部流程总耗时 ${finalTime} 秒`, 'success');
                 if (data.stage_times) {
                     logToConsole(`[⏱] 模式 ${data.pipeline_mode} 各阶段完成时刻(秒): ${JSON.stringify(data.stage_times)}`, 'success');
                 }
