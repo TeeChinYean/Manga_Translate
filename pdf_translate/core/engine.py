@@ -63,6 +63,10 @@ def _get_llama_api_key():
     return _LLAMA_KEY
 
 _LAST_LAUNCH = {"t": 0.0}
+# Context cap for a llama-server that THIS app starts (qwen_turbovec_rag reads LLM_MAX_CTX).
+# Translation needs ~5k (36-line batch prompt + 2656-token answer); 8k leaves the rest of the
+# 4 GB card to OCR / LaMa. A server the RAG app already started keeps its own (red-line) ctx.
+PDF_LLM_MAX_CTX = max(4096, int(os.getenv("PDF_LLM_MAX_CTX", "8192")))
 LAUNCH_COOLDOWN_S = 180.0   # after a launch, never launch again for this long (model load ~10-60 s)
 
 
@@ -106,6 +110,7 @@ def _wait_health(max_wait_seconds: float) -> bool:
 # although the LLM alone needs ~3184 MB -> generation ~4x slower (11 s -> 46 s). A restart puts
 # the whole model back in VRAM (~7-10 s), far cheaper than a slow translation.
 LLM_EVICT_TOLERANCE_MB = 200
+LLAMA_SERVER_IMAGES = ("llama-server.exe", "com.docker.llama-server.exe")
 
 
 def _rag_dirs():
@@ -189,7 +194,11 @@ def restart_llm_if_evicted() -> bool:
                    f"to system RAM (slow). Restarting llama-server to bring it back into VRAM (B29).")
     try:
         if os.name == "nt":
-            subprocess.run(["taskkill", "/F", "/IM", "com.docker.llama-server.exe"], capture_output=True, timeout=15)
+            # The native launcher (qwen_turbovec_rag/app/llm_launcher.py) runs
+            # models\llama-cuda\bin\llama-server.exe; Docker Desktop runs com.docker.llama-server.exe.
+            # Killing only the Docker name left the native server alive, so B29 never restarted (B31).
+            for image in LLAMA_SERVER_IMAGES:
+                subprocess.run(["taskkill", "/F", "/IM", image], capture_output=True, timeout=15)
         else:
             subprocess.run(["pkill", "-f", "llama-server"], capture_output=True, timeout=15)
     except Exception as e:
@@ -261,7 +270,7 @@ def ensure_turbovec_llm_ready(auto_launch: bool = True, max_wait_seconds: int = 
         logger.warning("⚡ [Turbovec LLM] qwen_turbovec_rag not found; cannot auto-launch LLM.")
         return False
 
-    logger.info(f"⚡ [Turbovec LLM] Starting local Qwen 3.5 4B model via {rag_dir}...")
+    logger.info(f"⚡ [Turbovec LLM] Starting local Qwen 3.5 4B model via {rag_dir} (ctx <= {PDF_LLM_MAX_CTX})...")
     _LAST_LAUNCH["t"] = time.time()
     import subprocess
     cmd = [sys.executable, os.path.join("app", "llm_launcher.py"), "--model", "1"]
@@ -271,6 +280,7 @@ def ensure_turbovec_llm_ready(auto_launch: bool = True, max_wait_seconds: int = 
         subprocess.Popen(
             cmd,
             cwd=rag_dir,
+            env={**os.environ, "LLM_MAX_CTX": str(PDF_LLM_MAX_CTX)},
             stdin=subprocess.DEVNULL,
             stdout=subprocess.DEVNULL,
             stderr=subprocess.DEVNULL,

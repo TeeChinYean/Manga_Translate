@@ -399,3 +399,24 @@
 - 实现要点：无效的方向值仍退回横排；「先调框再继续」仍可在下拉里手动选，它会强制串行模式
 - 相关测试：tests/test_text_direction.py（`test_defaults_are_auto_direction_and_adjust_boxes_after`、上传默认值）
 - 状态：Done
+
+### [全局] 提取与 LLM 翻译同时进行，翻译全部完成后才启动 LaMa
+- 说明：之前所有任务被强制成 serial（提取 → 翻译 → 重绘依次进行），提取时 LLM 闲置。现在提取和 LLM 并行，LaMa 仍然要等 LLM 完全结束，不和 LLM 抢 GPU。
+- 涉及文件/模块：pdf_translate/main.py（resolve_pipeline_mode、run_three_stage_pipeline 调用、DEFAULT_STREAM_BATCH_LINES），pdf_translate/templates/index.html（模式说明文字）
+- 实现要点：除了明确选择「串行」，auto / stream / overlap 都解析为 overlap；overlap 下 `hold_render_until_translate_done=True`（不再看 GPU 是否放得下）；翻译批次默认 12 句（= 一次 LLM 调用），提取到 12 句 LLM 就开始，之前是 180 句（约 30 页）才开始。
+- 相关测试：tests/test_low_bugs.py::test_every_mode_resolves_to_overlap_except_explicit_serial；tests/test_async_stages.py::test_overlap_extraction_never_waits_for_translation、test_gpu_overlap_renders_only_after_all_translation
+- 状态：Done
+
+### [Home] 新流水线模式 overlap_render：OCR+翻译 → 卸载 OCR → 翻译+LaMa
+- 说明：OCR 与 LLM 同时跑；提取结束立刻卸载 OCR；然后 LaMa 重绘与剩余翻译同时进行，不用等翻译全部完成。下拉框选「OCR+翻译 → 卸载 OCR → 翻译+LaMa 同时进行」。
+- 涉及文件/模块：pdf_translate/main.py（PIPELINE_MODES、OVERLAP_MODES、resolve_pipeline_mode、run_three_stage_pipeline 调用），pdf_translate/templates/index.html
+- 实现要点：hold_render_until_source_done=True + on_source_done=unload_ocr_models；GPU LaMa 时 hold_render_until_translate_done=hold_gpu_render（显存放得下就和 LLM 一起跑，放不下自动等翻译完，避免 4GB 卡 OOM，B28）；CPU LaMa 直接并行。auto 仍是 overlap（LaMa 等 LLM 完全结束）。
+- 相关测试：tests/test_low_bugs.py::test_every_mode_resolves_to_overlap_except_explicit_serial；tests/test_async_stages.py::test_overlap_mode_renders_only_after_source_done_and_unload、test_gpu_overlap_renders_beside_llm_when_vram_fits
+- 状态：Done
+
+### [全局] 两个项目用不同的 LLM 上下文（pdf_translate 8k，RAG 填满显存）
+- 说明：同一个 llama-server（端口 18089）启动时决定 -c。由本项目自动启动时限制 -c <= 8192，给 OCR / LaMa 留显存；由 qwen_turbovec_rag 启动时照旧 --fit 用满显存。先启动的一方决定上下文。
+- 涉及文件/模块：pdf_translate/core/engine.py（PDF_LLM_MAX_CTX，Popen 传 env LLM_MAX_CTX）；qwen_turbovec_rag/app/llm_launcher.py（launch(max_ctx=)、--max-ctx、env LLM_MAX_CTX）
+- 实现要点：有上限时不用 --fit（--fit 总是加到红线），改走估算+实测路径，并把模型的 max_ctx 临时压到上限；用环境变量而不是命令行参数，旧版启动器不认识也不会报错。
+- 相关测试：tests/test_llm_evict.py::test_auto_launch_caps_llm_context；qwen_turbovec_rag/app/tests/test_llm_launcher.py::test_max_ctx_caps_context_and_skips_fit、test_cli_reads_llm_max_ctx_env
+- 状态：Done

@@ -92,6 +92,9 @@ async def run_three_stage_pipeline(
     q_extracted: asyncio.Queue = asyncio.Queue(maxsize=0 if hold_render_until_source_done else queue_size)
     hold_translate = callable(hold_render_until_translate_done) or bool(hold_render_until_translate_done)
     hold_any = hold_render_until_source_done or hold_translate
+    # While rendering is held the translated queue must be unbounded (the renderer is not
+    # consuming yet). Once rendering runs, put() throttles the translator in the app layer so
+    # the LLM idles and yields the GPU to LaMa (see put()).
     q_translated: asyncio.Queue = asyncio.Queue(maxsize=0 if hold_any else queue_size)
     render_gate = asyncio.Event()
     if not hold_render_until_source_done:
@@ -114,6 +117,15 @@ async def run_three_stage_pipeline(
     async def put(q: asyncio.Queue, item) -> bool:
         if abort.is_set():
             return False
+        # 如果是翻译队列，且开启了阶段挂起(overlap/serial)，当挂起结束(render_gate.is_set)后，
+        # 我们手动在应用层限流（哪怕底层队列是无界的），从而强制大模型阻塞并让出 GPU 给 LaMa。
+        # Not when hold_translate: the renderer then waits for ALL translation, so throttling
+        # the translator here would deadlock.
+        if q is q_translated and hold_any and not hold_translate and render_gate.is_set():
+            while q.qsize() >= queue_size:
+                await asyncio.sleep(0.1)
+                if abort.is_set():
+                    return False
         ok, _ = await _race(q.put(item), abort)
         return ok
 

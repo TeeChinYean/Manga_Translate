@@ -127,7 +127,20 @@ flowchart TD
 
 ### **注意**
 
-需要自己去下载qwen3.5:4b, MangaOCR, EasyOCR, LaMa
+需要自己去下载 qwen3.5:4b, MangaOCR, EasyOCR, LaMa，以及运行本地 Qwen 用的 **llama-server.exe**（见下方「下载 llama-server.exe」）。
+
+### 下载 llama-server.exe（本地 Qwen 翻译必需）
+本地 Qwen 由 [llama.cpp](https://github.com/ggml-org/llama.cpp) 的 `llama-server.exe` 运行（端口 `127.0.0.1:18089`），本项目**不附带**这个程序，需要自己下载：
+
+1. 打开 [llama.cpp Releases](https://github.com/ggml-org/llama.cpp/releases)，下载 Windows 版：
+   - NVIDIA 显卡：`llama-<版本>-bin-win-cuda-12.x-x64.zip`，以及同版本的 `cudart-llama-bin-win-cuda-12.x-x64.zip`（CUDA 运行库）
+   - 其他显卡：`llama-<版本>-bin-win-vulkan-x64.zip`
+2. 解压到 `qwen_turbovec_rag/models/llama-cuda/bin/`（Vulkan 版放 `models/llama-vulkan/bin/`），确认里面有 `llama-server.exe`；CUDA 版还要有 `cudart64_12.dll`、`cublas64_12.dll`。
+3. `qwen_turbovec_rag` 文件夹放在本项目的同级目录（或用环境变量 `TURBOVEC_RAG_DIR` 指定路径），启动时会自动拉起 llama-server。
+
+不下载也能用：检测不到本地 LLM 时会自动改用 Google 翻译。
+
+> 显存提示：本项目自动启动 llama-server 时把上下文限制为 8192（环境变量 `PDF_LLM_MAX_CTX` 可改），剩下的显存留给 LaMa / OCR。如果 llama-server 已经由 `qwen_turbovec_rag` 先启动，就沿用它的上下文（默认用 `--fit` 把显存加到只剩约 200 MB）；想用 8k，先关掉它再启动本项目。需要较新的 `qwen_turbovec_rag`（支持 `LLM_MAX_CTX`），旧版会忽略这个限制。
 
 ### 1. 安装环境
 电脑需要先装好 Python 3.10+，拉取项目并安装依赖：

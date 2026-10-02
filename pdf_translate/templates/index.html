@@ -1058,10 +1058,11 @@
                 <div class="control-group" data-translate-only>
                     <label for="pipelineMode">流水线模式 (Pipeline Mode)</label>
                     <select id="pipelineMode">
-                        <option value="auto" selected style="color:black">自动（默认）：少于 20 页用串行，20 页以上用提取+翻译并行</option>
+                        <option value="auto" selected style="color:black">自动（默认）：提取+翻译同时进行，翻译全部完成后再重绘</option>
                         <option value="serial" style="color:black">串行：提取 → 翻译(大上下文) → 重绘</option>
-                        <option value="stream" style="color:black">全并发：提取 / 翻译 / 重绘同时进行</option>
-                        <option value="overlap" style="color:black">提取+翻译 → 卸载 OCR → 重绘+翻译</option>
+                        <option value="stream" style="color:black">（同自动）提取+翻译同时进行，翻译完再重绘</option>
+                        <option value="overlap" style="color:black">提取+翻译同时进行 → 卸载 OCR → 翻译完再重绘</option>
+                        <option value="overlap_render" style="color:black">OCR+翻译 → 卸载 OCR → 翻译+LaMa 同时进行</option>
                     </select>
                 </div>
 

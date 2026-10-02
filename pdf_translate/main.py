@@ -140,7 +140,10 @@ def parse_page_range(range_str: str, max_pages: int) -> set:
     return pages if pages else set(range(1, max_pages + 1))
 
 
-PIPELINE_MODES = ("auto", "stream", "overlap", "serial")
+PIPELINE_MODES = ("auto", "stream", "overlap", "overlap_render", "serial")
+# overlap        : OCR + translate -> unload OCR -> LaMa after ALL translation
+# overlap_render : OCR + translate -> unload OCR -> translate + LaMa together
+OVERLAP_MODES = ("overlap", "overlap_render")
 # 'auto': serial for short jobs, overlap for long ones. Measured 2026-09-28 on 第5巻:
 #   10 pages: serial 95.5s (translation ~10s, nothing to hide)
 #   50 pages: overlap 472.1s vs serial 566.5s (overlap hides ~145s of LLM time behind extraction)
@@ -152,25 +155,17 @@ if AUTO_GPU_MODE not in ("overlap", "serial", "stream"):
 
 
 def resolve_pipeline_mode(mode: str, n_pages: int) -> str:
-    """Map 'auto' (or an unknown value) to a concrete mode for this job size."""
-    if mode not in PIPELINE_MODES or mode == "auto":
-        try:
-            from core.renderer import lama_uses_gpu
-            if lama_uses_gpu():
-                # GPU LaMa must not share the 4 GB card with the LLM (B28), but extraction runs
-                # on the CPU, so extract + translate may overlap: overlap mode then holds
-                # rendering until translation is done (user measured overlap faster, 2026-09-29).
-                return AUTO_GPU_MODE
-        except Exception:
-            pass
-        return "overlap" if n_pages >= AUTO_OVERLAP_MIN_PAGES else "serial"
-    return mode
-# Measured 2026-09-28 (第5巻 p1-10, RTX 3050 4GB + 12 threads): serial 109.2s vs stream 129.7s,
-# and serial translates the whole range with one large-context LLM call.
+    """User rule (2026-10-02): extraction and the LLM run at the same time, LaMa starts only
+    after the LLM is completely done. That is 'overlap' with hold_render_until_translate_done
+    always on. 'serial' and 'overlap_render' stay available as explicit choices;
+    everything else -> overlap."""
+    return mode if mode in ("serial", "overlap_render") else "overlap"
+    
 DEFAULT_PIPELINE_MODE = os.getenv("PIPELINE_MODE", "auto")
-DEFAULT_CONTEXT_CHUNK = 36  # Japanese lines per LLM call in 'serial' mode
+DEFAULT_CONTEXT_CHUNK = 12  # Japanese lines per LLM call in 'serial' mode
 RENDER_CONCURRENCY = max(1, int(os.getenv("RENDER_CONCURRENCY", "3")))  # pages rendered at once (all modes)
 # stream/overlap: translate once this many lines are buffered (0 = old per-page behaviour)
+# = one LLM call: the LLM starts as soon as the first 12 lines are extracted (180 held it ~30 pages)
 DEFAULT_STREAM_BATCH_LINES = max(0, int(os.getenv("TRANSLATE_BATCH_LINES", str(DEFAULT_CONTEXT_CHUNK))))
 
 
@@ -948,14 +943,14 @@ async def translation_worker():
                 if pipeline_mode == "serial":
                     await run_serial()
                 else:
-                    if pipeline_mode == "overlap":
+                    if pipeline_mode in OVERLAP_MODES:
                         # MangaOCR GPU child during extraction (jobs > 20 pages, see
                         # manga_gpu_worker_wanted): it fits
                         # next to the resident LLM (serial 30 p: extract 128 s -> 61.5 s, LLM not
                         # evicted); stopped by unload_ocr_models() when extraction ends.
                         from core.extractor import start_manga_gpu_worker
                         await asyncio.to_thread(start_manga_gpu_worker, total_selected_pages)
-                    if lama_uses_gpu() and pipeline_mode == "overlap":
+                    if lama_uses_gpu() and pipeline_mode in OVERLAP_MODES:
                         # nothing is translating yet: the only safe moment to restart an
                         # evicted LLM in overlap mode (B29)
                         from core.engine import restart_llm_if_evicted
@@ -970,8 +965,8 @@ async def translation_worker():
                         render_page,
                         is_cancelled=lambda: task_id in cancelled_tasks,
                         queue_size=3,
-                        hold_render_until_source_done=(pipeline_mode == "overlap"),
-                        on_source_done=unload_ocr_models if pipeline_mode == "overlap" else None,
+                        hold_render_until_source_done=(pipeline_mode in OVERLAP_MODES),
+                        on_source_done=unload_ocr_models if pipeline_mode in OVERLAP_MODES else None,
                         # Wait until ~context_chunk_size lines are extracted, then translate them
                         # in one LLM call (more dialogue context, fewer calls). 0 = per page.
                         translate_batch=(lambda pages: translate_pages(pages, context_chunk_size))
@@ -982,8 +977,13 @@ async def translation_worker():
                         render_concurrency=RENDER_CONCURRENCY,
                         # GPU LaMa: next to the translating LLM only if it fits once OCR is
                         # unloaded (fixed-ctx LLM), else wait for translation (B28)
-                        hold_render_until_translate_done=hold_gpu_render
-                        if lama_uses_gpu() and pipeline_mode == "overlap" else False,
+                        # overlap: LaMa never runs beside the LLM, wait for ALL translation.
+                        # overlap_render: LaMa runs beside the remaining translation; with GPU
+                        # LaMa only if it fits next to the LLM on the card, else it waits (B28).
+                        hold_render_until_translate_done=(
+                            True if pipeline_mode == "overlap"
+                            else hold_gpu_render if pipeline_mode == "overlap_render" and lama_uses_gpu()
+                            else False),
                     )
             except PipelineCancelled:
                 raise Exception("Task cancelled by user.")

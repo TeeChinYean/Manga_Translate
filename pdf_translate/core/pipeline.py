@@ -166,13 +166,13 @@ async def _run_pipeline_async(pdf_path, page_range_str, source_lang, target_lang
             return path
             
         async def process_page_chunk_translate(chunk):
-            nonlocal translated_count
-            # 所有页面都经过完整翻译流程，不再以 jpg 缓存判断是否跳过
-            # jpg 缓存只在 Stage 2 用于跳过重绘（代表上次运行已完整成功重绘）
+            nonlocal translated_count, text_cache_dirty
+
+            # 整批页面合并成一个块列表，再按 CTX_SIZE 句一组喂给 LLM（维持原版上下文大小，避免质量下降）
             combined_blocks = []
             block_refs = {}
             unique_counter = 0
-            
+
             for page in chunk:
                 p_num = page["page_num"]
                 for block in page["blocks"]:
@@ -183,9 +183,9 @@ async def _run_pipeline_async(pdf_path, page_range_str, source_lang, target_lang
                     combined_blocks.append(block_copy)
                     block_refs[unique_counter] = (p_num, block, orig_block_id)
                     unique_counter += 1
-                        
+
             if combined_blocks:
-                # ── 文本缓存命中检查：直接跳过 LLM 调用 ──────────────────
+                # ── 文本缓存命中检查：命中则跳过 LLM ──
                 cache_miss_blocks = []
                 for blk in combined_blocks:
                     raw = blk.get("text", "").strip()
@@ -195,114 +195,61 @@ async def _run_pipeline_async(pdf_path, page_range_str, source_lang, target_lang
                         blk["_from_cache"] = True
                     else:
                         cache_miss_blocks.append(blk)
-                
+
                 cache_hits = len(combined_blocks) - len(cache_miss_blocks)
                 if cache_hits > 0:
                     print(f"[Pipeline] ⚡ 文本缓存命中 {cache_hits}/{len(combined_blocks)} 个块，直接跳过 LLM")
-                
-                if cache_miss_blocks:
-                    print(f"\n[Pipeline] 👉 正在翻译 {len(cache_miss_blocks)}/{len(combined_blocks)} 个未命中缓存的文本块...")
-                    await asyncio.to_thread(translation_engine.translate_batch, cache_miss_blocks, source_lang=source_lang)
-                    
-                    # ── 翻译完成后写入缓存 ──────────────────────────────
-                    nonlocal text_cache_dirty
-                    for blk in cache_miss_blocks:
-                        raw = blk.get("text", "").strip()
-                        translated = blk.get("translated_text", "").strip()
-                        if raw and translated:
-                            ck = _text_cache_key(raw)
-                            text_cache[ck] = translated
-                            text_cache_dirty = True
-                
-                # 把 combined_blocks 的翻译结果同步回各页面块，并写入 translated_text_map
+
+                CTX_SIZE = 12
+                for i in range(0, len(cache_miss_blocks), CTX_SIZE):
+                    if task_id in cancelled_tasks:
+                        raise Exception("Task cancelled by user.")
+                    sub_batch = cache_miss_blocks[i:i + CTX_SIZE]
+                    await asyncio.to_thread(
+                        translation_engine.translate_batch,
+                        sub_batch,
+                        source_lang=source_lang,
+                        target_lang=target_lang,
+                        context_chunk_size=CTX_SIZE,
+                    )
+
+                # ── 新译文写入缓存 ──
+                for blk in cache_miss_blocks:
+                    raw = blk.get("text", "").strip()
+                    translated = (blk.get("translated_text") or "").strip()
+                    if raw and translated:
+                        text_cache[_text_cache_key(raw)] = translated
+                        text_cache_dirty = True
+
+                # 同步回原页面块，并写入 translated_text_map
                 for temp_block in combined_blocks:
-                    u_id = temp_block["id"]
-                    p_num_ref, orig_block, orig_block_id = block_refs[u_id]
+                    p_num_ref, orig_block, orig_block_id = block_refs[temp_block["id"]]
                     orig_block["translated_text"] = temp_block.get("translated_text", "")
                     orig_block["is_sfx"] = temp_block.get("is_sfx", False)
                     orig_block["google_trans"] = temp_block.get("google_trans", "")
                     orig_block["cleaned_text"] = temp_block.get("cleaned_text", "")
                     translated_text_map[(p_num_ref, orig_block_id)] = orig_block["translated_text"]
-                    
+
             async with progress_lock:
                 translated_count += len(chunk)
                 update_progress()
-                        
-            await asyncio.sleep(0.01)
 
-        # ── 阶段 1：先提取与翻译同时进行 (Stage 1: Streaming Extraction + Concurrent Translation) ──
-        # 提取(EasyOCR on CPU + MangaOCR) 与 翻译(LLM) 边提取边翻译；重绘暂不启动，全部算力与内存优先供给提取与翻译
-        layout_data = []
-        current_chunk = []
-        PAGES_PER_BATCH = 1
-        
-        translation_queue = asyncio.Queue()
-        
-        translation_errors = []
-
-        async def translation_worker():
-            while True:
-                chunk = await translation_queue.get()
-                if chunk is None:
-                    translation_queue.task_done()
-                    break
-                try:
-                    await process_page_chunk_translate(chunk)
-                except Exception as e:
-                    # Record and keep draining the queue; the task fails after extraction (B9)
-                    print(f"\n[Pipeline] 🚨 后台翻译线程异常: {e}")
-                    translation_errors.append(e)
-                finally:
-                    translation_queue.task_done()
-
-        worker_task = asyncio.create_task(translation_worker())
-        
-        async for chunk_page in extractor.extract_layout_stream(page_range_list=selected_pages, source_lang=source_lang):
-            if task_id in cancelled_tasks:
-                await translation_queue.put(None)
-                raise Exception("Task cancelled by user.")
-                
-            layout_data.append(chunk_page)
-            current_chunk.append(chunk_page)
-            
-            async with progress_lock:
-                extracted_count += 1
-                update_progress()
-                
-            if len(current_chunk) >= PAGES_PER_BATCH:
-                await translation_queue.put(current_chunk)
-                current_chunk = []
-                
-        if current_chunk:
-            await translation_queue.put(current_chunk)
-            
-        # ── 阶段 2：OCR 完成即刻彻底卸载释放 (Stage 2: Unload OCR models immediately) ──
-        print(f"\n[Pipeline] 🧹 所有页面 OCR 提取完毕，立即彻底释放 EasyOCR 与 MangaOCR (RAM 与显存)...")
-        from core.extractor import unload_models as unload_ocr
-        await asyncio.to_thread(unload_ocr)
+        # 自动选择：CUDA 下显存充足就不强制卸载模型，节省重新载入时间
         import torch
-        if torch.cuda.is_available() and torch.cuda.is_initialized():  # never create a CUDA context here (B29)
-            torch.cuda.empty_cache()
-            
-        # 等待后台翻译队列全部完成收尾
-        await translation_queue.put(None)
-        await worker_task
-        if translation_errors:
-            raise Exception(f"翻译阶段出错（{len(translation_errors)} 批）: {translation_errors[0]}")
-        print(f"\n[Pipeline] 🧹 翻译阶段已全部完成，已准备好所有页面的翻译文本映射！")
+        from core.gpu_budget import free_vram_mb
 
-        # ── 阶段 3：全面启动 OpenCV Telea 极速重绘与排版 (Stage 3: OpenCV Telea Inpainting & Layout) ──
-        _safe_callback(75, "OCR完成且模型已彻底卸载，全面启动 OpenCV Telea 极速重绘与排版...", "processing")
-        print(f"[Pipeline] 🎨 开始使用 OpenCV Telea 极速重绘 (共 {len(layout_data)} 页)...")
-        
-        render_sem = asyncio.Semaphore(4)
-        
+        def should_unload():
+            if not torch.cuda.is_available():
+                return True
+            free, _ = free_vram_mb()
+            # LaMa 与 LLM 需要较多显存，剩余不足 2GB 时清理
+            return free is not None and free < 2048
+
         async def render_single_page_job(page):
-            import shutil
             nonlocal rendered_count
             p_num = page["page_num"]
             cache_path = os.path.join(cache_base_dir, renderer.cache_filename(p_num))
-            
+
             if os.path.exists(cache_path):
                 temp_dest = os.path.join(temp_dir, f"rendered_page_{p_num}.jpg")
                 await asyncio.to_thread(shutil.copy, cache_path, temp_dest)
@@ -314,23 +261,63 @@ async def _run_pipeline_async(pdf_path, page_range_str, source_lang, target_lang
                 has_translated = (not page_blocks) or any(
                     translated_text_map.get((p_num, b["id"]), "").strip() for b in page_blocks)
                 if dest_path and os.path.exists(dest_path) and has_translated:
-                    # Never cache a page whose translation failed entirely (B9)
                     await asyncio.to_thread(shutil.copy, dest_path, cache_path)
                 render_tasks[p_num] = dest_path
-                
+
             async with progress_lock:
                 rendered_count += 1
                 update_progress()
 
-        await asyncio.gather(*[render_single_page_job(page) for page in layout_data])
-        print(f"[Pipeline] 🎨 所有页面 OpenCV Telea 重绘与排版全部完成！")
+        translation_errors = []
+
+        async def process_batch(chunk):
+            print(f"\n[Pipeline] 🔄 处理批次: {len(chunk)} 页")
+            # 翻译：全部翻译完才启动 LaMa，避免 LLM 与 LaMa 抢 GPU
+            try:
+                await process_page_chunk_translate(chunk)
+            except Exception as e:
+                if task_id in cancelled_tasks:
+                    raise
+                print(f"\n[Pipeline] 🚨 翻译阶段异常: {e}")
+                translation_errors.append(e)
+            if translation_errors:
+                raise Exception(f"翻译阶段出错（{len(translation_errors)} 批）: {translation_errors[0]}")
+
+            # OCR 已全部完成，重绘前视显存情况释放 OCR 模型
+            if should_unload():
+                from core.extractor import unload_models as unload_ocr
+                await asyncio.to_thread(unload_ocr)
+                if torch.cuda.is_available() and torch.cuda.is_initialized():
+                    torch.cuda.empty_cache()
+
+            # 重绘
+            await asyncio.gather(*[render_single_page_job(page) for page in chunk])
+
+        # 用户要求：等所有选定页全部提取并翻译完后，再集中启动 LaMa（不再分批）
+        layout_data = []
+        current_chunk = []
+
+        async for chunk_page in extractor.extract_layout_stream(page_range_list=selected_pages, source_lang=source_lang):
+            if task_id in cancelled_tasks:
+                raise Exception("Task cancelled by user.")
+
+            layout_data.append(chunk_page)
+            current_chunk.append(chunk_page)
+
+            async with progress_lock:
+                extracted_count += 1
+                update_progress()
+
+        if current_chunk:
+            await process_batch(current_chunk)
 
         if layout_data:
-            print(f"\n[Pipeline] 🧹 释放重绘资源...")
+            print(f"\n[Pipeline] 🧹 所有页面处理完毕，释放重绘资源...")
             from core.renderer import unload_models as unload_renderer
             await asyncio.to_thread(unload_renderer)
-            
-        # 组装图片
+            if torch.cuda.is_available() and torch.cuda.is_initialized():
+                torch.cuda.empty_cache()
+
         rendered_images = render_tasks
             
         _safe_callback(95, "正在将所有画面合并为最终 PDF...", "processing")
@@ -377,6 +364,10 @@ async def _run_pipeline_async(pdf_path, page_range_str, source_lang, target_lang
                 shutil.rmtree(d, ignore_errors=True)
         # Unload models and clear VRAM cache
         try:
+            from core.renderer import unload_models as unload_renderer
+            unload_renderer()
+            from core.extractor import unload_models as unload_ocr
+            unload_ocr()
             import torch
             if torch.cuda.is_available() and torch.cuda.is_initialized():  # never create a CUDA context here (B29)
                 torch.cuda.empty_cache()
