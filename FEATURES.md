@@ -420,3 +420,10 @@
 - 实现要点：有上限时不用 --fit（--fit 总是加到红线），改走估算+实测路径，并把模型的 max_ctx 临时压到上限；用环境变量而不是命令行参数，旧版启动器不认识也不会报错。
 - 相关测试：tests/test_llm_evict.py::test_auto_launch_caps_llm_context；qwen_turbovec_rag/app/tests/test_llm_launcher.py::test_max_ctx_caps_context_and_skips_fit、test_cli_reads_llm_max_ctx_env
 - 状态：Done
+
+### [全局] llama-server 不占 RAM（--no-mmap）
+- 说明：本项目启动的 llama-server 用 --no-mmap，权重只在 VRAM，不再在 RAM 里留一份约 2.6 GB 的映射。python.exe 里的 OCR / LaMa 模型按原来的策略保留（下一个任务启动快）。
+- 涉及文件/模块：pdf_translate/core/engine.py（Popen 传 LLM_NO_MMAP=1）、qwen_turbovec_rag/app/llm_launcher.py（build_cmd）
+- 实现要点：--no-mmap 只在环境变量 LLM_NO_MMAP=1 时加，RAG 自己启动不受影响。
+- 相关测试：tests/test_llm_evict.py::test_auto_launch_caps_llm_context、tests/test_low_bugs.py::test_job_end_keeps_ocr_and_lama_models；qwen_turbovec_rag/app/tests/test_llm_launcher.py::test_no_mmap_only_when_requested
+- 状态：Done

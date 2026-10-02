@@ -280,7 +280,8 @@ def ensure_turbovec_llm_ready(auto_launch: bool = True, max_wait_seconds: int = 
         subprocess.Popen(
             cmd,
             cwd=rag_dir,
-            env={**os.environ, "LLM_MAX_CTX": str(PDF_LLM_MAX_CTX)},
+            # LLM_NO_MMAP: weights go to VRAM without a ~2.6 GB memory-mapped copy in RAM
+            env={**os.environ, "LLM_MAX_CTX": str(PDF_LLM_MAX_CTX), "LLM_NO_MMAP": "1"},
             stdin=subprocess.DEVNULL,
             stdout=subprocess.DEVNULL,
             stderr=subprocess.DEVNULL,
