@@ -364,6 +364,98 @@ def _contrast_color(bg: tuple) -> str:
     return "black" if lum > 127 else "white"
 
 
+def _lum(c) -> float:
+    if isinstance(c, str):
+        return 255.0 if c == "white" else 0.0
+    return 0.299 * c[0] + 0.587 * c[1] + 0.114 * c[2]
+
+
+# ── Text ink colour (colour manga) ────────────────────────────────────────────
+INK_MIN_CHROMA = 40        # max(rgb)-min(rgb) below this = black / grey / white ink -> keep black/white logic
+INK_MIN_PIXELS = 30        # fewer text pixels than this: not enough to trust a colour
+INK_MIN_CONTRAST = 50      # |lum(ink) - lum(repainted bg)| below this -> unreadable, fall back to black/white
+INK_SPLIT_DIST = 80        # two ink clusters this far apart = fill + outline
+INK_BLEND_DIST = 45        # outline must be this far off the bg->fill line (else it is just anti-aliasing)
+
+
+def _sample_text_ink(crop_rgb: np.ndarray, text_mask: np.ndarray):
+    """Colour of the ORIGINAL lettering in one block: (fill_rgb, outline_rgb or None), or None
+    when the ink is achromatic (black / grey / white manga text keeps the black/white logic).
+
+    text_mask: the block's erase mask (glyphs + dilation, so it also holds some background).
+    Pixels far from the background colour are the ink; if they form two distinct colours
+    (e.g. yellow letters with a black rim) the one inside the eroded mask is the fill."""
+    m = text_mask > 0
+    if crop_rgb.size == 0 or m.shape != crop_rgb.shape[:2] or int(m.sum()) < INK_MIN_PIXELS:
+        return None
+    bg_px = crop_rgb[~m]
+    if bg_px.shape[0] < INK_MIN_PIXELS:
+        return None
+    bg = np.median(bg_px, axis=0).astype(np.float32)
+    px = crop_rgb[m].astype(np.float32)
+    dist = np.linalg.norm(px - bg, axis=1)
+    # ink = clearly away from the background; relative to the farthest ink so a dark rim
+    # around bright letters (both far from bg) is kept, anti-aliased edges are dropped
+    core_sel = dist >= max(40.0, 0.45 * float(np.percentile(dist, 95)))
+    core = px[core_sel]
+    if core.shape[0] < INK_MIN_PIXELS:
+        return None
+
+    fill, outline = np.median(core, axis=0), None
+    crit = (cv2.TERM_CRITERIA_EPS + cv2.TERM_CRITERIA_MAX_ITER, 20, 1.0)
+    _, labels, centers = cv2.kmeans(core, 2, None, crit, 3, cv2.KMEANS_PP_CENTERS)
+    labels = labels.ravel()
+    counts = np.bincount(labels, minlength=2)
+    if np.linalg.norm(centers[0] - centers[1]) >= INK_SPLIT_DIST and counts.min() >= INK_MIN_PIXELS // 2:
+        # fill = cluster deeper inside the strokes (larger distance to the mask edge);
+        # the outline sits on the edge
+        depth = cv2.distanceTransform(m.astype(np.uint8), cv2.DIST_L2, 3).ravel()[np.flatnonzero(m.ravel())[core_sel]]
+        f = int(np.argmax([float(depth[labels == k].mean()) for k in (0, 1)]))
+        cand_fill, cand_out = centers[f], centers[1 - f]
+        # an anti-aliased blend of fill and background lies on the bg->fill segment: not an outline
+        seg = cand_fill - bg
+        t = float(np.clip(np.dot(cand_out - bg, seg) / max(1e-6, float(np.dot(seg, seg))), 0.0, 1.0))
+        off_line = float(np.linalg.norm(cand_out - (bg + t * seg)))
+        if off_line >= INK_BLEND_DIST:
+            fill, outline = cand_fill, cand_out
+
+    fill_t = tuple(int(v) for v in np.clip(fill, 0, 255))
+    if max(fill_t) - min(fill_t) < INK_MIN_CHROMA:
+        return None
+    outline_t = tuple(int(v) for v in np.clip(outline, 0, 255)) if outline is not None else None
+    return fill_t, outline_t
+
+
+def _pick_text_colors(healed, box, block, style, fs):
+    """(fill, stroke_fill, stroke_width) for one translated block."""
+    px0, py0, px1, py1 = box
+    ink = style.get("ink")
+    if ink:
+        fill, outline = ink
+        bg = _sample_bg(healed, px0, py0, px1, py1)
+        if outline is not None or abs(_lum(fill) - _lum(bg)) >= INK_MIN_CONTRAST:
+            st_fill = outline if outline is not None else ("black" if _lum(fill) > 127 else "white")
+            st_width = max(1, int(fs / 14)) if (outline is not None or not style.get("clean_bg")) else 0
+            return fill, st_fill, st_width
+
+    orig_color = block.get("color", None)
+    if orig_color and isinstance(orig_color, (list, tuple)) and len(orig_color) == 3:
+        r = int(orig_color[0] * 255)
+        g = int(orig_color[1] * 255)
+        b_ch = int(orig_color[2] * 255)
+        if _lum((r, g, b_ch)) > 230:
+            fg = _contrast_color(_sample_bg(healed, px0, py0, px1, py1))
+        else:
+            fg = (r, g, b_ch)
+    else:
+        fg = _contrast_color(_sample_bg(healed, px0, py0, px1, py1))
+    st_fill = "black" if _lum(fg) > 127 else "white"
+    # Clean bubble: plain lettering like the original (an outline makes it look
+    # bold). Over artwork / tone: keep a thin rim for legibility.
+    st_width = 0 if style.get("clean_bg") else max(1, int(fs / 14))
+    return fg, st_fill, st_width
+
+
 def _wrap_cjk(text: str, font, max_w: int) -> list:
     """Wrap to `max_w`. A line break typed by the user (box editor) starts a new line."""
     paragraphs = [p for p in re.split(r"\r\n|\r|\n", text or "") if p.strip()]
@@ -1521,7 +1613,7 @@ def _merge_into(target: np.ndarray, x0: int, y0: int, x1: int, y1: int, mask: np
 
 # ── Main Renderer Class ────────────────────────────────────────────────────────
 # Bump whenever rendering output changes, so page JPEG caches from older logic are not reused.
-RENDER_CACHE_VERSION = "2026-09-29-lamafp32"
+RENDER_CACHE_VERSION = "2026-10-03-textink"
 
 
 class PDFLayoutRenderer:
@@ -1624,7 +1716,8 @@ class PDFLayoutRenderer:
 
             dx0, dy0, dx1, dy1 = _text_draw_box(seg_full, px0, py0, px1, py1)
             style = {"glyph_px": glyph_px, "clean_bg": not is_textured, "scale": scale,
-                     "orient": _source_orientation(seg_full, px0, py0, px1, py1)}
+                     "orient": _source_orientation(seg_full, px0, py0, px1, py1),
+                     "ink": _sample_text_ink(crop_rgb, target[py0:py1, px0:px1])}
             blocks_to_render.append((dx0, dy0, dx1, dy1, translated, block, style))
 
         if has_lama_masks:
@@ -1769,29 +1862,7 @@ class PDFLayoutRenderer:
             draw = ImageDraw.Draw(healed)
             for (px0, py0, bw, bh, translated, block, style, font, lines, fs, widths, top) in plans:
                 px1, py1 = px0 + bw, py0 + bh
-                orig_color = block.get("color", None)
-                if orig_color and isinstance(orig_color, (list, tuple)) and len(orig_color) == 3:
-                    r = int(orig_color[0] * 255)
-                    g = int(orig_color[1] * 255)
-                    b_ch = int(orig_color[2] * 255)
-                    lum = 0.299 * r + 0.587 * g + 0.114 * b_ch
-                    if lum > 230:
-                        bg = _sample_bg(healed, px0, py0, px1, py1)
-                        fg = _contrast_color(bg)
-                    else:
-                        fg = (r, g, b_ch)
-                else:
-                    bg = _sample_bg(healed, px0, py0, px1, py1)
-                    fg = _contrast_color(bg)
-
-                if isinstance(fg, tuple) and len(fg) == 3:
-                    fg_lum = 0.299 * fg[0] + 0.587 * fg[1] + 0.114 * fg[2]
-                else:
-                    fg_lum = 255 if fg == "white" else 0
-                st_fill = "black" if fg_lum > 127 else "white"
-                # Clean bubble: plain lettering like the original (an outline makes it look
-                # bold). Over artwork / tone: keep a thin rim for legibility.
-                st_width = 0 if style.get("clean_bg") else max(1, int(fs / 14))
+                fg, st_fill, st_width = _pick_text_colors(healed, (px0, py0, px1, py1), block, style, fs)
 
                 if style.get("vertical"):
                     _draw_vertical_text(healed, lines, font, fs, style["vleft"], top, fg, st_width, st_fill)
@@ -1919,7 +1990,8 @@ class PDFLayoutRenderer:
             mask_np[py0:py1, px0:px1] = np.maximum(mask_np[py0:py1, px0:px1], stroke_mask)
             dx0, dy0, dx1, dy1 = _text_draw_box(seg_full, px0, py0, px1, py1)
             style = {"glyph_px": glyph_px, "clean_bg": not is_textured, "scale": SCALE,
-                     "orient": _source_orientation(seg_full, px0, py0, px1, py1)}
+                     "orient": _source_orientation(seg_full, px0, py0, px1, py1),
+                     "ink": _sample_text_ink(crop_rgb, mask_np[py0:py1, px0:px1])}
             blocks_to_render.append((dx0, dy0, dx1, dy1, translated, block, style))
 
         # 3. Create Mask Overlay visualization (Hot magenta / crimson highlight on original image)

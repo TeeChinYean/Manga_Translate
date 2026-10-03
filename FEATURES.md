@@ -427,3 +427,11 @@
 - 实现要点：--no-mmap 只在环境变量 LLM_NO_MMAP=1 时加，RAG 自己启动不受影响。
 - 相关测试：tests/test_llm_evict.py::test_auto_launch_caps_llm_context、tests/test_low_bugs.py::test_job_end_keeps_ocr_and_lama_models；qwen_turbovec_rag/app/tests/test_llm_launcher.py::test_no_mmap_only_when_requested
 - 状态：Done
+
+### [Render] 彩色漫画：译文跟随原文字颜色
+- 说明：以前译文只会是黑字或白字（提取阶段把颜色写死成黑色）。现在从原图里取每个文字块的笔画颜色，彩色字（红色喊叫、黄字黑边等）译文也用同样颜色和描边。
+- 涉及文件/模块：pdf_translate/core/renderer.py（_sample_text_ink、_pick_text_colors、_build_masks / render_preview_images 的 style["ink"]）
+- 实现要点：在擦除 mask 内取离背景远的像素当墨色；k-means 分两色，离边缘更深的是填充色，另一色若不在「背景→填充色」连线上（不是抗锯齿过渡）就当描边色。彩度 < 40（黑/灰/白字）返回 None → 原来的黑白逻辑完全不变。墨色与重绘后背景亮度差 < 50 时退回黑白。RENDER_CACHE_VERSION 更新，旧页缓存不再复用。
+- 相关测试：tests/test_text_ink.py（10 项，已加入 pre-commit）
+- 状态：Done
+
